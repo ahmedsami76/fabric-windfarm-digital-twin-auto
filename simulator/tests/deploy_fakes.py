@@ -78,8 +78,9 @@ class World:
         self.closed_capacities: set = set()   # capacities a workspace cannot be put on by this person
         # Microsoft.Fabric in Azure: capacities by name as Azure has them, where a SKU is offered, names taken by others
         self.arm_capacities: dict = {}
-        self.fabric_offers = {"F16": ["Central US", "East US 2", "West US 2", "West Europe", "South Central US"],
-                              "F64": ["Central US"]}
+        self.fabric_offers = {"F8": ["West Europe"], "F64": ["Central US"],
+                              "F16": ["West Europe", "East US 2", "Central US", "West US 2", "South Central US"]}
+        self.skus_by_region = True            # the list of SKUs has one entry for each SKU and region, each with one region
         self.taken_capacity_names: set = set()
         self.fabric_quota = True
         self.capacity_state = "Active"        # the state a capacity is in right after it was made
@@ -217,8 +218,10 @@ class FakeAz:
             url = opt(args, "--url")
             w.fabric_calls.append(url.rsplit("/", 1)[-1])
             if url.endswith("/providers/Microsoft.Fabric/skus"):
-                sku = re.search(r"name=='(\w+)'", opt(args, "--query"))[1]
-                return w.fabric_offers.get(sku)
+                assert opt(args, "--query") == "value[].{name: name, locations: locations}"
+                if w.skus_by_region:
+                    return [{"name": sku, "locations": [place]} for sku, places in w.fabric_offers.items() for place in places]
+                return [{"name": sku, "locations": list(places)} for sku, places in w.fabric_offers.items()]
             if url.endswith("/checkNameAvailability"):
                 asked = json.loads(opt(args, "--body"))
                 assert asked["type"] == "Microsoft.Fabric/capacities"

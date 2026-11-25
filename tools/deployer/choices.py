@@ -173,14 +173,21 @@ def choose_new_capacity(ctx: Context, ask: Asker) -> bool:
             "yours, in the Azure portal (Microsoft Fabric, the capacity, Pause).")
     try:
         offered = fabric_sku_regions(ctx, NEW_CAPACITY_SKU)
+        if offered is None:
+            ask.say(f"  Azure's list of SKUs does not name {NEW_CAPACITY_SKU} for your subscription, so where one can be made could not "
+                    "be told. Azure decides when the capacity is requested.")
     except CloudError as error:
         offered = None
         ask.say(f"  Where your subscription is offered an {NEW_CAPACITY_SKU} could not be read ({str(error)[:120]}); preflight asks again.")
     if proposed and region_key(edge) != proposed:
         ask.say(f"  The edge is in {edge}. Microsoft's region table of {REGIONS_READ} lists no {' and no '.join(region_gaps(edge))} for "
                 f"a capacity there, so the runner proposes {region_name(proposed)}.")
+    def named() -> str:
+        return some([region_name(place) for place in offered], most=12)
+
     if proposed and offered is not None and proposed not in offered:
-        ask.say(f"  {NEW_CAPACITY_SKU} is not offered to your subscription in {region_name(proposed)}.")
+        ask.say(f"  Azure's list of SKUs does not name {region_name(proposed)} for an {NEW_CAPACITY_SKU} in your subscription. It "
+                f"names: {named()}.")
         proposed = None
     for _ in range(TRIES):
         answer = ask.line(f"  Region for the capacity, as Azure writes it (westus2, westeurope, ...) [{proposed or 'none'}] ")
@@ -189,16 +196,22 @@ def choose_new_capacity(ctx: Context, ask: Asker) -> bool:
             ask.say("  Please name a region.")
         elif region not in FABRIC_REGIONS:
             ask.say(f"  '{answer}' is not a region with all Fabric workloads in Microsoft's table of {REGIONS_READ}.")
-        elif offered is not None and region not in offered:
-            ask.say(f"  {NEW_CAPACITY_SKU} is not offered to your subscription in {region_name(region)}. It is offered in: "
-                    f"{some([region_name(place) for place in offered], most=12) or 'no region'}.")
-        elif region_gaps(region) and not ask.yes(f"Microsoft's table lists no {' and no '.join(region_gaps(region))} in "
-                                                 f"{region_name(region)}, which later phases of the demo use. Take it anyway?", False):
-            continue
         else:
+            # What Azure's list does not name is said, and left to the person: the list was misread once, and the request
+            # for the capacity is the second thing an apply makes, so a refusal by Azure costs nothing.
+            unlisted = offered is not None and region not in offered
+            if unlisted:
+                ask.say(f"  Azure's list of SKUs does not name {region_name(region)} for an {NEW_CAPACITY_SKU} in your subscription. "
+                        f"It names: {named()}.")
+                if not ask.yes(f"Take {region_name(region)} all the same, and let Azure decide when the capacity is requested?", False):
+                    continue
+            if region_gaps(region) and not ask.yes(f"Microsoft's table lists no {' and no '.join(region_gaps(region))} in "
+                                                   f"{region_name(region)}, which later phases of the demo use. Take it anyway?", False):
+                continue
             _set(ctx, FABRIC_CAPACITY_CREATE_SKU=NEW_CAPACITY_SKU, FABRIC_CAPACITY_NAME=capacity_name, FABRIC_CAPACITY_REGION=region,
                  FABRIC_CAPACITY_ID="")
             _record(ctx, "capacity", f"new {capacity_name} {NEW_CAPACITY_SKU} {region}")
+            _record(ctx, "capacity_region_unlisted", region if unlisted else "")
             return True
     raise Refused("No region for the new capacity after three answers. Nothing was changed in Azure or Fabric.")
 

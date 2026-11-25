@@ -1226,7 +1226,8 @@ def test_what_stands_in_the_way_of_a_new_capacity_is_said_before_anything_is_mad
     world.taken_capacity_names = set()
     world.fabric_offers["F16"] = ["West Europe", "East US 2"]
     text = bench.run("plan", ROLES)[1]
-    assert "F16 is not offered to this subscription in Central US. It is offered in: East US 2, West Europe." in text
+    assert re.search(r"pre\.capacity\s+BLOCKED", text) and "plan --ask" in text
+    assert "Azure's list of SKUs does not name Central US for an F16 in this subscription. It names: East US 2, West Europe." in text
     world.fabric_offers["F16"] = ["Central US", "South Central US"]
     world.account["user"]["name"] = "sami_contoso.com#EXT#@other.onmicrosoft.com"
     assert "a guest cannot be the administrator of a capacity" in bench.run("plan", ROLES)[1]
@@ -1359,9 +1360,11 @@ def test_with_a_new_capacity_the_workspace_is_new_too(bench):
 def test_the_region_of_the_edge_and_of_a_new_capacity_are_asked_and_checked(bench):
     world = bench.world
     # the edge by number, the capacity's region typed; a region without the SKU and one that is none are said and asked again
-    text = bench.run("plan", ROLES, answers=["4", "y", "westus", "narnia", "West Europe", NEW_WORKSPACE])[1]
+    text = bench.run("plan", ROLES, answers=["4", "y", "westus", "n", "narnia", "West Europe", NEW_WORKSPACE])[1]
     assert bench.cfg["LOCATION"] == "westus2" and bench.cfg["FABRIC_CAPACITY_REGION"] == "westeurope"
-    assert "F16 is not offered to your subscription in West US." in text and "'narnia' is not a region with all Fabric workloads" in text
+    assert "Azure's list of SKUs does not name West US for an F16 in your subscription. It names: Central US, East US 2, " in text
+    assert "Take West US all the same, and let Azure decide when the capacity is requested? [y/N] n" in text
+    assert "'narnia' is not a region with all Fabric workloads" in text and bench.state["choices"]["capacity_region_unlisted"]["answer"] == ""
     assert "so the runner proposes" not in text                       # West US 2 lacks nothing: proposed as it is
     assert "[westus2] westus" in text
     # asked again on request, by name; a region that lacks something of the demo needs a yes
@@ -1596,3 +1599,54 @@ def test_settings_in_config_never_replace_those_of_a_deployment_and_a_deleted_de
     shutil.rmtree(bench.root / ".deploy" / second)                          # the folder of the current one is thrown away
     code, text = bench.run("status")
     assert code == 0 and bench.suffix == first and f"Deployment {first}." in text
+
+
+# ------------------------------------------------------------------------------------------ where a new capacity can be made
+# 25 November 2026, 17:17, the first run of the questions on a tenant: "F16 is not offered to your subscription in Central US",
+# with a picture of his own F16, active, in Central US. The runner had read the first entry of Azure's list for the SKU.
+def test_every_entry_of_a_sku_is_read_whichever_way_azure_lists_them(bench):
+    world = bench.world
+    his_tenant(world)
+    assert world.skus_by_region and world.fabric_offers["F16"][0] != "Central US"     # one entry for each region, another one first
+    text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])[1]
+    assert bench.cfg["FABRIC_CAPACITY_REGION"] == "centralus" and "does not name" not in text and "[centralus] " in text
+    assert re.search(r"pre\.capacity\s+done", text) and "Azure's list of SKUs names the region for F16, and the name is free" in text
+    world.skus_by_region = False                                            # or one entry for a SKU, with all its regions
+    text = bench.run("plan", ROLES, "--ask", answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])[1]
+    assert bench.cfg["FABRIC_CAPACITY_REGION"] == "centralus" and "does not name" not in text and re.search(r"pre\.capacity\s+done", text)
+
+
+def test_a_list_that_does_not_name_the_sku_is_not_a_refusal_and_azure_decides(bench):
+    world = bench.world
+    his_tenant(world)
+    del world.fabric_offers["F16"]
+    text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])[1]
+    assert "Azure's list of SKUs does not name F16 for your subscription, so where one can be made could not be told." in text
+    assert bench.cfg["FABRIC_CAPACITY_REGION"] == "centralus" and re.search(r"pre\.capacity\s+NOT CHECKED", text)
+    assert "The request for the capacity decides, straight after the resource group" in text
+    digest = re.search(r"^Plan (\w+)$", text, re.M)[1]
+    bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY, "--confirm", SETTINGS)
+    assert list(world.arm_capacities) == [bench.cfg["FABRIC_CAPACITY_NAME"]]
+
+
+def test_a_region_the_list_does_not_name_is_said_with_the_list_and_left_to_the_person(bench):
+    world = bench.world
+    his_tenant(world)
+    world.fabric_offers["F16"] = ["West Europe", "East US 2"]
+    # Enter at a question that has no proposal left asks again; the region typed is taken only on a yes
+    text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", "centralus", "n", "centralus", "y", NEW_WORKSPACE])[1]
+    assert "Azure's list of SKUs does not name Central US for an F16 in your subscription. It names: East US 2, West Europe." in text
+    assert "[none] \n  Please name a region." in text
+    assert text.count("Take Central US all the same, and let Azure decide when the capacity is requested? [y/N]") == 2
+    assert bench.cfg["FABRIC_CAPACITY_REGION"] == "centralus" and bench.state["choices"]["capacity_region_unlisted"]["answer"] == "centralus"
+    assert re.search(r"pre\.capacity\s+NOT CHECKED", text) and "and you took the region all the same" in text
+    assert "if Azure refuses it, choose again: python3 tools/deploy.py plan --ask" in text
+    # the yes was for that region: another one written into the settings by hand is held to the list
+    names.write_env(bench.env, {"FABRIC_CAPACITY_REGION": "westus2"})
+    text = bench.run("plan", ROLES)[1]
+    assert re.search(r"pre\.capacity\s+BLOCKED", text) and "does not name West US 2 for an F16 in this subscription" in text
+    # and it ends with the next choice: a region the list names, then the first one by hand again
+    text = bench.run("plan", ROLES, "--ask", answers=[KEEP_REGION, "y", "westeurope", NEW_WORKSPACE])[1]
+    assert bench.cfg["FABRIC_CAPACITY_REGION"] == "westeurope" and re.search(r"pre\.capacity\s+done", text)
+    names.write_env(bench.env, {"FABRIC_CAPACITY_REGION": "centralus"})
+    assert re.search(r"pre\.capacity\s+BLOCKED", bench.run("plan", ROLES)[1])

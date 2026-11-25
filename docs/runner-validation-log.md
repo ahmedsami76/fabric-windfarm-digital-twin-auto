@@ -1,6 +1,6 @@
 # Deployment runner: validation log
 
-The record of `tools/deploy.py`, written while it was built on 25 November 2026. As in the other logs: **seen** means output or a screen was sent to me, **reported** means the user said so, **not run** means nobody has run it. Of the runner, `preflight` was seen on a tenant three times on 25 November; everything else of it on a tenant is **not run**.
+The record of `tools/deploy.py`, written while it was built on 25 November 2026. As in the other logs: **seen** means output or a screen was sent to me, **reported** means the user said so, **not run** means nobody has run it. Of the runner, `preflight` was seen on a tenant three times on 25 November, and the questions of `plan` once, up to the capacity; everything else of it on a tenant is **not run**.
 
 ## What was asked
 
@@ -35,6 +35,7 @@ On 25 November at 16:35, a few minutes after the fourth issue went out, the user
 | A new deployment in the same subscription takes over four things: the region of the edge, the VM sizes and their order, the shutdown hour, the Custom Locations object ID. Never a name, the capacity or the workspace (fifth issue) | The four are what a person settles once for a subscription, and the last is a lookup that needs a directory right. A capacity may be gone or paused by the next build and a workspace is the deployment's own, so those two are asked again. In another subscription nothing is taken over: none of it need hold there |
 | The runner offers a new deployment by itself only in a terminal, and only in two cases: signed in to another subscription, or the deployment's resource group is gone (fifth issue) | Both mean that going on with the current names leads nowhere, and both are what "the next build" looks like in practice: a new tenant, or a clean-up. Without a keyboard it starts nothing by itself, so a pipeline never changes its target because of what it found |
 | A script started by hand takes the file `ENV_FILE` names, then `config/demo.env`, then the current deployment's settings (fifth issue) | A deployment by hand in the same folder keeps working exactly as its guides say, and beside a deployment of the runner the same commands work without an option. The clean-up shows what it would remove before it removes anything, by name |
+| A region that Azure's list of SKUs does not name for a new capacity is said, with the list, and left to the person at the question; the plan then shows `NOT CHECKED` and the request for the capacity decides. Written into the settings by hand, without that yes, it blocks (sixth issue) | The runner read that list wrongly once and left a person at a question with no way on (R47, R49). The request is the second thing an apply makes, so letting Azure decide costs nothing, and making a capacity keeps its own approval. A pipeline, which cannot be asked, keeps the stricter rule |
 | What the runner could not read is shown as `NOT CHECKED`, never as `done` (third issue) | A step is not complete because a command returned, and a check is not made because it did not stop anything (R21) |
 
 ## Found while building
@@ -152,16 +153,38 @@ Open after that run:
 | R45 | Every folder under `.deploy/` is a deployment | A checkpoint whose settings are gone is not one: nothing says what its names were. A planted fault that counted it passed every test | The planted faults | The test for the move now has such a folder beside it |
 | R46 | The refusal for another tenant gives usable advice | It said to "start a new deployment in a new copy of the settings" | Reading every message that names the settings | It gives the command, `plan --new` |
 
+## Fourth run on a tenant: the first questions
+
+| When | Step | Result |
+|---|---|---|
+| 25 November 2026, 17:17 Houston | `plan` with the fifth issue, in a terminal, deployment 064 | **Seen**, pasted from the capacity question on, with a picture from the Azure portal. `The settings name a capacity that cannot be used: Premium Per User - Reserved (PP3, Central US) …`. `Fabric lists 2 for you, 1 of which can hold the demo.` `Create a new Fabric capacity for this demo (F16)? [y/N] y`. `A new capacity: fabwindfarm064, F16, in the demo's resource group rg-windfarm-edge-064, with you as its administrator.` The two lines on cost and on the proposal of Central US. Then `F16 is not offered to your subscription in Central US.`, `Region for the capacity, as Azure writes it (westus2, westeurope, ...) [none]`, and after Enter `Please name a region.` |
+| | The picture | `fabcentralussm01`, Fabric Capacity, resource group `fabric`, status Active, location Central US, **SKU F16**, subscription `ME-MngEnvMCAP866841-ahmedsami-1`: the same subscription runs an F16 in Central US. (At 15:40 Fabric listed this capacity as F32.) |
+| | Not in what was sent | The lines before the capacity question: whether the settings were moved to `.deploy/064/` with the line that says so, and the question about the region of the edge. Nothing after the last line |
+
+What that run proved: the questions are asked and answered in a real terminal; a capacity in the settings that cannot hold the demo is asked about again; deployment 064 went on under the fifth issue; the call to Fabric Capacities - List Skus answered on his workstation within its minute.
+
+Found through that run:
+
+| # | What I assumed | What is true | Source | Changed |
+|---|---|---|---|---|
+| R47 | The first entry of Azure's list for a SKU holds the regions of that SKU (`value[?name=='F16'].locations \| [0]`) | The runner said F16 is not offered in Central US, where the subscription runs one. What the list holds was not seen. The reference's sample has one region in every entry, so a SKU most likely stands in the list once for each region, and the runner read one region. The stand-in had answered with one entry holding every region, which is how I had imagined it; a planted fault at the fourth issue ("where the SKU is offered is ignored") was caught by a test built on the same imagination | The user's output and picture; Learn, "Fabric Capacities - List Skus", read again on 25 November | Every entry of the SKU is read and the regions are put together, compared without regard to the case of the name. The stand-in answers with one entry for each region, another region first, and a test runs both layouts |
+| R48 | A refusal needs only its verdict | `F16 is not offered … in Central US.` said nothing of where it is offered, so the output could not show what Azure had answered: one region, none, or a list without Central US | The same output | Every message that rests on the list prints the regions it names. A list that does not name the SKU at all is "Azure did not say": the question says so and goes on, and preflight shows `NOT CHECKED` |
+| R49 | When the runner's check says no, the question may insist | The check was wrong, the proposal was withdrawn, Enter got `Please name a region.`, and any region typed would have met the same wrong check: a person at a question with no way on but Ctrl+C | The same output | A region the list does not name is said with the list and can be taken on a yes; the plan shows it as `NOT CHECKED` and Azure decides at the request. The yes holds for that region only |
+
+Open after that run: what the list of SKUs holds for his subscription (one command, asked of him); everything after the capacity question.
+
 ## Checked
 
 | Check | Result |
 |---|---|
-| `pytest simulator/tests/test_deploy_runner.py` | 97 tests against `deploy_fakes.py` (48 at the first issue, 53 at the second, 73 at the third, 89 at the fourth) |
+| `pytest simulator/tests/test_deploy_runner.py` | 100 tests against `deploy_fakes.py` (48 at the first issue, 53 at the second, 73 at the third, 89 at the fourth, 97 at the fifth) |
 | 22 faults planted in the runner for the first issue, one at a time | 21 failed a test at once; one after the test was strengthened (R10) |
 | 28 faults planted for the third issue: in the capacity check, the words, the kept answers, the roles, the lock | Each failed a test at once |
 | 43 faults planted for the fourth issue: in the questions, the new capacity, the chosen workspace, the quota | 39 failed a test at once; 4 after the test was made to look at the right place (R35, and two assertions that matched other text) |
 | 45 faults planted for the fifth issue: 37 in the runner (which deployment a command works on, what a new one takes over, the move of old settings, whose plan an identifier is, what the scripts are handed), 8 in the scripts' search for their settings | 44 failed a test or a scenario at once; one after a test was made to look for it (R45). The two faults of the fourth issue whose code moved from `cli.py` to `deployments.py` were planted again, and caught |
+| 13 faults planted for the sixth issue: in the reading of the list of SKUs and the question about the region | Each failed a test at once |
 | The questions played through as text, for the tenant as it was at 15:40 | Read, and reworded twice |
+| His question of 17:17 played through with the list laid out three ways: one entry for each region, Central US missing, the SKU missing | Read: Central US is proposed and taken; the missing region is said with the list and taken on a yes; the missing SKU is said and left to Azure |
 | His folder as it is today (`config/demo.env` with the suffix 064 and a Premium Per User capacity in it, `.deploy/064/`), played through against the stand-ins, and a second build after it | The settings are moved once; the capacity is asked for again because the one in the settings cannot hold the demo; `--new` gives other names and leaves 064 as it was |
 | `bash tools/script-tests/run.sh` | 152 scenarios. 6 new at the fourth issue (144), for the app's workspace name, the command path created switched off, step 1 handed sizes that were checked, and step 1 told to ask nothing. 8 new at the fifth: the settings found through `.deploy/current`, `config/demo.env` before that, `ENV_FILE` before both, a current deployment without settings, `push` with the settings elsewhere, the clean-up and the two app scripts beside a deployment of the runner |
 | `python3 tools/build-deploy-gate.py --check`, `python3 tools/build-runner-docs.py --check` | The gate notebook and the table of steps are what their generators write |
@@ -170,7 +193,7 @@ Open after that run:
 
 ## Not run
 
-`plan`, `apply` and `status` on a tenant, and everything of the fourth and fifth issue. The twenty-two points of [15-deployment-runner.md](15-deployment-runner.md), "Unproven on a tenant", in the order a first run meets them.
+A plan to its end, `apply` and `status` on a tenant, and of the fourth to sixth issue everything but the first questions. The twenty-two points of [15-deployment-runner.md](15-deployment-runner.md), "Unproven on a tenant", in the order a first run meets them.
 
 ## Files
 
@@ -270,3 +293,15 @@ One new file and eighteen changed ones against the fourth issue; 272 files. They
 | `tools/script-tests/run.sh` | Eight scenarios more (152) |
 | `simulator/tests/test_deploy_runner.py`, `simulator/tests/deploy_fakes.py` | Eight tests more (97); the bench follows the current deployment; the pretend shell fails a script that is not handed the settings of its deployment |
 | `docs/15-deployment-runner.md`, `docs/runner-validation-log.md`, `README.md` | The section Deployments, the request of 16:35, findings R39 to R46; in the README also the count of all tests, which still said 88 |
+
+### Sixth issue, 25 November 2026, after the first questions on a tenant
+
+Seven files differ from the fifth issue; 272 files. They can be copied over a folder that holds the fifth issue; `.deploy/` stays as it is.
+
+| File | What changed |
+|---|---|
+| `tools/deployer/steps.py` | Azure's list of SKUs read whole (R47); a list without the SKU is `NOT CHECKED`; a region the list does not name blocks only without the person's yes, and the message carries the list (R48) |
+| `tools/deployer/choices.py` | The region question says what the list names, and asks whether to take a region it does not name (R49) |
+| `simulator/tests/test_deploy_runner.py`, `simulator/tests/deploy_fakes.py` | Three tests more (100); the pretend list of SKUs in both layouts, one entry for each region by default |
+| `docs/15-deployment-runner.md`, `docs/runner-validation-log.md`, `README.md` | The run of 17:17, findings R47 to R49 |
+

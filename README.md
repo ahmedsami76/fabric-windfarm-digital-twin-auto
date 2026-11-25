@@ -33,7 +33,7 @@ Nothing is filled in beforehand. The first plan starts a deployment: it draws th
 
 In a terminal, `plan` asks its questions itself: the region of the edge, a Fabric capacity that exists or a new F16, a new workspace or an existing empty one. Run the same `apply` again to resume: it looks before it does anything, and makes nothing twice. [docs/15-deployment-runner.md](docs/15-deployment-runner.md) has every step with who does it, the handoffs, and what has been proven where.
 
-**Of the runner, only `preflight` has run against Azure and Fabric** (25 November; what the runs found is in [docs/runner-validation-log.md](docs/runner-validation-log.md)). `plan` and `apply` have not. The runner was exercised against stand-ins: 97 tests, and 138 planted faults that the tests caught. The scripts and notebooks it starts ran on a tenant, started by hand. The guides remain the way to deploy by hand; the runner generates its own names, keeps its settings apart from the `config/demo.env` of a deployment by hand, and never works in what such a deployment made.
+**Of the runner, only `preflight` and the first questions of `plan` have run against Azure and Fabric** (25 November; what the runs found is in [docs/runner-validation-log.md](docs/runner-validation-log.md)). A plan to its end and `apply` have not. The runner was exercised against stand-ins: 100 tests, and 151 planted faults that the tests caught. The scripts and notebooks it starts ran on a tenant, started by hand. The guides remain the way to deploy by hand; the runner generates its own names, keeps its settings apart from the `config/demo.env` of a deployment by hand, and never works in what such a deployment made.
 
 What has not run on a tenant, besides the runner: step 6 of Phase 5c (the story through the agent with the record), the script route of Phase 5b's step 4 (the way by hand was used), the clean-up of the items of Phases 2 to 5 (scenario-tested), and the second build of the twin of Phase 5c (`455aa9777780`).
 
@@ -46,7 +46,7 @@ What has not run on a tenant, besides the runner: step 6 of Phase 5c (the story 
 | Notebooks 01 to 04 and the question bank | Run in local Spark sessions on the versions of both Fabric runtimes, and in Fabric in the second deployment, where the checks matched the guide (reported by the user) |
 | KQL added since the first run (`ActiveAlarms()`, four live questions) | Syntax-checked; a run in the Eventhouse is not confirmed |
 | `infra/vm.sh`, `infra/rebuild-env.sh` | 31 scenario tests against stand-in commands, and 4 for where a script finds its settings. Live: `run` works; `ssh` found no way in when the SSH rule had been removed, cause open |
-| `tools/deploy.py`, the deployment runner | 97 tests against a pretend Azure and Fabric; 138 planted faults, all caught. On a tenant: `preflight` only, on 25 November; what the runs found is corrected. **`plan` and `apply` have not run against Azure or Fabric.** [docs/15-deployment-runner.md](docs/15-deployment-runner.md) |
+| `tools/deploy.py`, the deployment runner | 100 tests against a pretend Azure and Fabric; 151 planted faults, all caught. On a tenant: `preflight`, and the questions of `plan` up to the capacity, on 25 November; what the runs found is corrected. **A plan to its end and `apply` have not run against Azure or Fabric.** [docs/15-deployment-runner.md](docs/15-deployment-runner.md) |
 | `infra/99-cleanup.sh` | 32 scenario tests. Run live once, in its first version: Fabric items and resource group removed; the uninstall step failed and now retries. Since 25 November `--fabric` also knows the items of Phases 2 to 5 (the notebooks 05 to 13, the semantic model, the report, the data agent, the ontology, the operations agent, the app, the command eventstream): scenario-tested, not run |
 | Checks added after the second deployment (object ID format, step 3 feature check, longer health wait in step 4, `ssh` falling back to `run`) | Scenario tests and ShellCheck; not yet run against Azure |
 | Phase 2: prepared views, model tables, semantic model, acceptance test, report | Deployed once, on 20 November 2026; three obstacles, all fixed. The user reported every step as done; the outputs of the acceptance test and of the report were not sent, so the measures and the report count as run, not as verified. See [docs/phase2-validation-log.md](docs/phase2-validation-log.md) |
@@ -118,7 +118,7 @@ In Fabric, the validation queries show WT-07's gearbox vibration and oil tempera
 ```bash
 cd simulator
 pip install -r requirements-dev.txt
-python -m pytest                                                              # 315 tests
+python -m pytest                                                              # 318 tests
 SITE_FILE=../data/reference/site.json SINK=stdout python -m windfarm_sim | head -n 20   # live messages
 python -m windfarm_sim.history --site ../data/reference/site.json --out /tmp/history    # two years of history as CSV
 cd .. && bash tools/script-tests/run.sh                                       # the shell scripts against stand-in commands

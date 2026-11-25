@@ -496,14 +496,26 @@ def arm_capacity(ctx) -> dict | None:
                                                              "--url-parameters", FABRIC_ARM, timeout=QUICK))
 
 
-def fabric_sku_regions(ctx, sku: str) -> set:
-    """The regions in which this subscription is offered a SKU for a new capacity (Fabric Capacities - List Skus)."""
+def fabric_sku_regions(ctx, sku: str) -> set | None:
+    """The regions Azure's list of SKUs names for a new capacity of this SKU (Fabric Capacities - List Skus).
+
+    Every entry of the SKU is read and their regions are put together: the reference's sample has one region in each
+    entry, so a SKU may stand in the list once for each region. (Up to the fifth issue only the first entry was read,
+    and on 25 November the runner told a person that F16 is not offered in the region where he runs one.)
+    None when the list does not name the SKU at all: Azure did not say, which is not the same as "nowhere"."""
     def ask():
-        found = ctx.az.json("rest", "--method", "get",
-                            "--url", f"https://management.azure.com/subscriptions/{account(ctx)['id']}/providers/Microsoft.Fabric/skus",
-                            "--url-parameters", FABRIC_ARM, "--query", f"value[?name=='{sku}'].locations | [0]", timeout=QUICK) or []
-        return {region_key(place) for place in found}
+        listed = ctx.az.json("rest", "--method", "get",
+                             "--url", f"https://management.azure.com/subscriptions/{account(ctx)['id']}/providers/Microsoft.Fabric/skus",
+                             "--url-parameters", FABRIC_ARM, "--query", "value[].{name: name, locations: locations}", timeout=QUICK) or []
+        places = {region_key(place) for entry in listed if str(entry.get("name") or "").upper() == sku.upper()
+                  for place in (entry.get("locations") or [])}
+        return places or None
     return ctx.remember(f"fabric_skus:{sku}", ask)
+
+
+def took_unlisted(ctx) -> str:
+    """The region for a new capacity that a person took although Azure's list of SKUs does not name it, or ''."""
+    return str(((ctx.state.data.get("choices") or {}).get("capacity_region_unlisted") or {}).get("answer") or "")
 
 
 def capacity_name_free(ctx, capacity_name: str, region: str) -> tuple[bool, str]:
@@ -542,11 +554,20 @@ def pre_new_capacity(ctx) -> Probe:
                        f"{region_name(new['region'])}, and the phases you chose use it.", f"Choose another region. {ASK}")
     later = [feature for feature in region_gaps(new["region"]) if feature not in missing]
     caution = f". For later phases: no {' and no '.join(later)} in that region, by Microsoft's table of {REGIONS_READ}" if later else ""
+    unsure = ""
     try:
         offered = fabric_sku_regions(ctx, new["sku"])
-        if new["region"] not in offered:
-            return blocked(f"{new['sku']} is not offered to this subscription in {region_name(new['region'])}. It is offered in: "
-                           f"{some([region_name(place) for place in offered], most=12) or 'no region'}.", f"Choose another region. {ASK}")
+        if offered is None:
+            unsure = (f"Azure's list of SKUs does not name {new['sku']} for this subscription, so whether it can be made in "
+                      f"{region_name(new['region'])} could not be told")
+        elif new["region"] not in offered:
+            named = some([region_name(place) for place in offered], most=12)
+            if took_unlisted(ctx) != new["region"]:
+                return blocked(f"Azure's list of SKUs does not name {region_name(new['region'])} for an {new['sku']} in this "
+                               f"subscription. It names: {named}.", f"Choose another region, or take this one all the same and "
+                               f"let Azure decide. {ASK}")
+            unsure = (f"Azure's list of SKUs does not name {region_name(new['region'])} for an {new['sku']} (it names: {named}), "
+                      "and you took the region all the same")
         if not (ctx.target("resource_group_id") and arm_capacity(ctx)):
             free, why = capacity_name_free(ctx, new["name"], new["region"])
             if not free:
@@ -555,7 +576,11 @@ def pre_new_capacity(ctx) -> Probe:
     except CloudError as error:
         return unverified(f"a new capacity will be made by p1.capacity: {label}. Whether {new['sku']} is offered there and the name "
                           f"is free could not be read ({str(error)[:140]}){caution}")
-    return done(f"a new capacity will be made by p1.capacity: {label}. {new['sku']} is offered there and the name is free{caution}")
+    if unsure:
+        return unverified(f"a new capacity will be made by p1.capacity: {label}. {unsure}. The request for the capacity decides, "
+                          f"straight after the resource group; if Azure refuses it, choose again: {ASK}{caution}")
+    return done(f"a new capacity will be made by p1.capacity: {label}. Azure's list of SKUs names the region for {new['sku']}, and "
+                f"the name is free{caution}")
 
 
 def p1_capacity(ctx) -> Probe:
