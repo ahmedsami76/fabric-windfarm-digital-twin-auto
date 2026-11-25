@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deploy_fakes import CONNECTION, KEY, FakeAz, FakeFabric, FakeKusto, FakeOneLake, FakeShell, World  # noqa: E402
-from deployer import cli, core, names, steps  # noqa: E402
+from deployer import cli, core, deployments, names, steps  # noqa: E402
 from deployer.cloud import CloudError, run_notebook  # noqa: E402
 
 ROLES, SETTINGS = "--approve-role-changes", "phase1.tenant_settings"
@@ -47,12 +47,25 @@ class Bench:
         az.token("https://api.fabric.microsoft.com")            # as the real adapters do before their first call
         return {"az": az, "fabric": FakeFabric(self.world), "kusto": self.kusto,
                 "shell": FakeShell(self.world, self.root, redact), "onelake": FakeOneLake(self.world),
-                "clock": lambda: self.now[0], "sleep": sleep, "wall": lambda: self.wall[0]}
+                "clock": lambda: self.now[0], "sleep": sleep, "wall": lambda: self.wall[0],
+                "ask": self.answer if self.answers is not None else None}
 
-    def run(self, *argv) -> tuple[int, str]:
-        out = io.StringIO()
-        code = cli.main(list(argv), out=out, root=self.root, adapters=self.adapters)
-        self.last = out.getvalue()
+    answers: list | None = None     # None: nobody at the terminal. A list: what a person types, question after question
+
+    def answer(self, prompt: str) -> str:
+        """A person at the terminal: the question is shown, the next scripted answer is typed."""
+        assert self.answers, f"the runner asked a question the test did not expect: {prompt}"
+        typed = self.answers.pop(0)
+        if typed in (EOFError, KeyboardInterrupt):
+            raise typed
+        self.out.write(f"{prompt}{typed}\n")
+        return typed
+
+    def run(self, *argv, answers=None) -> tuple[int, str]:
+        self.out, self.answers = io.StringIO(), (list(answers) if answers is not None else None)
+        code = cli.main(list(argv), out=self.out, root=self.root, adapters=self.adapters)
+        assert not self.answers, f"answers the runner never asked for: {self.answers}"
+        self.last, self.answers = self.out.getvalue(), None
         return code, self.last
 
     def plan(self, *options) -> str:
@@ -66,18 +79,26 @@ class Bench:
         return self.run("apply", "--approve", digest, *options, *extra)
 
     @property
+    def suffix(self) -> str:
+        """The deployment commands work on now."""
+        return deployments.current(self.root)
+
+    @property
+    def env(self) -> Path:
+        return deployments.env_of(self.root, self.suffix)
+
+    @property
     def cfg(self) -> dict:
-        return names.read_env(self.root / "config" / "demo.env")
+        return names.read_env(self.env)
 
     @property
     def state(self) -> dict:
-        folder = self.root / ".deploy" / self.cfg["DEPLOYMENT_SUFFIX"]
-        return json.loads((folder / "state.json").read_text())
+        return json.loads((self.root / ".deploy" / self.suffix / "state.json").read_text())
 
     def everything_written(self) -> str:
         """All the runner left behind on disk and said: where a secret would show."""
         texts = [self.last]
-        for path in list((self.root / ".deploy").rglob("*")) + [self.root / "config" / "demo.env"]:
+        for path in list((self.root / ".deploy").rglob("*")):
             if path.is_file():
                 texts.append(path.read_text())
         return "\n".join(texts)
@@ -201,10 +222,13 @@ def test_the_schedule_starts_in_the_future_so_that_fabric_does_not_run_the_job_a
 
 
 # ------------------------------------------------------------------------------------------ the wrong target
-def test_a_settings_file_of_a_deployment_made_by_hand_is_refused(bench):
-    shutil.copy(bench.root / "config" / "demo.env.example", bench.root / "config" / "demo.env")
+def test_a_settings_file_of_a_deployment_made_by_hand_is_left_alone_and_not_used(bench):
+    by_hand = Path(bench.root, "config", "demo.env")
+    shutil.copy(bench.root / "config" / "demo.env.example", by_hand)
+    before = by_hand.read_bytes()
     code, text = bench.run("plan")
-    assert code == core.EXIT_REFUSED and "made by hand" in text and bench.world.writes == []
+    assert code == 0 and by_hand.read_bytes() == before and "Moved config/demo.env" not in text
+    assert bench.cfg["RESOURCE_GROUP"] == f"rg-windfarm-edge-{bench.suffix}" and bench.world.writes == []
 
 
 def test_a_resource_group_or_a_workspace_the_runner_did_not_make_is_never_used(bench):
@@ -212,7 +236,7 @@ def test_a_resource_group_or_a_workspace_the_runner_did_not_make_is_never_used(b
     cfg, world = bench.cfg, bench.world
     world.groups[cfg["RESOURCE_GROUP"]] = {"id": "/subscriptions/sub-1111/resourceGroups/x", "name": cfg["RESOURCE_GROUP"], "location": "eastus", "tags": {}}
     code, text = bench.apply(ROLES, confirm=[SETTINGS])
-    assert code == core.EXIT_BLOCKED and "this deployment did not make it" in text and "--new-names" in text and world.writes == []
+    assert code == core.EXIT_BLOCKED and "this deployment did not make it" in text and "plan --new" in text and world.writes == []
     del world.groups[cfg["RESOURCE_GROUP"]]
     world.workspaces.append({"id": "ws-someone", "displayName": cfg["FABRIC_WORKSPACE_NAME"], "description": "Sales", "capacityId": "cap-0001"})
     code, text = bench.apply(ROLES)
@@ -224,7 +248,8 @@ def test_another_subscription_or_tenant_after_the_start_is_refused(deployed):
     writes = list(deployed.world.writes)
     deployed.world.account = dict(deployed.world.account, id="sub-2222", name="Production")
     code, text = deployed.run("plan", ROLES)
-    assert code == core.EXIT_REFUSED and "began in subscription sub-1111" in text
+    assert code == core.EXIT_REFUSED and f"Deployment {deployed.suffix} is in subscription sub-1111. The Azure CLI is on Production (sub-2222)" in text
+    assert "python3 tools/deploy.py plan --new" in text and deployed.run("apply", "--approve", "x", ROLES)[0] != 0
     deployed.world.account = dict(deployed.world.account, id="sub-1111", tenantId="tenant-bbbb")
     code, text = deployed.run("apply", "--approve", "x", ROLES)
     assert code == core.EXIT_REFUSED and "began in tenant tenant-aaaa" in text and deployed.world.writes == writes
@@ -243,9 +268,11 @@ def test_things_that_are_not_the_demos_stop_the_runner_until_they_are_named(depl
     assert code == 0, text
 
 
-def test_new_names_are_refused_once_something_exists(deployed):
-    code, text = deployed.run("plan", "--new-names")
-    assert code == core.EXIT_REFUSED and "has created resources" in text
+def test_a_new_deployment_goes_with_a_plan_and_names_one_that_exists_or_is_refused(deployed):
+    assert "--new goes with preflight or plan" in deployed.run("apply", "--approve", "x", ROLES, "--new")[1]
+    assert "Give one of them" in deployed.run("plan", "--new", "--deployment", deployed.suffix)[1]
+    code, text = deployed.run("status", "--deployment", "zzz")
+    assert code == core.EXIT_REFUSED and "This folder has no deployment zzz" in text and f"{deployed.suffix}: subscription sub-1111" in text
 
 
 # ------------------------------------------------------------------------------------------ interruption and resume
@@ -733,16 +760,16 @@ def test_a_workspace_moved_to_another_capacity_stops_the_runner(deployed):
     assert deployed.run("apply", "--approve", re.search(r"^Plan (\w+)$", text, re.M)[1], ROLES)[0] == core.EXIT_BLOCKED
 
 
-def test_new_names_before_anything_exists_change_every_generated_name_together(bench):
+def test_a_new_deployment_gets_every_generated_name_anew_and_together(bench):
     bench.plan()
     first = bench.cfg
-    code, text = bench.run("plan", "--new-names")
+    code, text = bench.run("plan", "--new")
     second = bench.cfg
     assert code == 0 and second["DEPLOYMENT_SUFFIX"] != first["DEPLOYMENT_SUFFIX"]
     assert second["RESOURCE_GROUP"].endswith(second["DEPLOYMENT_SUFFIX"]) and second["STORAGE_ACCOUNT_NAME"] == "sawindfarm" + second["DEPLOYMENT_SUFFIX"]
     assert second["SUBSCRIPTION_ID"] == first["SUBSCRIPTION_ID"] and bench.world.writes == []
     # a name edited by hand is refused: the names of a deployment go together
-    names.write_env(bench.root / "config" / "demo.env", {"VM_NAME": "my-own-vm"})
+    names.write_env(bench.env, {"VM_NAME": "my-own-vm"})
     code, text = bench.run("plan")
     assert code == core.EXIT_REFUSED and "VM_NAME no longer carry the suffix" in text
 
@@ -879,7 +906,7 @@ def as_on_the_tenant(world) -> None:
 
 
 def set_capacity(bench, value: str) -> None:
-    names.write_env(bench.root / "config" / "demo.env", {"FABRIC_CAPACITY_ID": value})
+    names.write_env(bench.env, {"FABRIC_CAPACITY_ID": value})
 
 
 def test_a_capacity_that_cannot_hold_fabric_items_is_never_chosen_and_never_accepted(bench):
@@ -1028,7 +1055,7 @@ def test_a_question_that_stood_without_an_answer_is_not_asked_again_by_every_run
     slow_line.run("preflight")
     assert Unanswered.asked == ["roles", "sizes"]
     text = slow_line.run("plan", ROLES)[1]
-    assert Unanswered.asked == ["roles", "sizes"] and text.count("--recheck asks again]") == 3      # and the providers
+    assert Unanswered.asked == ["roles", "sizes"] and text.count("--recheck asks again]") == 4      # and the providers and the quota
     assert re.search(r"pre\.region\s+NOT CHECKED", text)                # kept as what it was, not promoted
     assert slow_line.apply(ROLES, confirm=[SETTINGS])[0] == 0 and Unanswered.asked == ["roles", "sizes"]
     # asked again: on request, after twelve hours, and when what the answer depends on has changed
@@ -1050,7 +1077,7 @@ def test_a_kept_answer_is_for_the_settings_it_was_read_with_and_a_block_is_never
     asked = world.sku_calls
     bench.run("preflight")
     assert world.sku_calls == asked
-    names.write_env(bench.root / "config" / "demo.env", {"VM_SIZE": "Standard_D8s_v7 Standard_D8s_v6"})
+    names.write_env(bench.env, {"VM_SIZE": "Standard_D8s_v7 Standard_D8s_v6"})
     text = bench.run("preflight")[1]
     assert world.sku_calls == asked + 1 and "VM size Standard_D8s_v7 is offered" in text
     # the sizes that were read reach the script from the checkpoint, without another question
@@ -1070,3 +1097,502 @@ def test_a_plan_made_while_an_apply_runs_reads_the_checkpoint_and_writes_nothing
     (folder / "apply.lock").write_text(json.dumps({"pid": 2 ** 22 + 12345, "host": socket.gethostname(), "started": "x"}))
     text = deployed.run("plan", ROLES, "--recheck")[1]
     assert "An apply is running" not in text and (folder / "state.json").read_bytes() != before
+
+
+# ------------------------------------------------------------------------------------------ after the run of 25 November, 15:40
+def test_a_gate_the_runner_measures_is_not_shown_as_the_operators_step(bench):
+    """A first plan showed `p1.gate_telemetry  YOUR STEP ... > See the plan line above.`: nothing for a person to do, and counted as theirs."""
+    text = bench.run("plan", ROLES)[1]
+    assert re.search(r"p1\.gate_telemetry\s+will be measured\s+GATE: fresh telemetry in the Eventhouse", text)
+    assert "See the plan line above" not in text and not re.search(r"p1\.gate_telemetry\s+YOUR STEP", text)
+    assert " 1 for you," in text                                        # the tenant settings, and nothing else
+    # when it is measured and nothing arrives, the block still says where to look
+    bench.world.ingestion_works = False
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == core.EXIT_BLOCKED and "blocked  p1.gate_telemetry" in text and "Find where the events stop" in text
+
+
+def test_phase_3_sends_an_unusable_capacity_back_to_the_choice_not_to_a_move(bench):
+    """The run of 15:40 told a person with no workspace yet to move the workspace to another capacity."""
+    as_on_the_tenant(bench.world)
+    bench.plan()
+    set_capacity(bench, PPU["id"])
+    text = bench.run("preflight", "--up-to", "phase3")[1]
+    after = text.split("p3.capacity")[2]
+    assert "the step pre.capacity lists them" in after.split("phase3.tenant_settings")[0] and "Moving a workspace" not in after
+
+
+# ------------------------------------------------------------------------------------------ the questions of plan
+# 25 November 2026, 15:51: "instead of running sed command ... ask: would you like to create a new fabric capacity or use
+# one of the existing ones ... enumerate all the existing capacities, and ask the user to pick one - next workspace - do
+# the same - etc". Answers are what a person types; "" is Enter.
+F32 = {"id": "d21d9da9-0000-0000-0000-0000000000f3", "displayName": "fabcentralussm01", "sku": "F32", "region": "Central US",
+       "state": "Active"}
+KEEP_REGION, NEW_WORKSPACE = "", ""
+APPROVE_CAPACITY = "--approve-capacity-creation"
+
+
+def his_tenant(world) -> None:
+    """15:40: an F32 and a Premium Per User capacity listed; the workspace of the deployment by hand on the F32, with items."""
+    world.capacities = [dict(F32), dict(PPU)]
+    world.workspaces = [{"id": "ws-by-hand", "displayName": "WindFarmDigitalTwin", "description": "", "capacityId": F32["id"],
+                         "type": "Workspace"}]
+    world.items["ws-by-hand"] = [{"id": "item-1", "type": "Eventhouse", "displayName": "WindFarmEH"}]
+
+
+def test_in_a_terminal_plan_asks_which_capacity_and_takes_the_one_picked(bench):
+    his_tenant(bench.world)
+    bench.run("preflight")                                   # nobody at the terminal: nothing is asked, as before
+    set_capacity(bench, PPU["id"])                           # what the second issue left in his settings
+    code, text = bench.run("plan", ROLES, answers=[KEEP_REGION, "n", "", NEW_WORKSPACE])
+    assert code == 0 and bench.cfg["FABRIC_CAPACITY_ID"] == F32["id"] and bench.cfg["FABRIC_CAPACITY_CREATE_SKU"] == ""
+    assert "The settings name a capacity that cannot be used: Premium Per User - Reserved (PP3, Central US) cannot hold the demo" in text
+    assert "Create a new Fabric capacity for this demo (F16)? [y/N] n" in text
+    assert f"    1. fabcentralussm01 (F32, Central US)   {F32['id']}" in text
+    assert "    -  Premium Per User - Reserved (PP3, Central US): cannot hold the demo" in text
+    assert "Chosen: edge in southcentralus; capacity fabcentralussm01 (F32, Central US); workspace " in text
+    assert re.search(r"pre\.capacity\s+done", text) and f"capacity        fabcentralussm01 (F32, Central US)  {F32['id']}" in text
+    made = bench.state["choices"]
+    assert made["capacity"]["answer"] == f"existing {F32['id']}" and made["capacity"]["by"] == "sami@contoso.example"
+    assert set(made) == {"region", "capacity", "workspace"}
+    digest = re.search(r"^Plan (\w+)$", text, re.M)[1]
+    assert f"  python3 tools/deploy.py apply --approve {digest} --approve-role-changes\n" in text
+    assert "Add --confirm phase1.tenant_settings when that step of yours is done." in text
+    # asked once: the next plan asks nothing and is the same plan
+    assert f"Plan {digest}" in bench.run("plan", ROLES, answers=[])[1]
+    # an answer that no longer holds is asked for again, and only that one
+    set_capacity(bench, PPU["id"])
+    asked = bench.run("plan", ROLES, answers=["n", "1"])[1].split("Looking at")[0]
+    assert bench.cfg["FABRIC_CAPACITY_ID"] == F32["id"] and "Azure region of the edge" not in asked and "Fabric workspace" not in asked
+    assert bench.world.writes == []
+
+
+def test_a_new_capacity_is_made_only_when_chosen_and_approved_and_only_once(bench):
+    world = bench.world
+    his_tenant(world)
+    code, text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])
+    suffix = bench.cfg["DEPLOYMENT_SUFFIX"]
+    name = f"fabwindfarm{suffix}"
+    assert (bench.cfg["FABRIC_CAPACITY_CREATE_SKU"], bench.cfg["FABRIC_CAPACITY_NAME"], bench.cfg["FABRIC_CAPACITY_REGION"],
+            bench.cfg["FABRIC_CAPACITY_ID"]) == ("F16", name, "centralus", "")
+    assert f"A new capacity: {name}, F16, in the demo's resource group rg-windfarm-edge-{suffix}, with you as its administrator." in text
+    assert "It costs money for as long as it runs. The runner makes it and never pauses, resizes or deletes it" in text
+    assert "lists no Operations agent for a capacity there, so the runner proposes Central US" in text
+    assert f"capacity        {name} (F16, Central US), to be made in rg-windfarm-edge-{suffix}: it costs money while it runs" in text
+    assert re.search(r"p1\.capacity\s+will run", text) and "9 resource providers registered" in text
+    digest = re.search(r"^Plan (\w+)$", text, re.M)[1]
+    assert f"apply --approve {digest} --approve-role-changes {APPROVE_CAPACITY}\n" in text       # the yes approved it for this plan
+    # Phase 3 reads the capacity that is to be made as what it will be: a paid one
+    assert re.search(r"p3\.capacity\s+done\s+A paid capacity for the agents\n\s+capacity SKU F16, a paid capacity",
+                     bench.run("plan", ROLES, "--up-to", "phase3", answers=[])[1])
+    # a later plan without the option: the answer is kept, the approval is not
+    code, later = bench.run("plan", ROLES, answers=[])
+    assert re.search(r"p1\.capacity\s+needs approval", later) and "Add --approve-capacity-creation to plan and apply" in later
+    unapproved = re.search(r"^Plan (\w+)$", later, re.M)[1]
+    code, text = bench.run("apply", "--approve", unapproved, ROLES, "--confirm", SETTINGS)
+    assert code == core.EXIT_BLOCKED and "blocked  p1.capacity" in text and world.arm_capacities == {} and world.vm is None
+    # approved: one capacity, in the demo's resource group, marked as this deployment's, with the operator as administrator
+    code, text = bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY)
+    assert code == 0, text
+    made = world.arm_capacities[name]
+    assert made["location"] == "centralus" and made["sku"] == {"name": "F16", "tier": "Fabric"}
+    assert made["tags"]["windfarm-demo-deployment"] == suffix and f"/resourceGroups/rg-windfarm-edge-{suffix}/" in made["id"]
+    listed = next(entry for entry in world.capacities if entry["displayName"] == name)
+    assert bench.cfg["FABRIC_CAPACITY_ID"] == listed["id"]
+    workspace = next(entry for entry in world.workspaces if entry["displayName"] == bench.cfg["FABRIC_WORKSPACE_NAME"])
+    assert workspace["capacityId"] == listed["id"]
+    assert [row for row in world.writes if "Microsoft.Fabric/capacities" in row] == [f"az rest PUT Microsoft.Fabric/capacities/{name} F16 centralus"]
+    assert world.writes.index(f"az rest PUT Microsoft.Fabric/capacities/{name} F16 centralus") == 1      # before the VM: a refusal costs nothing
+    # the same approval still holds now that the capacity exists, and a second apply makes nothing
+    writes = list(world.writes)
+    code, text = bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY)
+    assert code == 0 and world.writes == writes and f"capacity        {name} (F16, Central US), made by this deployment  {listed['id']}" in text
+    # the capacity is paused later: said, and not resumed
+    made["properties"]["state"] = listed["state"] = "Paused"
+    text = bench.run("plan", ROLES, APPROVE_CAPACITY)[1]
+    assert re.search(r"p1\.capacity\s+BLOCKED", text) and "The runner does not resume a capacity" in text and world.writes == writes
+
+
+def test_what_stands_in_the_way_of_a_new_capacity_is_said_before_anything_is_made(bench):
+    world = bench.world
+    his_tenant(world)
+    world.unregistered = {"Microsoft.Fabric"}
+    text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])[1]
+    assert re.search(r"pre\.providers\s+BLOCKED", text) and "az provider register --namespace Microsoft.Fabric" in text
+    world.unregistered = set()
+    world.taken_capacity_names = {bench.cfg["FABRIC_CAPACITY_NAME"]}
+    text = bench.run("plan", ROLES)[1]
+    assert re.search(r"pre\.capacity\s+BLOCKED", text) and "cannot be used (AlreadyExists)" in text and "plan --new" in text
+    world.taken_capacity_names = set()
+    world.fabric_offers["F16"] = ["West Europe", "East US 2"]
+    text = bench.run("plan", ROLES)[1]
+    assert "F16 is not offered to this subscription in Central US. It is offered in: East US 2, West Europe." in text
+    world.fabric_offers["F16"] = ["Central US", "South Central US"]
+    world.account["user"]["name"] = "sami_contoso.com#EXT#@other.onmicrosoft.com"
+    assert "a guest cannot be the administrator of a capacity" in bench.run("plan", ROLES)[1]
+    world.account["user"]["name"] = "sami@contoso.example"
+    # a region that lacks what a later phase uses: a caution for Phase 1, a block once that phase is asked for
+    names.write_env(bench.env, {"FABRIC_CAPACITY_REGION": "southcentralus"})
+    text = bench.run("plan", ROLES)[1]
+    assert re.search(r"pre\.capacity\s+done", text) and "For later phases: no Operations agent in that region" in text
+    text = bench.run("plan", ROLES, "--up-to", "phase3")[1]
+    assert re.search(r"pre\.capacity\s+BLOCKED", text) and "lists no Operations agent for a capacity in South Central US" in text
+    # the question cannot be asked: not checked, never done
+    names.write_env(bench.env, {"FABRIC_CAPACITY_REGION": "centralus"})
+    real = bench.adapters
+
+    class NoFabricProvider(FakeAz):
+        def maybe(self, *args, timeout=0):
+            if args[:1] == ("rest",) and "Microsoft.Fabric/skus" in " ".join(args):
+                raise CloudError("az rest --method get did not answer within 60 seconds.")
+            return super().maybe(*args, timeout=timeout)
+    bench.adapters = lambda redact: dict(real(redact), az=NoFabricProvider(world, redact))
+    text = bench.run("plan", ROLES)[1]
+    assert re.search(r"pre\.capacity\s+NOT CHECKED", text) and "could not be read" in text
+    assert world.writes == [] and world.arm_capacities == {}
+
+
+def new_capacity_plan(bench) -> str:
+    his_tenant(bench.world)
+    text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])[1]
+    return re.search(r"^Plan (\w+)$", text, re.M)[1]
+
+
+def test_no_quota_and_a_capacity_that_is_not_ours_stop_the_step_before_the_vm(bench):
+    world = bench.world
+    digest = new_capacity_plan(bench)
+    world.fabric_quota = False
+    code, text = bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY, "--confirm", SETTINGS)
+    assert code == core.EXIT_BLOCKED and "blocked  p1.capacity" in text and "Quotas, Microsoft Fabric, New Quota Request" in text
+    assert world.vm is None and world.arm_capacities == {}
+    # somebody made a capacity of that name in the group meanwhile: not taken over
+    name, group = bench.cfg["FABRIC_CAPACITY_NAME"], bench.cfg["RESOURCE_GROUP"]
+    world.fabric_quota = True
+    world.arm_capacities[name] = {"id": f"{world.groups[group]['id']}/providers/Microsoft.Fabric/capacities/{name}", "name": name,
+                                  "tags": {}, "properties": {"provisioningState": "Succeeded", "state": "Active"}}
+    code, text = bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY)
+    assert code == core.EXIT_BLOCKED and "this deployment did not make it" in text and world.vm is None
+
+
+def test_a_capacity_azure_is_still_making_is_waited_for_and_not_made_twice(bench):
+    world = bench.world
+    digest = new_capacity_plan(bench)
+    world.capacity_state = "Provisioning"
+    code, text = bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY, "--confirm", SETTINGS)
+    assert code == core.EXIT_RUNNING and "Azure is still making the capacity" in text and "Run the same apply again later" in text
+    assert bench.now[0] >= 900 and world.vm is None
+    made = world.arm_capacities[bench.cfg["FABRIC_CAPACITY_NAME"]]
+    # still not ready: the second apply waits for the same capacity; the stand-in fails the test on a second request
+    assert bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY)[0] == core.EXIT_RUNNING
+    made["properties"]["state"] = "Active"
+    code, text = bench.run("apply", "--approve", digest, ROLES, APPROVE_CAPACITY)
+    assert code == 0, text
+    assert len([row for row in world.writes if "Microsoft.Fabric/capacities" in row]) == 1
+
+
+def some_workspaces(world) -> None:
+    world.workspaces = [
+        {"id": "ws-busy", "displayName": "Busy", "description": "", "capacityId": "cap-0001", "type": "Workspace"},
+        {"id": "ws-free", "displayName": "Sandbox-1", "description": "", "capacityId": "cap-0001", "type": "Workspace"},
+        {"id": "ws-space", "displayName": "Has Space", "description": "", "capacityId": "cap-0001", "type": "Workspace"},
+        {"id": "ws-other", "displayName": "Elsewhere", "description": "", "capacityId": "cap-0009", "type": "Workspace"},
+        {"id": "ws-mine", "displayName": "My workspace", "description": "", "type": "Personal"}]
+    world.items["ws-busy"] = [{"id": "r1", "type": "Report", "displayName": "Sales"}, {"id": "r2", "type": "Lakehouse", "displayName": "Bronze"}]
+    world.capacities.append({"id": "cap-0009", "displayName": "other", "sku": "F8", "region": "West US 2", "state": "Active"})
+
+
+def test_an_existing_workspace_is_taken_only_when_it_is_empty_and_on_the_chosen_capacity(bench):
+    world = bench.world
+    some_workspaces(world)
+    code, text = bench.run("plan", ROLES, answers=[KEEP_REGION, "n", "1", "n", "1", "2"])
+    assert "    1. Busy\n" in text and "    2. Sandbox-1\n" in text and "(1 more are on other capacities.)" in text
+    assert "    -  Has Space: its name has characters the app's configuration does not take" in text and "My workspace" not in text
+    assert "Busy holds 2 items (Bronze, Sales). The runner starts only in a workspace that is empty" in text
+    assert (bench.cfg["FABRIC_WORKSPACE_NAME"], bench.cfg["FABRIC_WORKSPACE_ID"]) == ("Sandbox-1", "ws-free")
+    assert "workspace       Sandbox-1  (ws-free, an existing empty one you chose)" in text
+    assert re.search(r"p1\.workspace\s+will run", text) and "is empty; apply takes it into this deployment" not in text.split("p1.workspace")[0]
+    digest = re.search(r"^Plan (\w+)$", text, re.M)[1]
+    # somebody puts an item into it before the apply: not taken
+    world.items["ws-free"] = [{"id": "x1", "type": "Notebook", "displayName": "scratch"}]
+    code, text = bench.run("apply", "--approve", digest, ROLES, "--confirm", SETTINGS)
+    assert code == core.EXIT_BLOCKED and "blocked  p1.workspace" in text and "holds 1 items (scratch)" in text
+    world.items["ws-free"] = []
+    code, text = bench.run("apply", "--approve", digest, ROLES)
+    assert code == 0, text
+    assert len(world.workspaces) == 5 and not [row for row in world.writes if row.startswith("POST workspaces ")]     # none was made
+    assert world.find("ws-free", "Eventhouse", "WindFarmEH") and world.find("ws-free", "Lakehouse", "WindFarmLH")
+    assert bench.state["target"]["workspace_id"] == "ws-free" and bench.state["target"]["workspace_chosen"] is True
+    assert "the workspace you chose" in bench.run("plan", ROLES)[1]
+    # a deployment stays in its workspace
+    names.write_env(bench.env, {"FABRIC_WORKSPACE_ID": "ws-busy", "FABRIC_WORKSPACE_NAME": "Busy"})
+    assert "A deployment stays in its workspace" in bench.run("plan", ROLES)[1]
+
+
+def test_a_workspace_named_by_hand_is_held_to_the_same_rules(bench):
+    world = bench.world
+    some_workspaces(world)
+    bench.plan()
+    env = bench.env
+    names.write_env(env, {"FABRIC_CAPACITY_ID": "cap-0001"})
+    names.write_env(env, {"FABRIC_WORKSPACE_ID": "ws-other", "FABRIC_WORKSPACE_NAME": "Elsewhere"})
+    text = bench.run("plan", ROLES)[1]
+    assert re.search(r"p1\.workspace\s+BLOCKED", text) and "A workspace stays on its capacity: the runner moves none" in text
+    names.write_env(env, {"FABRIC_WORKSPACE_ID": "ws-free", "FABRIC_WORKSPACE_NAME": "Sandbox-9"})
+    assert "is now named Sandbox-1; the settings say Sandbox-9" in bench.run("plan", ROLES)[1]
+    names.write_env(env, {"FABRIC_WORKSPACE_ID": "ws-gone", "FABRIC_WORKSPACE_NAME": "Gone"})
+    assert "is not among the workspaces you can open" in bench.run("plan", ROLES)[1]
+    names.write_env(env, {"FABRIC_WORKSPACE_ID": "ws-busy", "FABRIC_WORKSPACE_NAME": "Busy"})
+    assert "holds 2 items (Bronze, Sales)" in bench.run("plan", ROLES)[1]
+    # without an ID a name that is not the generated one is refused, as before
+    names.write_env(env, {"FABRIC_WORKSPACE_ID": "", "FABRIC_WORKSPACE_NAME": "Busy"})
+    code, text = bench.run("plan", ROLES)
+    assert code == core.EXIT_REFUSED and "no longer carry the suffix" in text and world.writes == []
+
+
+def test_with_a_new_capacity_the_workspace_is_new_too(bench):
+    some_workspaces(bench.world)
+    text = bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", "n"])[1]
+    assert "With a new capacity the workspace is new too" in text
+    assert bench.cfg["FABRIC_WORKSPACE_NAME"] == f"WindFarmDigitalTwin-{bench.cfg['DEPLOYMENT_SUFFIX']}" and bench.cfg["FABRIC_WORKSPACE_ID"] == ""
+
+
+def test_the_region_of_the_edge_and_of_a_new_capacity_are_asked_and_checked(bench):
+    world = bench.world
+    # the edge by number, the capacity's region typed; a region without the SKU and one that is none are said and asked again
+    text = bench.run("plan", ROLES, answers=["4", "y", "westus", "narnia", "West Europe", NEW_WORKSPACE])[1]
+    assert bench.cfg["LOCATION"] == "westus2" and bench.cfg["FABRIC_CAPACITY_REGION"] == "westeurope"
+    assert "F16 is not offered to your subscription in West US." in text and "'narnia' is not a region with all Fabric workloads" in text
+    assert "so the runner proposes" not in text                       # West US 2 lacks nothing: proposed as it is
+    assert "[westus2] westus" in text
+    # asked again on request, by name; a region that lacks something of the demo needs a yes
+    text = bench.run("plan", ROLES, "--ask", answers=["southcentralus", "y", "southcentralus", "n", "", NEW_WORKSPACE])[1]
+    assert bench.cfg["LOCATION"] == "southcentralus" and bench.cfg["FABRIC_CAPACITY_REGION"] == "centralus"
+    assert "Microsoft's table lists no Operations agent in South Central US, which later phases of the demo use. Take it anyway? [y/N] n" in text
+    # three answers that are not in the list end the run, with nothing changed
+    code, text = bench.run("plan", ROLES, "--ask", answers=["12", "mars", "0"])
+    assert code == core.EXIT_REFUSED and "Three answers that were not in the list" in text and world.writes == []
+
+
+def test_the_vm_size_is_asked_once_azure_could_not_say_and_moving_one_forward_asks_azure_nothing(slow_line):
+    """What the sed line of 15:50 did by hand: put the size of his existing VM first."""
+    answers = [KEEP_REGION, "n", "", NEW_WORKSPACE]
+    text = slow_line.run("plan", ROLES, answers=answers)[1]
+    assert "VM size" not in text.split("Looking at")[0] and Unanswered.asked == ["roles", "sizes"]      # not known yet that Azure will not say
+    text = slow_line.run("plan", ROLES, answers=["3"])[1]
+    assert "Azure did not say which sizes your subscription is offered" in text and "    3. Standard_D8s_v7" in text
+    assert slow_line.cfg["VM_SIZE"].split()[:2] == ["Standard_D8s_v7", "Standard_D8s_v5"]
+    assert Unanswered.asked == ["roles", "sizes"]                       # the same sizes in another order: no new question to Azure
+    assert slow_line.run("plan", ROLES, answers=[])[0] == 0             # and the person is not asked twice
+    assert slow_line.state["choices"]["vm_size"]["answer"] == "Standard_D8s_v7"
+
+
+def test_nobody_to_ask_means_no_questions_and_no_answer_means_nothing_changed(bench):
+    his_tenant(bench.world)
+    code, text = bench.run("plan", ROLES, "--no-input", answers=[])
+    assert "A few questions first" not in text and bench.state.get("choices") == {} and re.search(r"pre\.capacity\s+done", text)
+    # the terminal closes in the middle of a question
+    code, text = bench.run("plan", ROLES, answers=[KEEP_REGION, EOFError])
+    assert code == core.EXIT_REFUSED and "A question got no answer" in text and bench.world.writes == []
+    assert bench.cfg["FABRIC_CAPACITY_CREATE_SKU"] == ""
+    # Ctrl+C at a question: said in a line, not as a traceback
+    code, text = bench.run("plan", ROLES, answers=[KeyboardInterrupt])
+    assert code == 130 and "STOPPED  by Ctrl+C" in text and bench.world.writes == []
+    # apply never asks, also when questions are open and somebody is at the terminal
+    digest = bench.plan(ROLES, "--no-input")
+    assert "capacity" not in bench.state["choices"] and "workspace" not in bench.state["choices"]
+    assert bench.run("apply", "--approve", digest, ROLES, "--confirm", SETTINGS, answers=[])[0] == 0
+
+
+def test_no_questions_while_an_apply_runs_and_none_about_what_exists(bench):
+    bench.plan(ROLES, "--no-input")
+    folder = bench.root / ".deploy" / bench.cfg["DEPLOYMENT_SUFFIX"]
+    (folder / "apply.lock").write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "started": "x"}))
+    text = bench.run("plan", ROLES, answers=[])[1]                           # questions are open, and are not asked now
+    assert "An apply is running" in text and "A few questions first" not in text
+    (folder / "apply.lock").unlink()
+    assert bench.apply(ROLES, "--no-input", confirm=[SETTINGS])[0] == 0
+    assert bench.run("plan", ROLES, "--ask", answers=[])[0] == 0             # everything the questions are about exists
+
+
+def test_a_capacity_to_be_made_is_named_after_its_own_deployment(bench):
+    his_tenant(bench.world)
+    bench.run("plan", ROLES, answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])
+    old = bench.cfg["FABRIC_CAPACITY_NAME"]
+    # the next deployment of the folder is asked for itself, and its capacity carries its own suffix
+    assert bench.run("plan", ROLES, "--new", answers=[KEEP_REGION, "y", "", NEW_WORKSPACE])[0] == 0
+    assert bench.cfg["FABRIC_CAPACITY_NAME"] == f"fabwindfarm{bench.cfg['DEPLOYMENT_SUFFIX']}" != old
+    names.write_env(bench.env, {"FABRIC_CAPACITY_NAME": "mycapacity"})
+    code, text = bench.run("plan", ROLES)
+    assert code == core.EXIT_REFUSED and "FABRIC_CAPACITY_NAME" in text
+
+
+def test_the_vcpu_quota_is_looked_at_before_a_vm_is_asked_for(bench):
+    """25 November 2026: the new VM stands beside the VM of the deployment by hand, and a deallocated VM counts too."""
+    world = bench.world
+    text = bench.run("preflight")[1]
+    assert re.search(r"pre\.quota\s+done", text) and "8 vCPUs for Standard_D8s_v5: 100 free of 100 in its family, 92 of 100 in the region" in text
+    assert steps.vm_family("Standard_D8as_v7") == ("standarddasv7family", 8) and steps.vm_family("Standard_E4ds_v5") == ("standardedsv5family", 4)
+    assert steps.vm_family("Basic_A1") is None
+    # the size of his existing VM first: its family has 2 vCPUs left of 10
+    world.usage["StandardDsv7Family"] = (8, 10)
+    names.write_env(bench.env, {"VM_SIZE": "Standard_D8s_v7 Standard_D8s_v6"})
+    code, text = bench.run("preflight")
+    assert re.search(r"pre\.quota\s+BLOCKED", text) and "the family of Standard_D8s_v7: 8 of 10 vCPUs in use" in text
+    assert "A VM that is stopped still counts" in text and code == core.EXIT_BLOCKED
+    world.usage["StandardDsv7Family"] = (8, 32)
+    world.usage["cores"] = (96, 100)
+    text = bench.run("preflight")[1]                                   # a block is not kept: asked again, and now the total
+    assert "the region's total: 96 of 100 vCPUs in use" in text and "the family of" not in text.split("pre.quota")[2].split("pre.names")[0]
+    world.usage["cores"] = (8, 100)
+    del world.usage["StandardDsv7Family"]
+    text = bench.run("preflight")[1]
+    assert re.search(r"pre\.quota\s+NOT CHECKED", text) and "no row named like the family of Standard_D8s_v7" in text
+    asked = world.usage_calls
+    bench.run("preflight")
+    assert world.usage_calls == asked                                  # kept, like the other answers that hold for a day
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0
+    assert re.search(r"pre\.quota\s+done\s+vCPU quota for the VM\n\s+the VM exists\n", bench.run("plan", ROLES, "--recheck")[1])
+    assert world.writes.count("az group create rg-windfarm-edge-" + bench.cfg["DEPLOYMENT_SUFFIX"]) == 1
+
+
+# ------------------------------------------------------------------------------------------ one folder, many deployments
+# 25 November 2026, 16:35: "I don't want a pre-populated .env file. I want you to generate the random 3 alphanum suffix in
+# the runtime. I might be building this demo over and over in the same tenant or new tenants".
+def test_nothing_is_prepared_the_first_plan_starts_a_deployment_and_keeps_its_settings_with_its_checkpoint(bench):
+    assert not (bench.root / ".deploy").exists() and not Path(bench.root, "config", "demo.env").exists()
+    code, text = bench.run("plan", ROLES)
+    suffix = bench.suffix
+    assert code == 0 and names.valid_suffix(suffix) and (bench.root / ".deploy" / "current").read_text().strip() == suffix
+    assert f"New deployment {suffix}: every name ends in -{suffix}, for subscription Demo subscription. Its settings are in .deploy/{suffix}/demo.env." in text
+    assert f"Deployment {suffix}. Settings and checkpoint: .deploy/{suffix}/. A new one beside it: add --new." in text
+    assert bench.env == bench.root / ".deploy" / suffix / "demo.env" and bench.cfg["RESOURCE_GROUP"] == f"rg-windfarm-edge-{suffix}"
+    opening = bench.env.read_text().split("\n\n")[0]                        # the file says what it is, not how to copy a template
+    assert opening.startswith(f"# The settings of deployment {suffix}, kept by tools/deploy.py") and "Copy this file" not in bench.env.read_text()
+    assert "\n# ---- Azure ---" in bench.env.read_text() and "# ---- Only for tools/deploy.py" in bench.env.read_text()   # the rest of the template is there
+    assert not Path(bench.root, "config", "demo.env").exists() and bench.world.writes == []
+    # every script of the deployment is handed that file, and nothing is ever written into config/
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0
+    assert bench.world.env_files and set(bench.world.env_files) == {str(bench.env)}
+    assert sorted(entry.name for entry in (bench.root / "config").iterdir()) == ["demo.env.example"]
+    # the next plan goes on with it: no new names. One deployment in the folder: the apply line needs no name
+    assert bench.run("plan", ROLES)[0] == 0 and bench.suffix == suffix and "New deployment" not in bench.last
+    assert "python3 tools/deploy.py apply --approve" in bench.last and "--deployment" not in bench.last.split("python3 tools/deploy.py apply --approve")[1].splitlines()[0]
+
+
+def test_the_same_folder_holds_one_deployment_after_another_and_each_keeps_its_own(deployed):
+    first, world = deployed.suffix, deployed.world
+    kept = {path.name: path.read_bytes() for path in (deployed.root / ".deploy" / first).iterdir()}
+    writes = list(world.writes)
+    names.write_env(deployed.env, {"VM_SIZE": "Standard_D8s_v7 Standard_D8s_v6"})
+    kept["demo.env"] = deployed.env.read_bytes()
+    code, text = deployed.run("plan", ROLES, "--new")
+    second = deployed.suffix
+    assert code == 0 and second != first and deployments.listed(deployed.root) == [first, second]
+    assert f"Taken over from deployment {first}: LOCATION, VM_SIZE, VM_AUTO_SHUTDOWN_UTC, CUSTOM_LOCATIONS_OID." in text
+    assert deployed.cfg["VM_SIZE"] == "Standard_D8s_v7 Standard_D8s_v6" and deployed.cfg["EVENTSTREAM_TOPIC"] == ""      # preferences, not what was made
+    assert f"Also in this folder: {first} (--deployment SUFFIX)." in text
+    assert re.search(r"p1\.resource_group\s+will run", text) and f"rg-windfarm-edge-{second} in southcentralus  (not created yet)" in text
+    assert world.writes == writes                                           # the plan of the second changed nothing
+    assert {path.name: path.read_bytes() for path in (deployed.root / ".deploy" / first).iterdir()} == kept      # and the first is as it was
+    plan_of_second = re.search(r"^Plan (\w+)$", text, re.M)[1]
+    # with more than one deployment in the folder, the apply line that is printed names its own
+    assert f"python3 tools/deploy.py apply --approve {plan_of_second} {ROLES} --deployment {second}" in text
+    # status names both; --deployment goes back to the first, which is still complete
+    status = deployed.run("status")[1]
+    assert f"  {first}: subscription sub-1111; resource group rg-windfarm-edge-{first} made" in status
+    assert f"  {second}: subscription sub-1111; nothing made yet   <- this one" in status
+    code, text = deployed.run("plan", ROLES, "--deployment", first)
+    assert deployed.suffix == first and re.search(r"p1\.resource_group\s+done", text) and " 0 for the runner," in text
+    # an apply with the other deployment's plan says whose plan it is, and changes nothing
+    code, text = deployed.run("apply", "--approve", plan_of_second, ROLES)
+    assert code == core.EXIT_REFUSED and f"Plan {plan_of_second} is the plan of deployment {second}" in text
+    assert f"Add --deployment {second} to apply that plan" in text and world.writes == writes
+
+
+def test_signed_in_to_another_subscription_a_person_is_asked_for_a_new_deployment_there(deployed):
+    first, world = deployed.suffix, deployed.world
+    writes = list(world.writes)
+    world.account = dict(world.account, id="sub-2222", name="Another tenant's subscription", tenantId="tenant-bbbb")
+    world.groups, world.workspaces, world.vm, world.custom_locations = {}, [], None, "99999999-aaaa-bbbb-cccc-000000000000"
+    code, text = deployed.run("plan", ROLES, answers=["n"])
+    assert code == core.EXIT_REFUSED and "Start a new deployment here, with names of its own? [Y/n] n" in text and deployed.suffix == first
+    code, text = deployed.run("plan", ROLES, answers=["", KEEP_REGION, "n", "", NEW_WORKSPACE])
+    second = deployed.suffix
+    assert code == 0 and second != first and deployed.cfg["SUBSCRIPTION_ID"] == "sub-2222"
+    assert "Taken over" not in text and deployed.cfg["CUSTOM_LOCATIONS_OID"] == "99999999-aaaa-bbbb-cccc-000000000000"   # looked up in the new tenant
+    assert world.writes == writes and names.read_env(deployments.env_of(deployed.root, first))["SUBSCRIPTION_ID"] == "sub-1111"
+
+
+def test_a_deployment_whose_resource_group_is_gone_offers_new_names_and_a_pipeline_goes_on_as_before(deployed):
+    first, world = deployed.suffix, deployed.world
+    del world.groups[deployed.cfg["RESOURCE_GROUP"]]                        # bash infra/99-cleanup.sh --all, say
+    code, text = deployed.run("plan", ROLES)                                # nobody to ask: the drift is shown, the names stay
+    assert deployed.suffix == first and "DRIFT" in text
+    code, text = deployed.run("plan", ROLES, answers=["n"])
+    assert deployed.suffix == first and f"made the resource group rg-windfarm-edge-{first}, and that group no longer exists" in text
+    world.workspaces, world.items, world.vm, world.instance, world.cluster = [], {}, None, None, None
+    code, text = deployed.run("plan", ROLES, answers=["", KEEP_REGION, "n", "", NEW_WORKSPACE])
+    assert code == 0 and deployed.suffix != first and f"Taken over from deployment {first}" in text
+    assert re.search(r"p1\.resource_group\s+will run", text) and "DRIFT" not in text
+
+
+def test_settings_the_earlier_issues_kept_in_config_are_moved_to_their_deployment_once(bench):
+    """His folder on 25 November: config/demo.env with the suffix 064, written by the first issue, and .deploy/064/."""
+    his_tenant(bench.world)
+    old = Path(bench.root, "config", "demo.env")
+    names.write_env(old, {**names.generated("064"), "SUBSCRIPTION_ID": "sub-1111", "FABRIC_CAPACITY_ID": F32["id"], "LOCATION": "westus2"},
+                    template=bench.root / "config" / "demo.env.example")
+    (bench.root / ".deploy" / "064").mkdir(parents=True)
+    (bench.root / ".deploy" / "064" / "state.json").write_text(json.dumps({"version": 1, "choices": {"region": {"answer": "westus2"}}}))
+    (bench.root / ".deploy" / "9zz").mkdir()                                # a checkpoint whose settings are gone is no deployment
+    (bench.root / ".deploy" / "9zz" / "state.json").write_text("{}")
+    code, text = bench.run("plan", ROLES)
+    assert code == 0 and "Moved config/demo.env to .deploy/064/demo.env" in text and not old.exists()
+    assert deployments.listed(bench.root) == ["064"] and "9zz" not in text
+    assert bench.env.read_text().startswith("# The settings of deployment 064, kept by tools/deploy.py") and "Copy this file" not in bench.env.read_text()
+    assert bench.suffix == "064" and bench.cfg["LOCATION"] == "westus2" and bench.state["choices"]["region"]["answer"] == "westus2"
+    assert "Moved" not in bench.run("plan", ROLES)[1] and "New deployment" not in bench.last
+
+
+def test_a_folder_with_several_deployments_and_no_current_one_asks_which(bench):
+    bench.plan()
+    first = bench.suffix
+    bench.run("plan", "--new")
+    (bench.root / ".deploy" / "current").unlink()
+    code, text = bench.run("status")
+    assert code == core.EXIT_REFUSED and "Name one with --deployment" in text and first in text
+    assert bench.run("status", "--deployment", first)[0] == 0 and bench.suffix == first
+    # the suffix inside the settings is the deployment's own
+    names.write_env(bench.env, {"DEPLOYMENT_SUFFIX": "abc"})
+    code, text = bench.run("plan")
+    assert code == core.EXIT_REFUSED and "DEPLOYMENT_SUFFIX is 'abc'" in text
+    # and a folder with nothing in it has nothing to apply or to show
+    shutil.rmtree(bench.root / ".deploy")
+    assert "This folder has no deployment yet" in bench.run("status")[1] and not (bench.root / ".deploy").exists()
+
+
+def test_a_new_deployment_takes_no_suffix_twice_and_nothing_from_another_subscription(deployed, monkeypatch):
+    first, world = deployed.suffix, deployed.world
+    drawn = iter([first, first, "q7k"])
+    monkeypatch.setattr(names, "new_suffix", lambda: next(drawn))            # the draw comes up with the suffix in use, twice
+    world.account = dict(world.account, id="sub-2222", name="Another subscription")
+    world.groups, world.workspaces, world.vm, world.custom_locations = {}, [], None, "99999999-aaaa-bbbb-cccc-000000000000"
+    names.write_env(deployed.env, {"LOCATION": "westus3"})
+    code, text = deployed.run("plan", ROLES, "--new")
+    assert code == 0 and deployed.suffix == "q7k" and deployments.listed(deployed.root) == [first, "q7k"]
+    assert "Taken over" not in text and deployed.cfg["LOCATION"] == "southcentralus"          # the preferences of sub-1111 stay there
+    assert deployed.cfg["CUSTOM_LOCATIONS_OID"] == "99999999-aaaa-bbbb-cccc-000000000000"
+
+
+def test_settings_in_config_never_replace_those_of_a_deployment_and_a_deleted_deployment_is_not_the_current_one(bench):
+    bench.plan()
+    first, mine = bench.suffix, bench.env.read_bytes()
+    stray = Path(bench.root, "config", "demo.env")                          # a copy someone put back, with the same suffix
+    names.write_env(stray, {**names.generated(first), "SUBSCRIPTION_ID": "sub-9999"}, template=bench.root / "config" / "demo.env.example")
+    code, text = bench.run("plan")
+    assert code == 0 and "Moved" not in text and stray.exists() and bench.env.read_bytes() == mine
+    bench.run("plan", "--new")
+    second = bench.suffix
+    shutil.rmtree(bench.root / ".deploy" / second)                          # the folder of the current one is thrown away
+    code, text = bench.run("status")
+    assert code == 0 and bench.suffix == first and f"Deployment {first}." in text

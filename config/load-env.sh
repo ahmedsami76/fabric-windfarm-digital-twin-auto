@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Sourced by every script: loads config/demo.env and provides small helpers.
+# Sourced by every script: loads the settings file and provides small helpers.
+# The settings file is, in this order: the file ENV_FILE names; config/demo.env, which a deployment by hand
+# has; the settings of the deployment that tools/deploy.py is working on, .deploy/<suffix>/demo.env, where
+# .deploy/current holds the suffix. On the edge VM it is always config/demo.env.
 # shellcheck shell=bash
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-$REPO_ROOT/config/demo.env}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+  ENV_FILE="$REPO_ROOT/config/demo.env"
+  if [[ ! -f "$ENV_FILE" && -f "$REPO_ROOT/.deploy/current" ]]; then
+    ENV_FILE="$REPO_ROOT/.deploy/$(tr -d '[:space:]' < "$REPO_ROOT/.deploy/current")/demo.env"
+  fi
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "ERROR: $ENV_FILE not found. Copy config/demo.env.example to config/demo.env and fill it in." >&2
+  echo "ERROR: $ENV_FILE not found. For a deployment by hand, copy config/demo.env.example to config/demo.env and fill it in. With the runner, python3 tools/deploy.py plan makes the settings of a deployment." >&2
   exit 1
 fi
 set -a

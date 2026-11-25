@@ -21,7 +21,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$HERE/windfarm-twin"
 NAME="${PRINCIPAL_NAME:-windfarm-twin-eventhouse-reader}"
-WORKSPACE_NAME="${FABRIC_WORKSPACE_NAME:-WindFarmDigitalTwin}"   # tools/deploy.py generates the name; give it here when it did
+# The workspace's name: FABRIC_WORKSPACE_NAME when it is given, else what the settings file says (the one ENV_FILE names,
+# else config/demo.env, else the settings of the deployment tools/deploy.py is working on), else the name of the guides.
+SETTINGS="${ENV_FILE:-$HERE/../config/demo.env}"
+if [[ ! -f "$SETTINGS" && -f "$HERE/../.deploy/current" ]]; then
+  SETTINGS="$HERE/../.deploy/$(tr -d '[:space:]' < "$HERE/../.deploy/current")/demo.env"
+fi
+WORKSPACE_NAME="${FABRIC_WORKSPACE_NAME:-}"
+if [[ -z "$WORKSPACE_NAME" && -f "$SETTINGS" ]]; then
+  WORKSPACE_NAME="$(sed -n 's/^FABRIC_WORKSPACE_NAME="\([^"]*\)".*/\1/p' "$SETTINGS" | head -n 1)"
+fi
+WORKSPACE_NAME="${WORKSPACE_NAME:-WindFarmDigitalTwin}"
 DATABASE_NAME="WindFarmEH"
 FABRIC="https://api.fabric.microsoft.com"
 SECRETS_FILE="$APP/rayfin/.env.secrets"

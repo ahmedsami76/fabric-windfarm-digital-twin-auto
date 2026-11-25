@@ -113,9 +113,11 @@ def phase2(options: Options) -> list[Step]:
 
 
 def p3_capacity(ctx) -> Probe:
-    from .steps import CANNOT_HOLD, capacity, capacity_kind
+    from .steps import (CANNOT_HOLD, REGIONS_READ, capacity, capacity_kind, creating, new_capacity, region_gaps, region_name)
     needs = "The data agent and the operations agent need a paid capacity; on a trial they do not run"
     chosen = capacity(ctx)
+    if not chosen and creating(ctx):
+        chosen = {"sku": new_capacity(ctx)["sku"], "region": new_capacity(ctx)["region"]}      # not made yet; an F SKU is paid
     if not chosen:
         return unverified("the capacity is not in the list Fabric gives you, so the runner cannot read whether it is a paid "
                           f"one. {needs}")
@@ -125,10 +127,14 @@ def p3_capacity(ctx) -> Probe:
     if kind == "trial":
         return blocked(f"The capacity is a trial ({sku}). The data agent and the operations agent need a paid capacity.", move)
     if kind in CANNOT_HOLD:
-        return blocked(f"The capacity ({sku}) is {CANNOT_HOLD[kind]}.", move)
+        return blocked(f"The capacity ({sku}) is {CANNOT_HOLD[kind]}.",
+                       "Put a capacity that can hold the demo into FABRIC_CAPACITY_ID: the step pre.capacity lists them.")
     if kind == "unknown":
         return unverified(f"the runner does not know the SKU {sku}. {needs}")
-    return done(f"capacity SKU {sku}, a paid capacity")
+    missing = [feature for feature in region_gaps(chosen.get("region"), "phase3")]
+    caution = (f". Microsoft's region table of {REGIONS_READ} lists no {' and no '.join(missing)} for a capacity in "
+               f"{region_name(chosen.get('region'))}: the step that sets it up may not be possible there") if missing else ""
+    return done(f"capacity SKU {sku}, a paid capacity{caution}")
 
 
 OPERATIONS_AGENT_STEPS = f"""The operations agent is set up in the portal; Fabric has no documented way to create one with its playbook.
@@ -295,7 +301,7 @@ def phase4(options: Options) -> list[Step]:
         Step("p4.eventhouse_principal", "phase4", "Real-time values: the service principal (optional)",
              lambda ctx: todo("not looked at: optional, and the runner neither creates an app registration nor grants it a role"),
              optional=True, observable=False, manual="When you want the twin 40 seconds behind the turbines instead of minutes:\n"
-             "FABRIC_WORKSPACE_NAME=<workspace> bash app/create-principal.sh\nIt creates an app registration with a secret and gives "
+             "bash app/create-principal.sh\nIt finds the workspace of this deployment by itself, creates an app registration with a secret and gives "
              "it Viewer in the workspace; step 7 of docs/11-deployment-guide-phase4.md. Without it the twin runs on the Lakehouse route.",
              basis="app/create-principal.sh", proof="live"),
         Step("p4.connection_check", "phase4", "The app's own connection check (optional)",

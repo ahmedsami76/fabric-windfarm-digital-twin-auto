@@ -277,10 +277,17 @@ case "$ACTION" in
     UNPACK="mkdir -p ~/${REMOTE_DIR} && cd ~/${REMOTE_DIR} && rm -rf simulator edge infra fabric data docs tools"
     UNPACK+=" && tar -xzf - && chmod +x infra/*.sh edge/scripts/*.sh tools/*.sh"
     # shellcheck disable=SC2029  # UNPACK is meant to be expanded here, not on the VM
+    # .deploy holds the checkpoints and settings of every deployment made from this folder: none of it goes to the VM.
     tar -C "$REPO_ROOT" --exclude=.git --exclude=node_modules --exclude=__pycache__ --exclude=.pytest_cache \
-        --exclude='*.egg-info' -czf - . \
+        --exclude='*.egg-info' --exclude=./.deploy -czf - . \
       | ssh "${SSH_OPTIONS[@]}" "${VM_ADMIN}@${IP}" "$UNPACK"
-    info "Done. config/demo.env on the VM is now the same as the one here."
+    # The scripts on the VM read config/demo.env. When the settings in use here live elsewhere (ENV_FILE, or a
+    # deployment of tools/deploy.py), they are put there.
+    if [[ ! "$ENV_FILE" -ef "$REPO_ROOT/config/demo.env" ]]; then
+      # shellcheck disable=SC2029  # REMOTE_DIR is meant to be expanded here
+      ssh "${SSH_OPTIONS[@]}" "${VM_ADMIN}@${IP}" "mkdir -p ~/${REMOTE_DIR}/config && cat > ~/${REMOTE_DIR}/config/demo.env" < "$ENV_FILE"
+    fi
+    info "Done. config/demo.env on the VM is now the same as the settings in use here ($ENV_FILE)."
     ;;
 
   push-env)

@@ -1,7 +1,8 @@
 """Names and settings: one suffix of three characters for a deployment, and the settings file made from it.
 
-The suffix is chosen once and written into config/demo.env. Every later run reads it there, so a plan,
-its apply and every resume speak of the same resources.
+The suffix is chosen when a deployment is started and written into that deployment's settings,
+.deploy/<suffix>/demo.env (deployments.py). Every later run reads it there, so a plan, its apply and every
+resume speak of the same resources.
 """
 from __future__ import annotations
 

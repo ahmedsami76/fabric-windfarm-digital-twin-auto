@@ -2,14 +2,15 @@
 
 `tools/deploy.py` deploys the demo step by step, from an empty subscription and an existing Fabric capacity to the twin in a workspace. It starts the scripts and notebooks of this repository in the order of the guides, looks at Azure and Fabric before and after every step, and stops with an exact instruction wherever a person has to act.
 
-**Status. Written on 25 November 2026. Its first command, `preflight`, ran twice on a tenant that morning. The second run reached every check and showed three errors of the runner, which this third issue corrects: it took the only capacity Fabric listed for the signed-in person, a Premium Per User capacity that cannot hold the demo, for the capacity to use; it printed `done` for two checks whose questions had gone unanswered; and it would have waited five minutes for those two answers again in every plan and apply. `plan` and `apply` have not run on a tenant.** Everything the runner does was exercised against stand-ins on the computer it was written on (73 tests, 50 planted faults, all caught). Most of what it starts, the scripts of `infra/` and `edge/` and the notebooks, ran on a tenant between 19 and 25 November, started by hand. [What has been proven where](#what-has-been-proven-where) keeps the two apart, and [Unproven on a tenant](#unproven-on-a-tenant) lists what your next run decides. Expect it to find something; send me what it prints.
+**Status. Written on 25 November 2026. Its first command, `preflight`, ran on a tenant four times that day; three of the runs were sent to me. They showed errors of the runner, corrected in the second and third issue; the run of 15:40 showed the third issue reading the roles and the capacities rightly. The fourth issue added what was asked for after that run: the runner asks its questions itself (the region, the capacity, the workspace, the VM size), and can make a Fabric capacity when you say so. This fifth issue answers the request of 16:35: no settings file is prepared or kept in `config/`; every deployment gets its three random characters when it is started and keeps its settings beside its checkpoint, so one folder serves build after build, in one tenant or in several. See [Deployments](#deployments). None of the fourth and fifth issue, and nothing of `plan` and `apply`, has run on a tenant.** Everything the runner does was exercised against stand-ins on the computer it was written on (97 tests, 138 planted faults, all caught). Most of what it starts, the scripts of `infra/` and `edge/` and the notebooks, ran on a tenant between 19 and 25 November, started by hand. [What has been proven where](#what-has-been-proven-where) keeps the two apart, and [Unproven on a tenant](#unproven-on-a-tenant) lists what your next run decides. Expect it to find something; send me what it prints.
 
 It does not replace the guides. Each step names the guide's step it comes from, and the guides remain the way to deploy by hand or to understand what a step does.
 
 ## What it will never do
 
-- Change a tenant setting, create a capacity, or move a workspace to another capacity.
-- Work in a resource group or a workspace that it did not create itself.
+- Change a tenant setting.
+- Make a Fabric capacity unless you answered yes to that question and approved the step. It never pauses, resumes, resizes or deletes a capacity, and never moves a workspace to another one.
+- Work in a resource group that it did not create itself, or in a workspace that it did not create, with one exception: an existing workspace that you chose in answer to its question and that is empty.
 - Grant a role outside the demo's resource group or workspace, or grant any role without `--approve-role-changes`.
 - Register a resource provider: that changes the whole subscription, and is left to you with the commands.
 - Delete anything. Removing a deployment stays with `bash infra/99-cleanup.sh`.
@@ -29,8 +30,8 @@ python3 -m zipfile -e fabric-windfarm-digital-twin-auto.zip . && cd fabric-windf
 - The Azure CLI, signed in as yourself: `az login`. A service principal is refused, because several steps accept a person only.
 - The Azure CLI extension `azure-iot-ops` on this computer: `az extension add --name azure-iot-ops --yes`. A workstation that has run the guides has it. Preflight says when it is missing; the runner never lets the CLI install one on the way.
 - Python 3.10 or newer, `bash`, `ssh`. For Phase 4, Node.js 22 as in step 2 of [11-deployment-guide-phase4.md](11-deployment-guide-phase4.md).
-- A capacity that can hold Fabric items and that you may create workspaces on: an F SKU, a trial, or a P SKU with Fabric enabled. For Phase 3 a paid one. A Premium Per User, A or EM capacity holds Power BI items only, and the runner refuses it. See [The capacity](#the-capacity).
-- No `config/demo.env` yet. The runner writes it. A settings file from a deployment made by hand is refused; move it away and keep it.
+- A capacity that can hold Fabric items and that you may create workspaces on: an F SKU, a trial, or a P SKU with Fabric enabled. For Phase 3 a paid one. A Premium Per User, A or EM capacity holds Power BI items only, and the runner refuses it. Or none: the runner makes an F16 when you say so. See [The capacity](#the-capacity).
+- Nothing to fill in. No settings file ships with the repository and none is prepared: the first plan starts a deployment, picks its three random characters and writes its settings to `.deploy/<suffix>/demo.env`. `config/demo.env` is the file of a deployment made by hand, from the guides; the runner neither reads nor writes it. See [Deployments](#deployments).
 
 ## Plan, apply, resume
 
@@ -48,7 +49,7 @@ Three answers are kept in the checkpoint for twelve hours: your roles, the resou
 
 Preflight shows the same table as a plan, for the prerequisites only, and no plan identifier: there is nothing in it to approve.
 
-**2. Read the plan.** Changes nothing in Azure or Fabric. The first plan writes `config/demo.env` with generated names; `LOCATION` and `VM_SIZE` in it are yours to change before the first apply.
+**2. Answer the questions and read the plan.** Changes nothing in Azure or Fabric. The first plan in a folder starts a deployment: it picks three random characters, makes every name from them and writes the settings to `.deploy/<suffix>/demo.env`. In a terminal it then asks what is yours to decide, before it looks at anything: see [The questions](#the-questions).
 
 ```bash
 python3 tools/deploy.py plan --approve-role-changes
@@ -62,15 +63,16 @@ The plan begins with the target: tenant, subscription, resource group, workspace
 | `confirmed by you` | It passes on your `--confirm`. The runner cannot read it |
 | `NOT CHECKED` | The runner could not read it: a question without an answer, or a capacity Fabric does not list for you. It does not stop the deployment; the step that depends on it says so if it fails |
 | `will run` | The runner does it on apply; the line below says what it changes |
+| `will be measured` | A gate: the runner measures it when the steps before it are done, and waits for it |
 | `YOUR STEP` | Only a person can do it; the lines below say exactly what |
 | `needs approval` | Waits for `--approve-role-changes`, `--allow-preview` or `--opt-in` |
 | `BLOCKED` | Something is wrong, and the lines below say what to do |
 | `DRIFT, will be redone` | The checkpoint says done and the cloud says otherwise |
 | `optional, yours` | Does not hold the deployment up |
 
-It ends with `Plan 3f9c2a71b0de`, the identifier of what you have just read.
+It ends with `Plan 3f9c2a71b0de`, the identifier of what you have just read, and with the apply command written out, options included.
 
-**3. Carry it out.** The same options, and the identifier.
+**3. Carry it out.** The command the plan printed, with `--confirm` for the steps of yours that are done.
 
 ```bash
 python3 tools/deploy.py apply --approve 3f9c2a71b0de --approve-role-changes --confirm phase1.tenant_settings
@@ -99,6 +101,9 @@ python3 tools/deploy.py status
 | Option | For |
 |---|---|
 | `--up-to phase1` to `phase4` | The last phase to include. Default `phase1` |
+| `--approve-capacity-creation` | Making the Fabric capacity you chose to have made. A yes to that question approves it for the plan of the same run; the apply command the plan prints carries the option |
+| `--no-input` | Preflight and plan ask nothing. Where an answer is missing the plan blocks and names the setting |
+| `--ask` | In a terminal: ask again every question whose subject does not exist yet |
 | `--approve-role-changes` | The role assignments the plan lists: for the VM's identity on the resource group, by the Azure CLI for the schema registry on its storage account, and for the two identities of the edge in the workspace |
 | `--confirm STEP` | You confirm what the runner cannot read: `phase1.tenant_settings`, `phase3.tenant_settings`, `phase4.tenant_settings`, `p2.acceptance`, `p5a.isolation`. The checkpoint keeps who and when |
 | `--allow-preview ontology` | Let the runner run notebook 11. Without it the ontology is optional and yours |
@@ -106,12 +111,53 @@ python3 tools/deploy.py status
 | `--enable-phase5a-isolated-simulator` | Also provision the command path of Phase 5a, switched off |
 | `--regenerate-history LABEL` | Run notebook 02 again, once for this label |
 | `--acknowledge ID` | A resource or item in the demo's group or workspace that the runner does not know belongs there |
-| `--new-names` | With `plan`, while nothing exists: choose another suffix |
+| `--new` | With `preflight` or `plan`: start another deployment in this folder, with a new random suffix. The earlier ones stay as they are |
+| `--deployment SUFFIX` | Work on another deployment of this folder, in any mode, and make it the current one |
 | `--recheck` | Ask again what was asked within the last twelve hours and kept: your roles, the resource providers, the VM sizes |
+
+## The questions
+
+Preflight and plan ask them, in a terminal, before they look at anything. Enter takes the answer in brackets. Every answer is written to the settings of the deployment, `.deploy/<suffix>/demo.env`, and kept in the checkpoint with who gave it and when. No answer changes anything in Azure or Fabric: it becomes a line of the plan, and the plan still has to be approved.
+
+| Question | What you can answer | What the answer does |
+|---|---|---|
+| Azure region of the edge | One of the nine regions Azure IoT Operations supports, by number or name | `LOCATION` |
+| Fabric capacity: create a new one? | Yes: a region for it, with one proposed. No: one from the list of capacities that can hold the demo; the others are listed with the reason | A new capacity becomes the step `p1.capacity` of the plan. An existing one becomes `FABRIC_CAPACITY_ID` |
+| Fabric workspace: create a new one? | Yes: the generated name. No: one of the workspaces on the capacity you chose, provided it is empty | A chosen workspace is held by its ID in `FABRIC_WORKSPACE_ID` and keeps its name |
+| VM size | A size you know your subscription is offered, to be tried first | The order of `VM_SIZE`. Asked only when Azure did not say which sizes you are offered |
+
+- **Asked once.** A question is asked again when its answer no longer holds, for example a capacity in the settings that cannot hold the demo, and with `--ask`.
+- **Not asked about what exists.** Once the resource group, the capacity, the workspace or the VM is there, its question is closed: a deployment stays where it is.
+- **Not asked without a keyboard, with `--no-input`, in `apply` and in `status`,** and not while an apply is running. The output may go through a pipe, for example to `tee`. The plan then blocks where an answer is missing and names the setting to fill in, as before.
+- **Ctrl+C or a closed terminal at a question** ends the run with one line. The answers given up to there are kept.
+
+A run in which every answer is Enter:
+
+```text
+A few questions first. Enter takes the answer in brackets. The answers go into the settings of this deployment; nothing is changed in Azure or Fabric by them.
+
+Azure region of the edge: the VM and Azure IoT Operations
+    ...
+    6. southcentralus   (now)
+  Region [6]
+
+Fabric capacity
+  Fabric lists 2 for you, 1 of which can hold the demo.
+  Create a new Fabric capacity for this demo (F16)? [y/N]
+  Capacities you can use:
+    1. fabcentralussm01 (F32, Central US)   d21d9da9-4054-4790-bc82-71aad3a91152
+    -  Premium Per User - Reserved (PP3, Central US): cannot hold the demo: a Premium Per User capacity. It holds Power BI items only
+  Capacity [1]
+
+Fabric workspace
+  Create a new workspace for this demo, WindFarmDigitalTwin-064? [Y/n]
+
+Chosen: edge in southcentralus; capacity fabcentralussm01 (F32, Central US); workspace WindFarmDigitalTwin-064, to be made. Written to .deploy/064/demo.env. Nothing was changed in Azure or Fabric.
+```
 
 ## Names
 
-The first plan picks three random characters and puts them at the end of every name that has to be unique outside the demo's own workspace:
+A deployment gets three random characters at the moment it is started, by the first plan in a folder or by `plan --new`. They go at the end of every name that has to be unique outside the demo's own workspace:
 
 ```bash
 RESOURCE_GROUP="rg-windfarm-edge-3x9"
@@ -120,17 +166,66 @@ STORAGE_ACCOUNT_NAME="sawindfarm3x9"
 FABRIC_WORKSPACE_NAME="WindFarmDigitalTwin-3x9"
 ```
 
-and likewise the cluster, the instance, the custom location, the schema registry and the device registry namespace. The subscription is the one the Azure CLI is on. The Custom Locations object ID is looked up and written into the file. The capacity is yours to name in `FABRIC_CAPACITY_ID`, with one exception described under [The capacity](#the-capacity).
+and likewise the cluster, the instance, the custom location, the schema registry and the device registry namespace, and `fabwindfarm3x9` for a capacity the runner makes. The subscription is the one the Azure CLI is on. The Custom Locations object ID is looked up and written into the settings. The capacity and the workspace are yours to choose: plan asks, as described under [The questions](#the-questions).
 
 Items inside the workspace keep the names of the guides (`WindFarmEH`, `WindFarmLH`, `es-windfarm-edge`, the notebooks, `WindFarmTwin`). The notebooks and the app find them by name, and in a workspace that holds nothing else no name can be taken. The app is told the workspace's name when it is created: `bash app/create-app.sh` writes it into the app's copy of `config.ts`.
 
 Do not edit the generated names. The runner refuses a settings file whose names no longer carry its suffix.
 
+## Deployments
+
+Nothing is prepared before a run. A deployment is a suffix, and everything the runner keeps about it is in one folder of its own:
+
+| File | What it is |
+|---|---|
+| `.deploy/<suffix>/demo.env` | The settings of that deployment: the generated names, your answers, and what the runner looked up or created since (the Custom Locations object ID, the endpoint and topic of the eventstream) |
+| `.deploy/<suffix>/state.json` | Its checkpoint |
+| `.deploy/current` | The suffix of the deployment that commands work on |
+
+`.deploy/` is ignored by git and holds no secret.
+
+**The first plan in a folder** starts a deployment and says so:
+
+```text
+New deployment 3x9: every name ends in -3x9, for subscription Demo subscription. Its settings are in .deploy/3x9/demo.env. Nothing was changed in Azure or Fabric.
+Deployment 3x9. Settings and checkpoint: .deploy/3x9/. A new one beside it: add --new.
+```
+
+**The next build, in the same folder.** In the same tenant, or after `az login` to another one:
+
+```bash
+python3 tools/deploy.py plan --new --approve-role-changes
+```
+
+It draws a suffix that no deployment of the folder has, and leaves the earlier deployments as they are: their settings, their checkpoints, and whatever they made in Azure and Fabric. In the same subscription it takes over what you settled once and would settle the same way again: the region of the edge, the VM sizes and their order, the hour of the VM's automatic shutdown, and the Custom Locations object ID. Names are never taken over, and neither are the capacity and the workspace: those two questions are asked again. In another subscription nothing is taken over.
+
+**Back to an earlier one.** `--deployment` goes with every mode and makes that deployment the current one. `status` lists the deployments of the folder, each with its subscription and whether it has made its resource group.
+
+```bash
+python3 tools/deploy.py status --deployment 3x9
+```
+
+**When the runner offers a new deployment by itself.** In a terminal, in two cases: the Azure CLI is on another subscription than the current deployment's, or the current deployment made its resource group and that group no longer exists, which is what a clean-up leaves. Without a keyboard it starts nothing: the first case is refused with the command to type, the second shows as `DRIFT` in the plan.
+
+**A plan belongs to its deployment.** Once the folder holds more than one, the apply line a plan prints ends in `--deployment` with its suffix, so a line kept for later still goes where it was meant to. An apply that names the plan of another deployment of the folder is refused and says whose plan it is.
+
+**Scripts you start by hand.** The runner hands every script it starts the settings of its deployment by name, in `ENV_FILE`. A script you start yourself, `bash infra/vm.sh ssh` for example, takes the file `ENV_FILE` names, else `config/demo.env` where there is one, else the settings of the current deployment. Beside a deployment of the runner they therefore work as the guides write them. For another deployment of the folder, name its file:
+
+```bash
+ENV_FILE="$PWD/.deploy/3x9/demo.env" bash infra/vm.sh status
+```
+
+**On the edge VM** the scripts read `config/demo.env`, as before. `bash infra/vm.sh push` writes the settings in use here to that place on the VM and sends nothing of `.deploy/`. Every deployment has a VM of its own, so each VM holds the settings of one deployment.
+
+**From the earlier issues.** Up to the fourth issue the runner kept the settings of its one deployment in `config/demo.env`. The next run moves such a file to `.deploy/<suffix>/demo.env`, once, and says so. A `config/demo.env` you made by hand has no suffix: it stays where it is, and the runner does not use it.
+
+**Removing a deployment** stays with `bash infra/99-cleanup.sh`. It finds its settings as every script started by hand does, and without an option it changes nothing and shows what it would remove, the resource group and the workspace by name: read that before you add `--all`. The folder `.deploy/<suffix>/` remains as the record of what was made; delete it when you no longer want it listed.
+
 ## The capacity
 
-The runner creates the workspace on the capacity named in `FABRIC_CAPACITY_ID`. It never creates a capacity, never resumes one, and never moves a workspace.
+The runner creates the workspace on the capacity you chose: one that exists, or one it makes for this deployment.
 
-It reads two lists as you: the capacities Fabric lists for you, which are the ones you administer or contribute to, and your workspaces with the capacity each runs on. From the SKU it tells what a capacity can hold:
+**A capacity that exists.** The runner reads two lists as you: the capacities Fabric lists for you, which are the ones you administer or contribute to, and your workspaces with the capacity each runs on. From the SKU it tells what a capacity can hold:
 
 | SKU | What it is | For the demo |
 |---|---|---|
@@ -140,12 +235,20 @@ It reads two lists as you: the capacities Fabric lists for you, which are the on
 | `PP3` | Premium Per User | No. It holds Power BI items only |
 | `A1`, `EM1`, … | Power BI Embedded | No. They hold Power BI items only |
 
-- **`FABRIC_CAPACITY_ID` is empty.** When exactly one active capacity that can hold Fabric items is in sight, and none of your workspaces runs on a capacity outside the list, the runner writes that one into the settings and shows it in the target before you approve anything. In every other case it blocks and prints both lists, each capacity with what it can hold and each unlisted one with the workspaces that use it, and you put one ID into the file.
-- **It names a capacity that cannot hold the demo, or one that is paused.** Blocked, with the same lists.
-- **It names a capacity Fabric does not list for you, and one of your workspaces runs on it.** This is the case of a capacity that somebody else administers. The runner cannot read its SKU or its state, shows `NOT CHECKED`, and goes on: creating the workspace shows whether you may use it. A refusal there is a block that names the capacity. Putting a workspace on a capacity takes the contributor role on it, which an administrator of the capacity sets in the Fabric admin portal: **Capacity settings**, the kind of capacity, the capacity, **Details**, **Contributor permissions**.
-- **It names a capacity nobody in sight uses.** Blocked.
+In a terminal you pick from that list. Without one: when exactly one active capacity that can hold Fabric items is in sight, and none of your workspaces runs on a capacity outside the list, the runner writes that one into the settings and shows it in the target; in every other case it blocks, prints both lists, and you put one ID into `FABRIC_CAPACITY_ID`. A capacity that is paused is said to be paused; the runner resumes none. A capacity Fabric does not list for you and that one of your workspaces runs on can be chosen: the runner cannot read its SKU or its state, shows `NOT CHECKED`, and creating the workspace shows whether you may use it. That takes the contributor role on the capacity, which an administrator of the capacity sets in the Fabric admin portal: **Capacity settings**, the kind of capacity, the capacity, **Details**, **Contributor permissions**.
 
-The target block of every plan and apply shows the capacity by name and SKU, or says that Fabric does not list it for you.
+**A capacity the runner makes.** Only when you answered yes to the question, and only with `--approve-capacity-creation` or that yes in the same run.
+
+- **What.** One capacity named `fabwindfarm` and the suffix, SKU F16, in the demo's own resource group, with the deployment's tag, and with you as its administrator. A guest cannot be the administrator of a capacity, so a guest is told to choose an existing one. To have another SKU made, change `FABRIC_CAPACITY_CREATE_SKU` in the settings before the plan.
+- **It costs money for as long as it runs.** The runner makes it and never pauses, resizes or deletes it. Pausing is yours: Azure portal, **Microsoft Fabric**, the capacity, **Pause**. A paused capacity stops the runner with that word; it resumes none. `bash infra/99-cleanup.sh --azure` deletes the resource group and the capacity with it; delete the workspace first (`--fabric-workspace`).
+- **Where.** The runner proposes the edge's own region, unless Microsoft's region table lists something the demo uses as not available for a capacity there. For an edge in `southcentralus` the table of 17 November 2026 lists no operations agent, so the runner proposes Central US; for `eastus`, East US 2. You can name another region. The table is a copy with its date, kept in `tools/deployer/steps.py`; a region that lacks what a later phase uses needs your yes, and blocks the plan once that phase is asked for.
+- **What preflight looks at first.** That the resource provider `Microsoft.Fabric` is registered (yours to register, like the others), that the SKU is offered to your subscription in the region, and that the name is free.
+- **What it cannot look at.** The subscription's quota of Fabric capacity units: no operation for it is written where I read. When Azure refuses the capacity over the quota, the step blocks with the place to ask for more (Azure portal, **Quotas**, **Microsoft Fabric**, **New Quota Request**), before the VM or anything after it is made.
+- **While Azure makes it.** The step waits up to 15 minutes. After that the apply ends with exit code 4, and the next apply waits for the same capacity; it never asks for a second one.
+
+The target block of every plan and apply shows the capacity by name and SKU: one that exists, one to be made, or one Fabric does not list for you.
+
+**The workspace.** New, with the generated name, or an existing one you chose. The runner takes an existing workspace only when it is on the capacity you chose and holds no item, so that everything in it is the demo's; it looks again at apply. It is held by its ID. With a new capacity the workspace is new too: a workspace stays on its capacity, and the runner moves none. Removing a deployment treats a chosen workspace like a made one: `bash infra/99-cleanup.sh --fabric` removes the demo's items and leaves the workspace, `--fabric-workspace` deletes the workspace named in the settings.
 
 ## Who the runner is
 
@@ -158,9 +261,10 @@ Most Fabric operations the runner uses also accept a service principal or a mana
 ## How it knows the target is its own
 
 - **The resource group** carries the tag `windfarm-demo-deployment` with the suffix, and its ID is in the checkpoint. A group of that name without the tag is never used.
-- **The workspace** has the suffix in its description, and its ID is in the checkpoint. A workspace of that name that the runner did not make is never used.
+- **The workspace** has the suffix in its description, and its ID is in the checkpoint. A workspace of that name that the runner did not make is never used. A workspace you chose is held by its ID, in the settings and in the checkpoint, and was empty when the runner took it.
+- **A capacity the runner made** is in the demo's resource group and carries the same tag. A capacity of that name without the tag is never used.
 - **Inside them**, a resource of a provider the demo does not use, or an item the demo does not create, stops the runner until you move it or name it with `--acknowledge`.
-- **The tenant and the subscription** of the first apply are kept. Signed in elsewhere later, every mode refuses.
+- **The tenant and the subscription** of a deployment are kept. Signed in elsewhere later, every mode refuses to work on that deployment; in a terminal, plan offers to start a new one there.
 
 ## Every step
 
@@ -178,10 +282,11 @@ Generated from the runner's own list (`python3 tools/build-runner-docs.py`). "Re
 | `pre.rights` | Your roles on the subscription | check | nothing | Role Assignments - List For Scope, filter atScope() and assignedTo(); az ad signed-in-user show |
 | `pre.providers` | Resource providers registered | check | nothing | az provider show |
 | `pre.region` | Region and VM size | check | nothing | Resource SKUs - List, with its location filter |
+| `pre.quota` | vCPU quota for the VM | check | nothing | az vm list-usage |
 | `pre.names` | Generated names are free | check | nothing | az storage account check-name |
 | `pre.custom_locations` | Custom Locations object ID | check | nothing | az ad sp show |
 | `pre.fabric` | The Fabric API answers you | check | nothing | GET /v1/workspaces |
-| `pre.capacity` | A capacity that can hold Fabric items, active | check | nothing | GET /v1/capacities and GET /v1/workspaces; SKUs as in the Fabric licenses article |
+| `pre.capacity` | A capacity that can hold Fabric items, active | check | nothing | GET /v1/capacities and GET /v1/workspaces; SKUs as in the Fabric licenses article. For a capacity to be made: Fabric Capacities - List Skus and Check Name Availability |
 | `phase1.tenant_settings` | Tenant settings for Phase 1 | you | nothing | Fabric admin portal; no API for a person who is not an administrator |
 
 **Phase 1**
@@ -189,13 +294,14 @@ Generated from the runner's own list (`python3 tools/build-runner-docs.py`). "Re
 | Step | What | Who | Changes | Rests on |
 |---|---|---|---|---|
 | `p1.resource_group` | Resource group of the demo | the runner | creates the resource group with the tag windfarm-demo-deployment | az group create |
+| `p1.capacity` | Fabric capacity of the deployment's own, when you chose a new one | the runner, only when you chose a new capacity, after `--approve-capacity-creation` | a Fabric capacity in the demo's resource group, with you as its administrator. It costs money for as long as it runs; the runner never pauses, resizes or deletes it | Fabric Capacities - Create Or Update (Microsoft.Fabric, 2023-11-01) through az rest |
 | `p1.edge_vm` | Edge VM | the runner | VM, network, SSH rule for your address, daily shutdown | infra/01-create-edge-vm.sh, without its provider registration and role assignments |
 | `p1.vm_identity_roles` | Roles for the VM's identity, on the resource group only | the runner, after `--approve-role-changes` | 'Kubernetes Cluster - Azure Arc Onboarding' and 'Reader' for the VM's managed identity, both on the demo's resource group. The manual guide gives Reader on the subscription; the runner does not | az role assignment create, the role by its ID; read with Role Assignments - List For Scope |
 | `p1.edge_host` | K3s and tools on the VM | the runner | installs K3s and the Azure CLI on the VM | edge/scripts/02-prepare-host.sh |
 | `p1.arc` | Cluster connected to Azure Arc | the runner | Arc-enabled cluster with custom locations | edge/scripts/03-arc-enable.sh (az connectedk8s connect, enable-features) |
 | `p1.iot_operations` | Azure IoT Operations | the runner, after `--approve-role-changes` | storage account, schema registry, device registry namespace, the instance. The Azure CLI gives the schema registry's identity 'Storage Blob Data Contributor' on that storage account | infra/04-deploy-iot-operations.sh (az iot ops init, create) |
 | `p1.simulator` | Turbine simulator on the edge | the runner | builds the simulator image on the VM and starts it | edge/scripts/05-deploy-simulator.sh |
-| `p1.workspace` | Fabric workspace of the demo | the runner | creates the workspace on the capacity shown | Workspaces - Create Workspace |
+| `p1.workspace` | Fabric workspace of the demo | the runner | creates the workspace on the capacity shown; or, when you chose an existing empty workspace, takes that one into the deployment and creates none | Workspaces - Create Workspace |
 | `p1.eventhouse` | Eventhouse and KQL database | the runner | Eventhouse WindFarmEH with its database | Eventhouse - Create Eventhouse; KQL Database - Create KQL Database |
 | `p1.kql_schema` | Tables, mapping and update policies | the runner | runs the two database scripts of step 6.2 | Kusto REST API, /v1/rest/mgmt, .execute database script |
 | `p1.lakehouse` | Lakehouse | the runner | Lakehouse WindFarmLH | Lakehouse - Create Lakehouse |
@@ -270,7 +376,8 @@ A **gate** is a measurement, not a command: fresh telemetry in the Eventhouse (r
 |---|---|---|
 | Resource providers | `az provider register --namespace …`, the lines the plan prints | The registration state of each |
 | Tenant settings | A Fabric administrator checks the settings the plan lists | Your `--confirm`. It cannot read them; later steps fail in a telling way when one is off |
-| Capacity | Put one ID into `FABRIC_CAPACITY_ID`, unless exactly one usable capacity is in sight | That Fabric lists it for you, that its SKU can hold Fabric items, and that it is active. A capacity Fabric does not list and one of your workspaces runs on passes as `NOT CHECKED` |
+| Capacity | Answer the question of plan; without a terminal, put one ID into `FABRIC_CAPACITY_ID` | That Fabric lists it for you, that its SKU can hold Fabric items, and that it is active. A capacity Fabric does not list and one of your workspaces runs on passes as `NOT CHECKED` |
+| Quota, for the VM or for a new capacity | Ask for more in the Azure portal, under **Quotas** | The vCPUs in use and their limit again; for a capacity, the creation itself |
 | Eventstream destination, only if Fabric leaves it in `Warning` or no rows arrive | The Get data wizard with the existing mapping, as in step 6.7 of the Phase 1 guide; the block prints the steps | The destination's state, and rows in `RawEvents` |
 | Notebooks 06, 07, 08, 09 | Open each, **Run all** | The semantic model, the report and the data agent as items; for 07 your `--confirm p2.acceptance` |
 | Operations agent and Teams | Step 9 of the Phase 3 guide | An item of type OperationsAgent named `WindFarmGearboxWatch`. Not whether it runs, and nothing of Teams |
@@ -283,9 +390,10 @@ A **gate** is a measurement, not a command: fresh telemetry in the Eventhouse (r
 ## Interruption, time limits, drift
 
 - **The checkpoint** is `.deploy/<suffix>/state.json`: every step with its state, the time, and what was measured. It is written in one move, ignored by git, and holds no secret. Keep it: it is the record that the resources are this deployment's.
-- **One apply at a time.** A lock file beside the checkpoint refuses a second apply on this computer. The lock of an apply that died is taken over. A second computer has no checkpoint, finds the resources marked as a deployment's, and adopts them only with the same settings file.
+- **One apply at a time.** A lock file beside the checkpoint refuses a second apply on this computer. The lock of an apply that died is taken over. A second computer has neither the settings nor the checkpoint and would start a deployment of its own. To go on with this one there, copy the folder `.deploy/<suffix>/` into the repository folder on that computer.
 - **A plan while an apply runs** reads the checkpoint and writes nothing to it, and says so. Its copy is older than the one the apply keeps writing.
 - **Answers that are kept.** Your roles, the resource providers and the VM sizes are asked once in twelve hours. Each answer is kept with what it depends on (the subscription, who you are, `LOCATION`, `VM_SIZE`): change one and the question is asked again. `--recheck` asks all three again.
+- **A capacity Azure is still making** after 15 minutes ends the apply with exit code 4. The approval holds: a capacity to be made is part of the plan by its name, SKU and region, before and after it exists.
 - **Long operations.** When Fabric answers "accepted", the address to ask about is written to the checkpoint before the first wait. Apply waits up to 15 minutes for an operation and 45 for a notebook, then ends with exit code 4. The next apply asks about the same operation and starts no second one.
 - **A run it did not write down.** Before it starts a notebook, the runner asks Fabric whether a run of that notebook is queued or running, and waits for that one.
 - **History.** Notebook 02 is run once. `--regenerate-history 2026-12-01` runs it again, once for that label.
@@ -313,6 +421,9 @@ Phases 5b and 5c are not the runner's. Deploy them from their guides.
 | Step 1 registers eight resource providers | You register them | A change to the whole subscription |
 | Step 1 asks `az vm list-skus` for each size | One call to the Resource SKUs API with its location filter, with one minute to answer. The script is handed the sizes that passed (`VM_SIZE_OFFERED`). When the question goes unanswered the script is told to ask nothing (`VM_SIZE_SKIP_CHECK=1`): it tries each size of `VM_SIZE` in its order, and Azure refuses the ones you are not offered | `az vm list-skus` fetches the sizes of every region. From a workstation it did not answer in five minutes on 25 November, and the filtered call did not answer in two minutes an hour later. Put a size you know you are offered first in `VM_SIZE` |
 | Roles are read and assigned with `az role assignment`, by name | Read with the operation Role Assignments - List For Scope and a filter; assigned with `az role assignment create`, the role by its ID | `az role assignment list` fetches every role definition to print names, which its own reference calls expensive. From the same workstation it did not answer in three minutes |
+| The capacity and the workspace are made in the portal before step 6 | Asked for by plan: an existing capacity or a new F16; a new workspace or an existing empty one | The request of 25 November, 15:51 |
+| Step 0: `config/demo.env`, copied from the example and filled in | No file to fill in. `.deploy/<suffix>/demo.env`, written when a deployment is started, one for each deployment of the folder | The request of 25 November, 16:35: the demo is built again and again, in one tenant or in several |
+| Nobody looks at the vCPU quota | Preflight reads it for the size that is tried first | A second VM beside an existing one is the common case of a refusal, and a stopped VM still counts |
 | Step 1 gives the VM's identity Reader on the subscription | Reader on the resource group | The runner grants nothing outside the demo. **Unproven**: whether Arc onboarding from the VM then still passes its provider check. If step 3 fails on it, grant Reader on the subscription by hand for the length of that step |
 | Step 6.4 and 6.7: the eventstream in the portal, the mapping chosen in a wizard | Created from a definition with the mapping named in it | Microsoft's article "Create an Eventstream with an Eventhouse DirectIngestion destination by using APIs" |
 | Steps 6.5 and 7.3: access and shortcuts in the portal | The Fabric API | Documented operations |
@@ -324,8 +435,8 @@ Phases 5b and 5c are not the runner's. Deploy them from their guides.
 
 | | Documented by Microsoft | Run against stand-ins here | Run on a tenant |
 |---|---|---|---|
-| The engine: plan, approval, checkpoint, lock, resume, redaction | not applicable | yes | The settings file of a first run and `preflight` to its end: yes, 25 November, with the second issue. `plan`, `apply`, `status`: **no** |
-| The prerequisite checks | their commands and operations, yes | yes | Tools, sign-in, extension, eight providers, the storage name, the Custom Locations object ID, the Fabric API, Node.js: yes, 25 November. Roles and VM sizes: asked, **not answered**; the lighter questions of this issue: **no**. The capacity check of this issue: **no** |
+| The engine: plan, approval, checkpoint, lock, resume, redaction | not applicable | yes | The settings file of a first run (then still in `config/`) and `preflight` to its end: yes, 25 November, with the second issue. `plan`, `apply`, `status`: **no** |
+| The prerequisite checks | their commands and operations, yes | yes | Tools, sign-in, extension, eight providers, the storage name, the Custom Locations object ID, the Fabric API, Node.js, the roles with the light question, the capacities by SKU, answers kept between runs: yes, 25 November. The VM sizes: asked three times, **never answered** on that workstation. A capacity Fabric does not list: **no** |
 | Scripts `infra/01`, `04`, `06`, `edge/scripts/02`, `03`, `05`, `07`, `app/create-app.sh`, `npx rayfin up` | their commands, yes | started by the runner: yes | by hand: yes, 19 to 25 November. Started by the runner, and `infra/01` with `DEPLOY_RUNNER=1`: **no** |
 | Workspace, Eventhouse, KQL database, Lakehouse, shortcuts, role assignment, notebook import, schedules through the Fabric API | yes, each read on 25 November | yes | **no**. The workspace role assignment by a script of Phase 4: yes |
 | Eventstream with direct ingestion and a named mapping | yes | yes | **no** |
@@ -336,33 +447,42 @@ Phases 5b and 5c are not the runner's. Deploy them from their guides.
 | Lakehouse route probe with the Azure CLI's token | the driver's sign-in, yes | the hand-over only | the same query by the app: yes. From a workstation: **no** |
 | Notebooks 06 to 10 as jobs with `%pip` | for pipelines only | yes | **no**; by hand: yes |
 | Data flow created with mode `Disabled` | yes | yes | **no** |
+| The questions of plan | not applicable | yes, with scripted answers | **no** |
+| A Fabric capacity made through the Microsoft.Fabric operations (create, read, name check, SKU list) | yes, read on 25 November | yes | **no** |
+| An existing empty workspace taken into a deployment | the two list operations, yes | yes | **no** |
+| The vCPU quota read with `az vm list-usage` | yes | yes | **no** |
+| Several deployments in one folder: started, switched, the settings of the earlier issues moved, the scripts finding the current one | not applicable | yes | **no** |
 
 ## Unproven on a tenant
 
 In the order a run meets them:
 
-1. **The two light questions about your roles**: `az ad signed-in-user show`, and the role assignments with the filter `atScope() and assignedTo('…')` through `az rest`. Unproven too: that a filter with spaces passes `--url-parameters` as the stand-in takes it.
-2. **A capacity Fabric does not list for you.** Whether Create Workspace accepts it, and what Fabric answers when it does not. The runner turns an answer with 401, 403 or the word capacity into a block; any other answer shows as a failure with Fabric's own words.
-3. **How a trial capacity appears in the list of capacities.** The runner takes the SKU `FT` with a number, or `Trial`, for one; Microsoft's reference shows F SKUs only.
-4. **`infra/01` under the runner**: without the provider registration, the group creation and the role assignments; and with `VM_SIZE_SKIP_CHECK=1`, where `az vm create` itself has to refuse the sizes you are not offered. The script moves on at the words `SkuNotAvailable`, `not available in location` and `NotAvailableForSubscription`; any other refusal ends it with Azure's message.
-5. **The roles of the VM's identity**, read with the filter `principalId eq '…'` and assigned by role ID.
-6. **Arc onboarding with Reader on the resource group** instead of the subscription.
-7. **The Eventhouse's own database.** The runner waits two minutes for the database Fabric gives a new Eventhouse, then creates one. Whether the API-created Eventhouse brings one is not written where I read.
-8. **The Kusto audience for the Azure CLI's token** on a Fabric Eventhouse.
-9. **The eventstream definition**: a custom endpoint with empty properties, and the destination with the Eventhouse's item ID as Microsoft's article has it. That article does not say how the database is chosen; this demo's Eventhouse has one. Microsoft warns that a property set which does not fit is accepted and ingests nothing; the gate after it is there for that, and the fallback is the wizard.
-10. **Whether ingestion created this way reads JSON without a format label**, which the wizard needed set by hand.
-11. **Shortcuts to KQL tables through the API** before the first write of OneLake availability.
-12. **Notebook import**: the part named `notebook-content.ipynb` (the REST reference; an older article says `artifact.content.ipynb`), and the default Lakehouse taking effect for a job.
-13. **Notebooks 01, 02, 03, 05 as jobs**: they have only run interactively. Parameters reaching the gate notebook's cell.
-14. **The schedule payload** with unzoned times and `UTC`, which is how Microsoft's samples write it while its text asks for a `Z`.
-15. **The result file of the gate** over the OneLake API. The verdict does not depend on it.
-16. **The SQL probe** with a token for `https://database.windows.net`.
-17. **`npx rayfin up` started without a terminal**, and how it says that it is not signed in. The runner recognises the words sign in, log in, keychain and 401; anything else is reported as a failure with the tool's own lines.
-18. **The times.** No step has been timed under the runner, so this document promises none. Every check that takes five seconds or more prints its seconds. Measured so far, on 25 November from a workstation under WSL: the eight provider questions took 11 s together, and the questions about roles and VM sizes ran into their limits of 180 s and 120 s without an answer. Why answers of several megabytes do not arrive on that workstation is not known. `apply` sends about 3.5 MB from it to the VM (the repository, over SSH) and notebooks of about 120 KB each to Fabric, and Phase 4 installs the app's packages from npm there: how those fare is not known either.
+1. **The move of settings from the earlier issues.** A folder that ran an earlier issue has `config/demo.env` with a suffix. The next run moves it to `.deploy/<suffix>/demo.env` and goes on with the same deployment and the same checkpoint. This ran against a copy of that layout only. Likewise unproven: a second deployment beside a first, and the scripts started by hand finding the current one.
+2. **The questions in a real terminal.** They were answered by a script of answers only.
+3. **The vCPU quota.** The shape of what `az vm list-usage` answers, and the names of the size families in it, which the runner derives from a size's name (`standardDSv7Family` for `Standard_D8s_v7`). A family it does not find is `NOT CHECKED`.
+4. **A capacity made by the runner**, when you choose one: the request through `az rest` with a JSON body, what Azure answers and how long it takes, the name under which Fabric lists the capacity (the runner looks for its Azure name), and what Azure says when the quota of capacity units does not cover it (the runner looks for the word quota).
+5. **An existing workspace you chose**: nothing new is asked of Fabric for it, and nothing of it has run.
+6. **A capacity Fabric does not list for you.** Whether Create Workspace accepts it, and what Fabric answers when it does not. The runner turns an answer with 401, 403 or the word capacity into a block; any other answer shows as a failure with Fabric's own words.
+7. **How a trial capacity appears in the list of capacities.** The runner takes the SKU `FT` with a number, or `Trial`, for one; Microsoft's reference shows F SKUs only.
+8. **`infra/01` under the runner**: without the provider registration, the group creation and the role assignments; and with `VM_SIZE_SKIP_CHECK=1`, where `az vm create` itself has to refuse the sizes you are not offered. The script moves on at the words `SkuNotAvailable`, `not available in location` and `NotAvailableForSubscription`; any other refusal ends it with Azure's message.
+9. **The roles of the VM's identity**, read with the filter `principalId eq '…'` and assigned by role ID. (The same operation with the filter for a person answered on 25 November.)
+10. **Arc onboarding with Reader on the resource group** instead of the subscription.
+11. **The Eventhouse's own database.** The runner waits two minutes for the database Fabric gives a new Eventhouse, then creates one. Whether the API-created Eventhouse brings one is not written where I read.
+12. **The Kusto audience for the Azure CLI's token** on a Fabric Eventhouse.
+13. **The eventstream definition**: a custom endpoint with empty properties, and the destination with the Eventhouse's item ID as Microsoft's article has it. That article does not say how the database is chosen; this demo's Eventhouse has one. Microsoft warns that a property set which does not fit is accepted and ingests nothing; the gate after it is there for that, and the fallback is the wizard.
+14. **Whether ingestion created this way reads JSON without a format label**, which the wizard needed set by hand.
+15. **Shortcuts to KQL tables through the API** before the first write of OneLake availability.
+16. **Notebook import**: the part named `notebook-content.ipynb` (the REST reference; an older article says `artifact.content.ipynb`), and the default Lakehouse taking effect for a job.
+17. **Notebooks 01, 02, 03, 05 as jobs**: they have only run interactively. Parameters reaching the gate notebook's cell.
+18. **The schedule payload** with unzoned times and `UTC`, which is how Microsoft's samples write it while its text asks for a `Z`.
+19. **The result file of the gate** over the OneLake API. The verdict does not depend on it.
+20. **The SQL probe** with a token for `https://database.windows.net`.
+21. **`npx rayfin up` started without a terminal**, and how it says that it is not signed in. The runner recognises the words sign in, log in, keychain and 401; anything else is reported as a failure with the tool's own lines.
+22. **The times.** No step has been timed under the runner, so this document promises none. Every check that takes five seconds or more prints its seconds. Measured so far, on 25 November from a workstation under WSL: the eight provider questions took 11 s together, and the questions about roles and VM sizes ran into their limits of 180 s and 120 s without an answer. Why answers of several megabytes do not arrive on that workstation is not known. `apply` sends about 3.5 MB from it to the VM (the repository, over SSH) and notebooks of about 120 KB each to Fabric, and Phase 4 installs the app's packages from npm there: how those fare is not known either.
 
 ## Tests
 
-`simulator/tests/test_deploy_runner.py`, 73 tests against `simulator/tests/deploy_fakes.py`, a pretend Azure and Fabric that answer in the documented shapes and record every change:
+`simulator/tests/test_deploy_runner.py`, 97 tests against `simulator/tests/deploy_fakes.py`, a pretend Azure and Fabric that answer in the documented shapes and record every change:
 
 | Asked for | Test |
 |---|---|
@@ -372,10 +492,12 @@ In the order a run meets them:
 | Unsupported API handoffs | a destination in `Warning`; no rows after the wait; the gate notebook failing; each operator step of Phases 2 to 4 in turn; the fallback from a failed job to the person |
 | Secret redaction | tokens, both keys, the connection string and the middle of each key searched in everything printed and written; a script that prints a secret; the redactor by itself; the checkpoint file |
 | After the first run on a tenant | every check announced as it starts; one check that cannot be made is one line; a missing CLI extension is the operator's; the Azure CLI is started without a keyboard; the VM sizes asked with one filtered call, which cannot stop a run and is not asked again once the VM exists |
-| After the second run on a tenant | a Premium Per User, A or EM capacity is never chosen and never accepted; one usable capacity with no other in sight is taken, two candidates are a choice; a capacity Fabric does not list passes as not checked and the workspace decides; what could not be checked is never called done, in the plan, in apply and in status; preflight shows no plan; roles read with one small question and assigned by ID, and `az role assignment list` fails the test if it is asked; an unanswered question is not asked again by every run, is asked again on `--recheck`, after twelve hours and when a setting it depends on changes; a block is never kept; a plan during an apply writes nothing to the checkpoint |
+| After the second run on a tenant | a Premium Per User, A or EM capacity is never chosen and never accepted; one usable capacity with no other in sight is taken, two candidates are a choice; a capacity Fabric does not list passes as not checked and the workspace decides; what could not be checked is never called done, in the plan, in apply and in status; preflight shows no plan; roles read with one small question and assigned by ID, and `az role assignment list` fails the test if it is asked; an unanswered question is not asked again by every run, is asked again on `--recheck`, after twelve hours and when a setting it depends on changes; a block is never kept; a plan during an apply writes nothing to the checkpoint; a gate the runner measures is not shown as the operator's step |
+| The questions of plan (fourth issue) | a capacity picked from the list, and asked for again when the one in the settings cannot hold the demo; a new capacity made only when chosen and approved, once, in the demo's group, before the VM, and the same approval holding after it exists; what stands in the way of one said first (provider, SKU not offered, name taken, a guest, a region that lacks what a phase uses); no quota, a paused capacity and a capacity that is not the deployment's stop the step; a capacity Azure is still making is waited for and not made twice; an existing workspace taken only when empty and on the chosen capacity, also when named by hand, and looked at again at apply; the two regions asked and checked; the VM size asked once Azure could not say; nobody at the terminal, `--no-input`, a closed terminal, Ctrl+C, an apply in progress; the vCPU quota |
+| One folder, many deployments (fifth issue) | nothing prepared, and nothing ever written into `config/`; a second deployment beside the first, each with its own settings and checkpoint, the first untouched; what is taken over within a subscription, and nothing across subscriptions; a suffix never drawn twice; `--deployment`, an unknown suffix, several deployments with none current, a deployment whose folder was deleted; an apply with the plan of another deployment; another subscription and a vanished resource group asked about in a terminal and not without one; the settings of the earlier issues moved once, a file made by hand left alone, a stray copy never replacing a deployment's own; every script handed the settings of its deployment |
 | And | approval of exactly one plan; a changed file and drift void it; role changes wait and stay on the resource group; Phase 5a absent by default, switched off when present, notebooks 12 and 13 impossible to run; the history once and once per label; the schedule in the future; preflight; the KQL splitter; the gate notebook's logic; the real adapters |
 
-Fifty faults were planted in the runner, one at a time. Of the twenty-two of the first issue, twenty-one made a test fail at once; the twenty-second, a key written into the settings with its last character cut off, passed until the test also searched for the middle of each key. The twenty-eight of the third issue, in the capacity check, the words, the kept answers, the roles and the lock, each made a test fail at once.
+One hundred and thirty-eight faults were planted, one at a time. Of the twenty-two of the first issue, twenty-one made a test fail at once; the twenty-second, a key written into the settings with its last character cut off, passed until the test also searched for the middle of each key. The twenty-eight of the third issue each made a test fail at once. Of the forty-three of the fourth issue, in the questions, the new capacity, the chosen workspace and the quota, thirty-nine made a test fail at once; four passed until a test was made to look at the right place: questions asked by `apply`, questions asked while an apply runs, Phase 3 reading a capacity that is still to be made, and the quota asked about a VM that exists. Of the forty-five of the fifth issue, thirty-seven in the runner and eight in the way the scripts find their settings (those against the scenarios of `tools/script-tests/run.sh`), forty-four made a test fail at once; one passed until a test looked for it: a checkpoint folder without settings counted as a deployment.
 
 ```bash
 cd simulator && python3 -m pytest -q tests/test_deploy_runner.py
@@ -394,6 +516,9 @@ Microsoft Learn, read on 25 November 2026.
 - [Microsoft Fabric concepts and licenses](https://learn.microsoft.com/en-us/fabric/enterprise/licenses): F SKUs and the trial hold Fabric items; P SKUs support Fabric; Premium Per User "doesn't provision a Fabric capacity"; A and EM SKUs "only support Power BI items".
 - [Capacities - List Capacities](https://learn.microsoft.com/en-us/rest/api/fabric/core/capacities/list-capacities): the capacities the caller administers or contributes to, each with SKU, region and state. [Workspaces - List Workspaces](https://learn.microsoft.com/en-us/rest/api/fabric/core/workspaces/list-workspaces): each workspace with the ID of its capacity. [Manage your Fabric capacity](https://learn.microsoft.com/en-us/fabric/admin/capacity-settings): the contributor role and where it is set.
 - [List Azure role assignments using the REST API](https://learn.microsoft.com/en-us/azure/role-based-access-control/role-assignments-list-rest): the filters `atScope()`, `assignedTo('…')`, which follows groups, and `principalId eq '…'`. [Azure built-in roles](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles): the six role IDs the runner knows. [az role assignment](https://learn.microsoft.com/en-us/cli/azure/role/assignment): filling in role names "is expensive"; `create` takes a role name or ID.
+- Microsoft.Fabric in Azure, API version 2023-11-01: [Fabric Capacities - Create Or Update](https://learn.microsoft.com/en-us/rest/api/microsoftfabric/fabric-capacities/create-or-update) (the name's pattern, the body with `sku`, `location` and the administrators, the states), [Check Name Availability](https://learn.microsoft.com/en-us/rest/api/microsoftfabric/fabric-capacities/check-name-availability), [List Skus](https://learn.microsoft.com/en-us/rest/api/microsoftfabric/fabric-capacities/list-skus) (the SKUs for a new capacity with the locations of each).
+- [Fabric region availability](https://learn.microsoft.com/en-us/fabric/admin/region-availability), the page of 17 November 2026: for South Central US it lists the operations agent as not available; for Central US nothing. [Buy a Microsoft Fabric subscription](https://learn.microsoft.com/en-us/fabric/enterprise/buy-subscription): the provider `Microsoft.Fabric` has to be registered, the administrator has to belong to the tenant, and a guest cannot be one. [Microsoft Fabric capacity quotas](https://learn.microsoft.com/en-us/fabric/enterprise/fabric-quotas): where the quota is seen and asked for. [Pause and resume your capacity](https://learn.microsoft.com/en-us/fabric/enterprise/pause-resume).
+- [Virtual machine vCPU quotas](https://learn.microsoft.com/en-us/azure/virtual-machines/quotas): the two quotas a new VM has to fit, deallocated VMs counted, and `az vm list-usage`.
 - [Resource SKUs - List](https://learn.microsoft.com/en-us/rest/api/compute/resource-skus/list): `$filter=location eq '…'`, the only filter it supports; a size's `restrictions` of type `Location` with the reason.
 - [Manage Apache Spark libraries in Microsoft Fabric](https://learn.microsoft.com/en-us/fabric/data-engineering/library-management): inline installation in pipeline runs, and `_inlineInstallationEnabled`.
 - [Create a data flow in Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/connect-to-cloud/howto-create-dataflow) and the [Dataflow REST reference](https://learn.microsoft.com/en-us/rest/api/iotoperations/dataflow/create-or-update): `mode`, `Enabled` or `Disabled`.

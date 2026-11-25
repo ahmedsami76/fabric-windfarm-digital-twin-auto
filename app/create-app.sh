@@ -29,12 +29,16 @@ case "$MODE" in all|--overlay) ;; *) stop "Unknown option $MODE. Use no option, 
 [[ -z "${SUDO_USER:-}" ]] || stop "Do not run this with sudo: the app would belong to root and the sign-in of Rayfin would be root's."
 
 # The functions find the workspace by its name. The overlay names the one of the guides; a deployment made by
-# tools/deploy.py has a name of its own, taken from FABRIC_WORKSPACE_NAME or from config/demo.env. Only the copy
-# in the app is changed, so the overlay and its build stamp stay what they are.
+# tools/deploy.py has a name of its own, taken from FABRIC_WORKSPACE_NAME or from the settings file: the one
+# ENV_FILE names, else config/demo.env, else the settings of the deployment the runner is working on. Only the
+# copy in the app is changed, so the overlay and its build stamp stay what they are.
 workspace_name() {
-  local name="${FABRIC_WORKSPACE_NAME:-}"
-  if [[ -z "$name" && -f "$HERE/../config/demo.env" ]]; then
-    name="$(sed -n 's/^FABRIC_WORKSPACE_NAME="\([^"]*\)".*/\1/p' "$HERE/../config/demo.env" | head -n 1)"
+  local name="${FABRIC_WORKSPACE_NAME:-}" settings="${ENV_FILE:-$HERE/../config/demo.env}"
+  if [[ ! -f "$settings" && -f "$HERE/../.deploy/current" ]]; then
+    settings="$HERE/../.deploy/$(tr -d '[:space:]' < "$HERE/../.deploy/current")/demo.env"
+  fi
+  if [[ -z "$name" && -f "$settings" ]]; then
+    name="$(sed -n 's/^FABRIC_WORKSPACE_NAME="\([^"]*\)".*/\1/p' "$settings" | head -n 1)"
   fi
   echo "${name:-WindFarmDigitalTwin}"
 }

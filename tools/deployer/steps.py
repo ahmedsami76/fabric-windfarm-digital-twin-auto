@@ -14,7 +14,7 @@ import time
 
 from . import names
 from .cloud import CloudError, operation, run_notebook
-from .core import Blocked, Probe, Refused, Step, blocked, done, kept, todo, unverified
+from .core import PHASES, Blocked, Probe, Refused, Step, StillRunning, blocked, done, kept, todo, unverified
 
 TAG = "windfarm-demo-deployment"
 PROVIDERS = ("Microsoft.ExtendedLocation", "Microsoft.Kubernetes", "Microsoft.KubernetesConfiguration", "Microsoft.IoTOperations",
@@ -36,7 +36,8 @@ QUICK = 60      # seconds for a question preflight can do without: unanswered, t
 RG_PROVIDERS = ("microsoft.compute", "microsoft.network", "microsoft.devtestlab", "microsoft.kubernetes",
                 "microsoft.kubernetesconfiguration", "microsoft.extendedlocation", "microsoft.iotoperations",
                 "microsoft.deviceregistry", "microsoft.storage", "microsoft.secretsynccontroller", "microsoft.managedidentity",
-                "microsoft.security", "microsoft.insights", "microsoft.eventgrid", "microsoft.alertsmanagement")
+                "microsoft.security", "microsoft.insights", "microsoft.eventgrid", "microsoft.alertsmanagement",
+                "microsoft.fabric")      # the capacity of the deployment's own, when the operator chose to have one made
 LIVE_TABLES = ("TurbineTelemetry", "WeatherObservations", "AlarmEvents", "TurbineStateChanges", "AssetRegistry", "EdgeHeartbeats")
 ALL_TABLES = ("RawEvents",) + LIVE_TABLES
 GATE_NOTEBOOK = "90_deployment_gate"
@@ -248,14 +249,15 @@ def pre_extensions(ctx) -> Probe:
 def pre_providers(ctx) -> Probe:
     # One small question for each. A single `az provider list` would be one call, and a download of every provider
     # with all its resource types: on a slow line that is the kind of call this runner has learned to avoid.
-    missing = [namespace for namespace in PROVIDERS
+    wanted = PROVIDERS + (("Microsoft.Fabric",) if creating(ctx) else ())       # for a capacity of the deployment's own
+    missing = [namespace for namespace in wanted
                if ctx.az.maybe("provider", "show", "--namespace", namespace, "--query", "registrationState") != "Registered"]
     if missing:
         return blocked("Not registered in the subscription: " + ", ".join(missing) + ". Registering is a change to the whole "
                        "subscription, so the runner leaves it to you.",
                        "\n".join(f"az provider register --namespace {namespace}" for namespace in missing)
                        + "\nRegistration takes a few minutes; plan shows when it is through.")
-    return done(f"{len(PROVIDERS)} resource providers registered")
+    return done(f"{len(wanted)} resource providers registered")
 
 
 def pre_rights(ctx) -> Probe:
@@ -290,7 +292,7 @@ def pre_region(ctx) -> Probe:
     location = ctx.cfg.get("LOCATION", "")
     if location not in IOT_OPERATIONS_REGIONS:
         return blocked(f"LOCATION is {location}. Azure IoT Operations supports Arc clusters in: {', '.join(IOT_OPERATIONS_REGIONS)}.",
-                       f"Set LOCATION in {ctx.env_file.name} to one of these.")
+                       f"Set LOCATION in {ctx.env_label} to one of these.")
     if ctx.state.step("p1.edge_vm").get("status") == "complete":
         return done(f"{location}; the VM exists, so its size is no longer a question")
     try:
@@ -303,7 +305,7 @@ def pre_region(ctx) -> Probe:
     if not usable:
         return blocked(f"None of the sizes in VM_SIZE is offered to this subscription in {location}: "
                        + "; ".join(f"{size}: {why}" for size, why in refused.items()),
-                       f"Put a size with 8 vCPUs and 32 GB that you are offered into VM_SIZE in {ctx.env_file.name}. The Azure "
+                       f"Put a size with 8 vCPUs and 32 GB that you are offered into VM_SIZE in {ctx.env_label}. The Azure "
                        "portal shows them under Virtual machines, Create, Size; sizes of the v6 and v7 families are the usual ones "
                        "in a managed subscription.")
     skipped = f" ({', '.join(refused)} not offered)" if refused else ""
@@ -330,6 +332,48 @@ def offered_sizes(ctx) -> tuple[list, dict]:
     return usable, refused
 
 
+def vm_family(size: str) -> tuple[str, int] | None:
+    """('standarddasv7family', 8) for Standard_D8as_v7: the name Azure's usage list gives the size's family, as far as it
+    can be told from the size's name, and the vCPUs the size takes."""
+    match = re.fullmatch(r"Standard_([A-Z]+)(\d+)([a-z]*)_v(\d+)", size)
+    if not match:
+        return None
+    letters, cores, features, version = match.groups()
+    return f"standard{letters}{features}v{version}family".lower(), int(cores)
+
+
+def pre_quota(ctx) -> Probe:
+    """Room in the vCPU quota for the VM. Microsoft: a new VM must fit the quota of its size family and the region's
+    total, and deallocated VMs count too. Only the size that is tried first is looked at."""
+    location, sizes = ctx.cfg.get("LOCATION", ""), ctx.cfg.get("VM_SIZE", "").split()
+    if ctx.state.step("p1.edge_vm").get("status") == "complete":
+        return done("the VM exists")
+    told = vm_family(sizes[0]) if sizes else None
+    if not told:
+        return unverified(f"the size family of {sizes[0] if sizes else 'nothing'} cannot be told from its name")
+    family, cores = told
+    try:
+        rows = ctx.az.json("vm", "list-usage", "--location", location,
+                           "--query", "[].{name: name.value, used: currentValue, limit: limit}", timeout=QUICK) or []
+    except CloudError as error:
+        return unverified(f"the vCPU quota in {location} could not be read ({str(error)[:140]})")
+    by_name = {str(row.get("name") or "").lower(): row for row in rows}
+    free = lambda row: int(row.get("limit") or 0) - int(row.get("used") or 0)      # noqa: E731
+    total, own = by_name.get("cores"), by_name.get(family)
+    short = [f"{what}: {row.get('used')} of {row.get('limit')} vCPUs in use" for what, row in
+             (("the region's total", total), (f"the family of {sizes[0]}", own)) if row and free(row) < cores]
+    if short:
+        return blocked(f"{sizes[0]} takes {cores} vCPUs, and the quota in {location} has no room for them. " + "; ".join(short) + ".",
+                       "Ask for more in the Azure portal: Quotas, Compute. A VM that is stopped still counts; only a deleted one "
+                       "gives its vCPUs back. Or put a size of another family first in VM_SIZE.")
+    if not own:
+        return unverified(f"{cores} vCPUs for {sizes[0]}: the region's total has room"
+                          + (f" ({free(total)} free of {total.get('limit')})" if total else " as far as it is listed")
+                          + f"; the usage list has no row named like the family of {sizes[0]}")
+    return done(f"{cores} vCPUs for {sizes[0]}: {free(own)} free of {own.get('limit')} in its family"
+                + (f", {free(total)} of {total.get('limit')} in the region" if total else ""))
+
+
 def pre_names(ctx) -> Probe:
     account_name = ctx.cfg.get("STORAGE_ACCOUNT_NAME", "")
     if ctx.target("resource_group_id"):
@@ -337,7 +381,7 @@ def pre_names(ctx) -> Probe:
     answer = ctx.az.json("storage", "account", "check-name", "--name", account_name) or {}
     if not answer.get("nameAvailable", True):
         return blocked(f"The storage account name {account_name} is taken ({answer.get('reason')}). Storage names are unique "
-                       "across Azure.", "python3 tools/deploy.py plan --new-names")
+                       "across Azure.", "python3 tools/deploy.py plan --new")
     return done(f"suffix {suffix(ctx)}; {account_name} is free")
 
 
@@ -350,7 +394,7 @@ def pre_custom_locations(ctx) -> Probe:
         return blocked("The object ID of the Custom Locations service in your tenant is not in the settings, and the Azure CLI "
                        "could not read it. Reading it needs a person who may read service principals in Microsoft Entra ID.",
                        f"az ad sp show --id {CUSTOM_LOCATIONS_APP} --query id --output tsv\n"
-                       f"Put the 36 characters it prints into CUSTOM_LOCATIONS_OID in {ctx.env_file.name}. It is not the ID above, "
+                       f"Put the 36 characters it prints into CUSTOM_LOCATIONS_OID in {ctx.env_label}. It is not the ID above, "
                        "which is the same in every tenant.")
     names.write_env(ctx.env_file, {"CUSTOM_LOCATIONS_OID": found})
     ctx.cfg["CUSTOM_LOCATIONS_OID"] = found
@@ -373,6 +417,205 @@ CAN_HOLD = {"fabric": "a Fabric capacity", "trial": "a Fabric trial capacity",
             "premium": "a Power BI Premium capacity (P SKU): Fabric has to be enabled on it"}
 CANNOT_HOLD = {"per-user": "a Premium Per User capacity. It holds Power BI items only",
                "embedded": "an A or EM capacity. It holds Power BI items only"}
+
+
+# ---- a capacity of the deployment's own, when the operator chose to have one made ------------------------------------
+FABRIC_ARM = "api-version=2023-11-01"        # Microsoft.Fabric: Fabric Capacities - Create Or Update, Get, Check Name
+#                                              Availability and List Skus, as read on 25 November 2026
+NEW_CAPACITY_SKU = "F16"
+NEW_CAPACITY_BASE = "fabwindfarm"            # a capacity's name: a lower-case letter, then letters and digits, 3 to 63
+# Microsoft Learn, "Fabric region availability", page of 17 November 2026, read 25 November 2026: the regions with all
+# Fabric workloads, and for each what the page lists as not available there, as far as this demo uses it.
+REGIONS_READ = "17 November 2026"
+FABRIC_REGIONS = {
+    "brazilsouth": "Brazil South", "canadacentral": "Canada Central", "canadaeast": "Canada East", "mexicocentral": "Mexico Central",
+    "centralus": "Central US", "eastus": "East US", "eastus2": "East US 2", "northcentralus": "North Central US",
+    "southcentralus": "South Central US", "westus": "West US", "westus2": "West US 2", "westus3": "West US 3",
+    "northeurope": "North Europe", "westeurope": "West Europe", "francecentral": "France Central",
+    "germanywestcentral": "Germany West Central", "italynorth": "Italy North", "norwayeast": "Norway East",
+    "polandcentral": "Poland Central", "spaincentral": "Spain Central", "swedencentral": "Sweden Central",
+    "switzerlandnorth": "Switzerland North", "switzerlandwest": "Switzerland West", "uksouth": "UK South", "ukwest": "UK West",
+    "uaenorth": "UAE North", "southafricanorth": "South Africa North", "eastasia": "East Asia", "southeastasia": "Southeast Asia",
+    "australiaeast": "Australia East", "australiasoutheast": "Australia Southeast", "centralindia": "Central India",
+    "southindia": "South India", "indonesiacentral": "Indonesia Central", "israelcentral": "Israel Central",
+    "japaneast": "Japan East", "japanwest": "Japan West", "koreacentral": "Korea Central", "malaysiawest": "Malaysia West",
+    "newzealandnorth": "New Zealand North", "taiwannorth": "Taiwan North", "taiwannorthwest": "Taiwan Northwest"}
+FABRIC_REGION_GAPS = {"eastus": ("Operations agent",), "southcentralus": ("Operations agent",), "israelcentral": ("Fabric App",),
+                      "malaysiawest": ("Fabric App",), "taiwannorth": ("Fabric App",), "taiwannorthwest": ("Fabric App",)}
+DEMO_USES = {"Operations agent": "phase3", "Fabric App": "phase4"}       # what the demo needs of those, and from which phase
+# Where the edge's own region lacks something the demo uses: the region next to it that lacks nothing.
+NEIGHBOUR = {"southcentralus": "centralus", "eastus": "eastus2"}
+
+
+def region_key(text) -> str:
+    """'Central US', 'centralus' and 'US - Central US' are one region."""
+    key = re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+    return key[2:] if key.startswith("us") and key[2:] in FABRIC_REGIONS else key
+
+
+def region_name(region) -> str:
+    return FABRIC_REGIONS.get(region_key(region), str(region))
+
+
+def region_gaps(region, up_to: str = "phase4") -> list:
+    """What Microsoft's table lists as missing in a region, of what the demo uses up to a phase."""
+    return [feature for feature in FABRIC_REGION_GAPS.get(region_key(region), ())
+            if PHASES.index(DEMO_USES[feature]) <= PHASES.index(up_to)]
+
+
+def proper_fabric_region(edge_location: str) -> str | None:
+    """The region for a new capacity: the edge's own when it lacks nothing the demo uses, else the one next to it."""
+    edge = region_key(edge_location)
+    if edge in FABRIC_REGIONS and not region_gaps(edge):
+        return edge
+    return NEIGHBOUR.get(edge)
+
+
+def creating(ctx) -> bool:
+    return bool(ctx.cfg.get("FABRIC_CAPACITY_CREATE_SKU"))
+
+
+def new_capacity(ctx) -> dict:
+    return {"name": ctx.cfg.get("FABRIC_CAPACITY_NAME", ""), "sku": ctx.cfg.get("FABRIC_CAPACITY_CREATE_SKU", ""),
+            "region": region_key(ctx.cfg.get("FABRIC_CAPACITY_REGION", ""))}
+
+
+def new_capacity_label(ctx) -> str:
+    new = new_capacity(ctx)
+    return f"{new['name']} ({new['sku']}, {region_name(new['region'])})"
+
+
+def capacity_url(ctx) -> str:
+    return (f"https://management.azure.com/subscriptions/{account(ctx)['id']}/resourceGroups/{ctx.cfg['RESOURCE_GROUP']}"
+            f"/providers/Microsoft.Fabric/capacities/{new_capacity(ctx)['name']}")
+
+
+def arm_capacity(ctx) -> dict | None:
+    """The deployment's own capacity as Azure has it, or None while it does not exist."""
+    return ctx.remember("arm_capacity", lambda: ctx.az.maybe("rest", "--method", "get", "--url", capacity_url(ctx),
+                                                             "--url-parameters", FABRIC_ARM, timeout=QUICK))
+
+
+def fabric_sku_regions(ctx, sku: str) -> set:
+    """The regions in which this subscription is offered a SKU for a new capacity (Fabric Capacities - List Skus)."""
+    def ask():
+        found = ctx.az.json("rest", "--method", "get",
+                            "--url", f"https://management.azure.com/subscriptions/{account(ctx)['id']}/providers/Microsoft.Fabric/skus",
+                            "--url-parameters", FABRIC_ARM, "--query", f"value[?name=='{sku}'].locations | [0]", timeout=QUICK) or []
+        return {region_key(place) for place in found}
+    return ctx.remember(f"fabric_skus:{sku}", ask)
+
+
+def capacity_name_free(ctx, capacity_name: str, region: str) -> tuple[bool, str]:
+    answer = ctx.az.json("rest", "--method", "post", "--url",
+                         f"https://management.azure.com/subscriptions/{account(ctx)['id']}/providers/Microsoft.Fabric/locations/"
+                         f"{region}/checkNameAvailability", "--url-parameters", FABRIC_ARM,
+                         "--body", json.dumps({"name": capacity_name, "type": "Microsoft.Fabric/capacities"}), timeout=QUICK) or {}
+    return bool(answer.get("nameAvailable")), str(answer.get("reason") or answer.get("message") or "")
+
+
+ASK = "python3 tools/deploy.py plan --ask   (in a terminal: it asks again)"
+
+
+def pre_new_capacity(ctx) -> Probe:
+    """Nothing stands in the way of making the capacity the operator chose to have made. Reads; creates nothing."""
+    new, label = new_capacity(ctx), new_capacity_label(ctx)
+    made = capacity(ctx)
+    if made:                                  # the creation step found it in Fabric's list and wrote its ID down
+        if made.get("state") != "Active":
+            return blocked(f"Capacity {capacity_label(made)} is {made.get('state')}.", "Resume it in the Azure portal: Microsoft "
+                           "Fabric, the capacity, Resume. The runner does not change a capacity once it exists.")
+        return done(f"capacity {capacity_label(made)}, made by this deployment", capacity_id=made["id"])
+    if not re.fullmatch(r"[a-z][a-z0-9]{2,62}", new["name"]) or not re.fullmatch(r"F\d+", new["sku"]):
+        return blocked(f"The settings describe a new capacity that cannot be made: name '{new['name']}', SKU '{new['sku']}'. A name "
+                       "is a lower-case letter followed by letters and digits; a SKU is F2, F4, F8, F16 and so on.", ASK)
+    if new["region"] not in FABRIC_REGIONS:
+        return blocked(f"'{new['region']}' is not a region with all Fabric workloads in Microsoft's table of {REGIONS_READ}.", ASK)
+    user = str((account(ctx).get("user") or {}).get("name") or "")
+    if "#EXT#" in user.upper():
+        return blocked(f"You are signed in as a guest ({user}). Microsoft: a guest cannot be the administrator of a capacity, and "
+                       "the runner makes you the administrator of the one it creates.", "Use an existing capacity, or sign in "
+                       f"as a member of the tenant. {ASK}")
+    missing = region_gaps(new["region"], ctx.options.up_to)
+    if missing:
+        return blocked(f"Microsoft's region table of {REGIONS_READ} lists no {' and no '.join(missing)} for a capacity in "
+                       f"{region_name(new['region'])}, and the phases you chose use it.", f"Choose another region. {ASK}")
+    later = [feature for feature in region_gaps(new["region"]) if feature not in missing]
+    caution = f". For later phases: no {' and no '.join(later)} in that region, by Microsoft's table of {REGIONS_READ}" if later else ""
+    try:
+        offered = fabric_sku_regions(ctx, new["sku"])
+        if new["region"] not in offered:
+            return blocked(f"{new['sku']} is not offered to this subscription in {region_name(new['region'])}. It is offered in: "
+                           f"{some([region_name(place) for place in offered], most=12) or 'no region'}.", f"Choose another region. {ASK}")
+        if not (ctx.target("resource_group_id") and arm_capacity(ctx)):
+            free, why = capacity_name_free(ctx, new["name"], new["region"])
+            if not free:
+                return blocked(f"The capacity name {new['name']} cannot be used ({why or 'no reason given'}).",
+                               "python3 tools/deploy.py plan --new")
+    except CloudError as error:
+        return unverified(f"a new capacity will be made by p1.capacity: {label}. Whether {new['sku']} is offered there and the name "
+                          f"is free could not be read ({str(error)[:140]}){caution}")
+    return done(f"a new capacity will be made by p1.capacity: {label}. {new['sku']} is offered there and the name is free{caution}")
+
+
+def p1_capacity(ctx) -> Probe:
+    if not creating(ctx):
+        return done("the deployment uses a capacity that exists; none is made")
+    new = new_capacity(ctx)
+    if not ctx.target("resource_group_id"):
+        return after("p1.resource_group")
+    found = arm_capacity(ctx)
+    if not found:
+        return todo(f"{new['name']} does not exist yet")
+    if (found.get("tags") or {}).get(TAG) != suffix(ctx):
+        return blocked(f"A Fabric capacity named {new['name']} is in the resource group, and this deployment did not make it.",
+                       "Start a deployment with other names: python3 tools/deploy.py plan --new")
+    properties = found.get("properties") or {}
+    state, provisioning = properties.get("state"), properties.get("provisioningState")
+    if "Failed" in (state, provisioning):
+        return blocked(f"Azure reports the capacity {new['name']} as failed.", "Look at it in the Azure portal (Microsoft Fabric, "
+                       "the capacity, Activity log). If it is of no use, delete it there; the runner deletes nothing. Then run "
+                       "apply again.")
+    if state in ("Paused", "Pausing", "Suspended", "Suspending"):
+        return blocked(f"The capacity {new['name']} is {state}.", "Resume it in the Azure portal: Microsoft Fabric, the capacity, "
+                       "Resume. The runner does not resume a capacity.")
+    if state != "Active":
+        return todo(f"the capacity is {state or provisioning or 'being made'}")
+    listed = next((entry for entry in capacities(ctx) if entry.get("displayName") == new["name"]), None)
+    if not listed:
+        return todo("the capacity is active in Azure; Fabric does not list it yet")
+    if ctx.cfg.get("FABRIC_CAPACITY_ID") != listed["id"]:
+        names.write_env(ctx.env_file, {"FABRIC_CAPACITY_ID": listed["id"]})       # what the workspace step asks for
+        ctx.cfg["FABRIC_CAPACITY_ID"] = listed["id"]
+    return done(f"capacity {capacity_label(listed)}, made by this deployment", capacity_id=listed["id"], resource_id=found.get("id"))
+
+
+def act_capacity(ctx) -> None:
+    new = new_capacity(ctx)
+    ctx.cache.pop("arm_capacity", None)
+    if not arm_capacity(ctx):                 # one that exists was started by an apply that did not live to see it finished
+        body = {"location": new["region"], "sku": {"name": new["sku"], "tier": "Fabric"},
+                "properties": {"administration": {"members": [(account(ctx).get("user") or {}).get("name")]}},
+                "tags": {TAG: suffix(ctx), "created-by": "tools/deploy.py"}}
+        try:
+            ctx.az.run("rest", "--method", "put", "--url", capacity_url(ctx), "--url-parameters", FABRIC_ARM, "--body", json.dumps(body))
+        except CloudError as error:
+            if "quota" in str(error).lower():
+                raise Blocked(f"Azure did not make the capacity: {error}",
+                              f"The subscription's quota of Fabric capacity units does not cover an {new['sku']} in "
+                              f"{region_name(new['region'])}. Ask for more in the Azure portal: Quotas, Microsoft Fabric, New Quota "
+                              f"Request. Or use an existing capacity: {ASK}") from None
+            raise
+    # Azure answers the request at once and makes the capacity afterwards. Wait for it, within the limit of an operation.
+    deadline = ctx.clock() + ctx.options.limits["operation"]
+    while True:
+        ctx.cache.pop("arm_capacity", None)
+        state = ((arm_capacity(ctx) or {}).get("properties") or {}).get("state")
+        if state in ("Active", "Failed", "Paused", "Pausing", "Suspended", "Suspending"):
+            return                            # the step's own look says which, and what to do
+        if ctx.clock() >= deadline:
+            raise StillRunning(f"Azure is still making the capacity {new['name']} (state: {state or 'not reported'})")
+        ctx.sleep(ctx.options.limits["poll"])
 
 
 def capacity_kind(sku) -> str:
@@ -422,8 +665,9 @@ def some(texts: list, most: int = 4) -> str:
 
 def capacity_choices(ctx) -> str:
     """What a person needs to choose a capacity: what Fabric lists for them, with what each can hold, and where their workspaces run."""
-    rows = [f"Put the ID of a capacity that can hold the demo into FABRIC_CAPACITY_ID in config/{ctx.env_file.name}. The runner "
-            "does not choose between capacities and does not create one.",
+    rows = ["Run plan in a terminal: it lists them and asks, and can make a new one if you say so. Or put the ID of a capacity "
+            f"that can hold the demo into FABRIC_CAPACITY_ID in {ctx.env_label}. The runner does not choose between "
+            "capacities by itself.",
             "Capacities Fabric lists for you (those you administer or contribute to):"]
     for entry in capacities(ctx):
         kind = capacity_kind(entry.get("sku"))
@@ -447,6 +691,8 @@ def capacity_choices(ctx) -> str:
 
 
 def pre_capacity(ctx) -> Probe:
+    if creating(ctx):
+        return pre_new_capacity(ctx)
     wanted = ctx.cfg.get("FABRIC_CAPACITY_ID", "")
     if not wanted:
         usable = [entry for entry in capacities(ctx)
@@ -514,7 +760,7 @@ def p1_resource_group(ctx) -> Probe:
     known = ctx.target("resource_group_id")
     if not ours or (known and known.lower() != group["id"].lower()):
         return blocked(f"A resource group named {group_name} exists, and this deployment did not make it. The runner works in "
-                       "a resource group of its own only.", "Choose other names: python3 tools/deploy.py plan --new-names")
+                       "a resource group of its own only.", "Start a deployment with other names: python3 tools/deploy.py plan --new")
     if not known:
         ctx.set_target(resource_group_id=group["id"])    # made by an apply that did not live to write it down; the tag says so
     strangers = []
@@ -645,11 +891,43 @@ def edge_identities(ctx) -> dict:
     return ctx.remember("edge_identities", read)
 
 
+def chosen_workspace(ctx) -> Probe | None:
+    """An existing workspace the operator chose, by its ID. None: it is fit to be taken, or it is this deployment's already."""
+    chosen, known, workspace_name = ctx.cfg["FABRIC_WORKSPACE_ID"], workspace_id(ctx), ctx.cfg["FABRIC_WORKSPACE_NAME"]
+    again = f"Choose again: {ASK}"
+    found = next((w for w in workspaces(ctx) if str(w.get("id", "")).lower() == chosen.lower()), None)
+    if known and known.lower() != chosen.lower():
+        return blocked(f"This deployment works in workspace {known}; the settings now name {chosen}.",
+                       "A deployment stays in its workspace. Put FABRIC_WORKSPACE_ID back, or start another deployment.")
+    if not found:
+        return blocked(f"The workspace you chose ({chosen}) is not among the workspaces you can open.", again)
+    if found.get("displayName") != workspace_name:
+        return blocked(f"The workspace you chose is now named {found.get('displayName')}; the settings say {workspace_name}. The "
+                       "scripts and the app find it by name.", f"Rename it back, or choose again: {ASK}")
+    if known:
+        return None
+    wanted = ctx.cfg.get("FABRIC_CAPACITY_ID", "")
+    if creating(ctx) or (found.get("capacityId") or "").lower() != wanted.lower():
+        return blocked(f"The workspace you chose, {workspace_name}, is on capacity {found.get('capacityId') or 'none'}; the "
+                       f"settings name {new_capacity_label(ctx) + ', to be made' if creating(ctx) else wanted or 'none'}. A "
+                       "workspace stays on its capacity: the runner moves none.", again)
+    there = ctx.remember("chosen_items", lambda: ctx.fabric.listing(f"workspaces/{chosen}/items"))
+    if there:
+        return blocked(f"The workspace you chose, {workspace_name}, holds {len(there)} items "
+                       f"({some([str(entry.get('displayName')) for entry in there])}). The runner starts only in a workspace "
+                       "that is empty, so that everything in it is the demo's.", again)
+    return todo(f"the workspace you chose, {workspace_name}, is empty; apply takes it into this deployment")
+
+
 def p1_workspace(ctx) -> Probe:
     workspace_name, known = ctx.cfg["FABRIC_WORKSPACE_NAME"], workspace_id(ctx)
     marker = f"deployment {suffix(ctx)}"
     same_name = [w for w in workspaces(ctx) if w.get("displayName") == workspace_name]
-    if not known:
+    if ctx.cfg.get("FABRIC_WORKSPACE_ID"):
+        verdict = chosen_workspace(ctx)
+        if verdict:
+            return verdict
+    elif not known:
         if not same_name:
             return todo(f"{workspace_name} does not exist yet")
         if len(same_name) == 1 and marker in (same_name[0].get("description") or ""):
@@ -657,7 +935,7 @@ def p1_workspace(ctx) -> Probe:
             known = same_name[0]["id"]
         else:
             return blocked(f"A workspace named {workspace_name} exists, and this deployment did not make it. The runner works "
-                           "in a workspace of its own only.", "Choose other names: python3 tools/deploy.py plan --new-names")
+                           "in a workspace of its own only.", "Start a deployment with other names: python3 tools/deploy.py plan --new")
     mine = next((w for w in workspaces(ctx) if w.get("id") == known), None)
     if not mine:
         return todo(f"the workspace this deployment made ({known}) is gone")
@@ -670,7 +948,7 @@ def p1_workspace(ctx) -> Probe:
     if strangers:
         return blocked(f"{workspace_name} holds items this demo does not create:\n  " + "\n  ".join(strangers),
                        "Move or delete them. If one belongs here after all, name it: apply ... --acknowledge <its item ID>")
-    return done(f"{workspace_name} ({known})", id=known)
+    return done(f"{workspace_name} ({known})" + (", the workspace you chose" if ctx.cfg.get("FABRIC_WORKSPACE_ID") else ""), id=known)
 
 
 def expected_item(ctx, entry: dict) -> bool:
@@ -690,6 +968,11 @@ def expected_item(ctx, entry: dict) -> bool:
 
 
 def act_workspace(ctx) -> None:
+    chosen = ctx.cfg.get("FABRIC_WORKSPACE_ID")
+    if chosen:
+        # Nothing is made: the empty workspace the operator chose becomes this deployment's, by its ID in the checkpoint.
+        ctx.set_target(workspace_id=chosen, workspace_chosen=True)
+        return
     body = {"displayName": ctx.cfg["FABRIC_WORKSPACE_NAME"], "capacityId": ctx.cfg["FABRIC_CAPACITY_ID"],
             "description": f"Wind farm digital twin demo, deployment {suffix(ctx)}. Made by tools/deploy.py."}
     try:
@@ -893,7 +1176,7 @@ def p1_edge_connection(ctx) -> Probe:
         return done(f"the settings name the eventstream's endpoint ({live[1]})")
     if ctx.cfg.get("EVENTSTREAM_TOPIC"):
         return blocked(f"The settings name the topic {ctx.cfg['EVENTSTREAM_TOPIC']}; the eventstream's is {live[1]}.",
-                       f"Empty EVENTSTREAM_BOOTSTRAP_SERVER and EVENTSTREAM_TOPIC in {ctx.env_file.name} if the eventstream was "
+                       f"Empty EVENTSTREAM_BOOTSTRAP_SERVER and EVENTSTREAM_TOPIC in {ctx.env_label} if the eventstream was "
                        "made anew; the runner fills them in.")
     return todo()
 
@@ -1153,9 +1436,15 @@ def _who(ctx) -> str:
 
 # Three checks ask Azure for answers that hold for a day and that can take a minute each to arrive, or not arrive.
 PRE_RIGHTS = kept("pre.rights", pre_rights, _who)
-PRE_PROVIDERS = kept("pre.providers", pre_providers, lambda ctx: str(account(ctx).get("id")))
+PRE_PROVIDERS = kept("pre.providers", pre_providers, lambda ctx: f"{account(ctx).get('id')}|{creating(ctx)}")
+# The sizes as a set: putting another size first is not a reason to ask Azure again which of them are offered.
 PRE_REGION = kept("pre.region", pre_region, lambda ctx: "|".join((
-    str(account(ctx).get("id")), ctx.cfg.get("LOCATION", ""), ctx.cfg.get("VM_SIZE", ""),
+    str(account(ctx).get("id")), ctx.cfg.get("LOCATION", ""), " ".join(sorted(ctx.cfg.get("VM_SIZE", "").split())),
+    str(ctx.state.step("p1.edge_vm").get("status") == "complete"))))
+
+
+PRE_QUOTA = kept("pre.quota", pre_quota, lambda ctx: "|".join((
+    str(account(ctx).get("id")), ctx.cfg.get("LOCATION", ""), (ctx.cfg.get("VM_SIZE", "").split() or [""])[0],
     str(ctx.state.step("p1.edge_vm").get("status") == "complete"))))
 
 
@@ -1174,16 +1463,23 @@ def phase1() -> list[Step]:
              manual="Register the providers the plan names."),
         Step("pre.region", "preflight", "Region and VM size", PRE_REGION,
              basis="Resource SKUs - List, with its location filter"),
+        Step("pre.quota", "preflight", "vCPU quota for the VM", PRE_QUOTA, basis="az vm list-usage"),
         Step("pre.names", "preflight", "Generated names are free", pre_names, basis="az storage account check-name"),
         Step("pre.custom_locations", "preflight", "Custom Locations object ID", pre_custom_locations, basis="az ad sp show"),
         Step("pre.fabric", "preflight", "The Fabric API answers you", pre_fabric, basis="GET /v1/workspaces"),
         Step("pre.capacity", "preflight", "A capacity that can hold Fabric items, active", pre_capacity,
-             basis="GET /v1/capacities and GET /v1/workspaces; SKUs as in the Fabric licenses article"),
+             basis="GET /v1/capacities and GET /v1/workspaces; SKUs as in the Fabric licenses article. For a capacity to be "
+             "made: Fabric Capacities - List Skus and Check Name Availability"),
         Step("phase1.tenant_settings", "preflight", "Tenant settings for Phase 1", settings_probe, manual=settings_manual,
              observable=False, basis="Fabric admin portal; no API for a person who is not an administrator", proof="none"),
 
         Step("p1.resource_group", "phase1", "Resource group of the demo", p1_resource_group, act_resource_group,
              writes=f"creates the resource group with the tag {TAG}", basis="az group create", proof="offline"),
+        Step("p1.capacity", "phase1", "Fabric capacity of the deployment's own, when you chose a new one", p1_capacity, act_capacity,
+             needs=("capacity",), wait_seconds=120,
+             writes="a Fabric capacity in the demo's resource group, with you as its administrator. It costs money for as long as "
+             "it runs; the runner never pauses, resizes or deletes it",
+             basis="Fabric Capacities - Create Or Update (Microsoft.Fabric, 2023-11-01) through az rest", proof="offline"),
         Step("p1.edge_vm", "phase1", "Edge VM", p1_edge_vm, act_edge_vm,
              inputs=("infra/01-create-edge-vm.sh",), writes="VM, network, SSH rule for your address, daily shutdown",
              basis="infra/01-create-edge-vm.sh, without its provider registration and role assignments", proof="live"),
@@ -1210,7 +1506,8 @@ def phase1() -> list[Step]:
              writes="builds the simulator image on the VM and starts it", basis="edge/scripts/05-deploy-simulator.sh", proof="live"),
 
         Step("p1.workspace", "phase1", "Fabric workspace of the demo", p1_workspace, act_workspace,
-             writes="creates the workspace on the capacity shown", basis="Workspaces - Create Workspace", proof="offline"),
+             writes="creates the workspace on the capacity shown; or, when you chose an existing empty workspace, takes that one "
+             "into the deployment and creates none", basis="Workspaces - Create Workspace", proof="offline"),
         Step("p1.eventhouse", "phase1", "Eventhouse and KQL database", p1_eventhouse, act_eventhouse, wait_seconds=120,
              writes="Eventhouse WindFarmEH with its database", basis="Eventhouse - Create Eventhouse; KQL Database - Create KQL Database"),
         Step("p1.kql_schema", "phase1", "Tables, mapping and update policies", p1_kql_schema,
@@ -1239,7 +1536,8 @@ def phase1() -> list[Step]:
              writes="endpoint fabric-eventstream and data flow windfarm-to-fabric", basis="infra/06-connect-edge-to-fabric.sh", proof="live"),
         Step("p1.gate_telemetry", "phase1", "GATE: fresh telemetry in the Eventhouse",
              lambda ctx: keep_done(ctx, "p1.gate_telemetry", gate_telemetry), wait_seconds=600, observable=False,
-             manual="See the plan line above.", basis="Kusto REST API, /v1/rest/query"),
+             manual="Nothing to do before the deployment: the runner measures this after the data flow exists, and says what to "
+                    "look at when no telemetry arrives.", basis="Kusto REST API, /v1/rest/query"),
 
         Step("p1.reference_upload", "phase1", "Reference data uploaded from the edge",
              lambda ctx: recorded(ctx, "p1.reference_upload", "reference files uploaded") if item(ctx, "Lakehouse", name(ctx, "FABRIC_LAKEHOUSE_NAME"))

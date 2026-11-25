@@ -49,7 +49,13 @@ done
 
 # ---- settings ----------------------------------------------------------------------------
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ENV_FILE:-$HERE/../config/demo.env}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+  ENV_FILE="$HERE/../config/demo.env"
+  # A deployment made by tools/deploy.py keeps its settings beside its checkpoint; .deploy/current names the one in use.
+  if [[ ! -f "$ENV_FILE" && -f "$HERE/../.deploy/current" ]]; then
+    ENV_FILE="$HERE/../.deploy/$(tr -d '[:space:]' < "$HERE/../.deploy/current")/demo.env"
+  fi
+fi
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090

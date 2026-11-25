@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+from deployer import names  # noqa: E402
 from deployer.cloud import CloudError  # noqa: E402
 from deployer.steps import ROLE_IDS  # noqa: E402
 
@@ -34,6 +35,9 @@ class World:
         self.skus = ["Standard_D8s_v5", "Standard_D8s_v6", "Standard_D8s_v7", "Standard_E4s_v5"]    # known in the region
         self.refused: dict = {}             # size -> reason code of a Location restriction
         self.sku_calls = 0
+        # vCPUs in use and their limits, as `az vm list-usage` names them; Azure's own spelling of the families varies
+        self.usage = {"cores": (8, 100), "standardDSv5Family": (0, 100), "StandardDsv7Family": (0, 100), "virtualMachines": (1, 25000)}
+        self.usage_calls = 0
         self.storage_free = True
         self.custom_locations = "040ca937-7748-471b-a3ea-31d1ebd5da8a"
         self.groups: dict = {}
@@ -54,6 +58,7 @@ class World:
         self.kql = {"tables": set(), "mappings": set(), "functions": set(), "update_policy": False, "mirroring": set()}
         self.writes: list = []              # every change, in order
         self.shell_calls: list = []
+        self.env_files: list = []           # the settings file each script was handed
         self.tokens: list = []
         self.counter = 0
         # switches a test sets
@@ -71,6 +76,14 @@ class World:
         self.extensions = ["azure-iot-ops", "ssh"]
         self.may_create_workspaces = True
         self.closed_capacities: set = set()   # capacities a workspace cannot be put on by this person
+        # Microsoft.Fabric in Azure: capacities by name as Azure has them, where a SKU is offered, names taken by others
+        self.arm_capacities: dict = {}
+        self.fabric_offers = {"F16": ["Central US", "East US 2", "West US 2", "West Europe", "South Central US"],
+                              "F64": ["Central US"]}
+        self.taken_capacity_names: set = set()
+        self.fabric_quota = True
+        self.capacity_state = "Active"        # the state a capacity is in right after it was made
+        self.fabric_calls: list = []
 
     def new_id(self, prefix: str) -> str:
         self.counter += 1
@@ -118,6 +131,26 @@ class FakeAz:
             w.groups[name] = {"id": f"/subscriptions/{w.account['id']}/resourceGroups/{name}", "name": name,
                               "location": opt(args, "--location"), "tags": tags}
             w.wrote(f"az group create {name}")
+        elif args[:1] == ("rest",) and "/providers/Microsoft.Fabric/capacities/" in opt(args, "--url"):
+            assert opt(args, "--method") == "put" and "api-version=2023-11-01" in args
+            name = opt(args, "--url").rsplit("/", 1)[-1]
+            body = json.loads(opt(args, "--body"))
+            assert re.fullmatch(r"[a-z][a-z0-9]{2,62}", name) and body["sku"] == {"name": body["sku"]["name"], "tier": "Fabric"}
+            assert body["properties"]["administration"]["members"] == [w.account["user"]["name"]]
+            group = opt(args, "--url").split("/resourceGroups/")[1].split("/")[0]
+            assert group in w.groups, "a capacity can only be made in a resource group that exists"
+            if not w.fabric_quota:
+                raise CloudError("az rest --method put failed: (InsufficientQuota) The requested capacity exceeds the available quota")
+            assert name not in w.arm_capacities, "the runner made a capacity a second time"
+            w.arm_capacities[name] = {"id": opt(args, "--url").replace("https://management.azure.com", ""), "name": name,
+                                      "location": body["location"], "sku": body["sku"], "tags": body.get("tags", {}),
+                                      "properties": {"provisioningState": "Succeeded", "state": w.capacity_state}}
+            display = {"centralus": "Central US", "eastus2": "East US 2", "westus2": "West US 2", "westeurope": "West Europe",
+                       "southcentralus": "South Central US"}.get(body["location"], body["location"])
+            w.capacities.append({"id": w.new_id("cap-new"), "displayName": name, "sku": body["sku"]["name"], "region": display,
+                                 "state": "Active"})
+            w.resources.append({"id": w.arm_capacities[name]["id"], "type": "Microsoft.Fabric/capacities"})
+            w.wrote(f"az rest PUT Microsoft.Fabric/capacities/{name} {body['sku']['name']} {body['location']}")
         elif args[:3] == ("role", "assignment", "create"):
             # by ID and with the kind of principal: the real CLI then asks neither for role definitions nor Microsoft Graph
             assert re.fullmatch(r"[0-9a-f-]{36}", opt(args, "--role")) and opt(args, "--assignee-principal-type") == "ServicePrincipal"
@@ -157,6 +190,10 @@ class FakeAz:
             principal = re.fullmatch(r"principalId eq '([^']+)'", asked)
             assert principal, f"a filter the documentation does not list: {asked}"
             return [{"role": definition + role, "scope": at} for who, role, at in w.role_assignments if who == principal[1]]
+        if args[:2] == ("vm", "list-usage"):
+            assert opt(args, "--location") and timeout and timeout <= 60
+            w.usage_calls += 1
+            return [{"name": name, "used": used, "limit": limit} for name, (used, limit) in w.usage.items()]
         if args[:2] == ("vm", "list-skus"):
             raise AssertionError("the runner asked `az vm list-skus`, which fetches every region and stood for five minutes on a workstation")
         if args[:3] == ("storage", "account", "check-name"):
@@ -175,8 +212,23 @@ class FakeAz:
             return w.dataflows.get(opt(args, "--name"))
         if args[:3] == ("iot", "ops", "show"):
             return w.instance
+        if args[:1] == ("rest",) and "Microsoft.Fabric" in opt(args, "--url"):
+            assert "api-version=2023-11-01" in args and timeout and timeout <= 60
+            url = opt(args, "--url")
+            w.fabric_calls.append(url.rsplit("/", 1)[-1])
+            if url.endswith("/providers/Microsoft.Fabric/skus"):
+                sku = re.search(r"name=='(\w+)'", opt(args, "--query"))[1]
+                return w.fabric_offers.get(sku)
+            if url.endswith("/checkNameAvailability"):
+                asked = json.loads(opt(args, "--body"))
+                assert asked["type"] == "Microsoft.Fabric/capacities"
+                taken = asked["name"] in w.taken_capacity_names or asked["name"] in w.arm_capacities
+                return {"nameAvailable": not taken, "reason": "AlreadyExists" if taken else None}
+            assert opt(args, "--method") == "get" and "/providers/Microsoft.Fabric/capacities/" in url
+            return w.arm_capacities.get(url.rsplit("/", 1)[-1])
         if args[:1] == ("rest",) and "Microsoft.Compute/skus" in opt(args, "--url"):
-            assert "$filter=location eq 'southcentralus'" in args and "api-version=2021-07-01" in args and timeout and timeout <= 120
+            assert any(re.fullmatch(r"\$filter=location eq '[a-z0-9]+'", arg) for arg in args)
+            assert "api-version=2021-07-01" in args and timeout and timeout <= 120
             w.sku_calls += 1
             return [{"name": name, "refused": w.refused.get(name)} for name in w.skus]
         if args[:1] == ("rest",):
@@ -410,7 +462,14 @@ class FakeShell:
             w.fail_script = ""
             return 1, self._redact(f"ERROR: something went wrong; the connection was {CONNECTION}")
         w.wrote(command)
-        ws = next((entry["id"] for entry in w.workspaces if "Made by tools/deploy.py" in entry.get("description", "")), None)
+        # Every script is handed the settings of its deployment by name, and they are not config/demo.env.
+        named = argv[argv.index("--workspace") + 1] if "--workspace" in argv else None       # the app's tool is told the name
+        if argv[0] == "bash":
+            settings = Path(env.get("ENV_FILE", ""))
+            assert settings.is_file() and settings.parent.parent.name == ".deploy", f"a script was started without its deployment's settings: {env}"
+            self.w.env_files.append(str(settings))
+            named = names.read_env(settings).get("FABRIC_WORKSPACE_NAME")      # as the scripts find it
+        ws = next((entry["id"] for entry in w.workspaces if entry.get("displayName") == named), None)
         if "01-create-edge-vm.sh" in command:
             assert env.get("DEPLOY_RUNNER") == "1", "the VM script was started without DEPLOY_RUNNER"
             w.vm_env = dict(env)
@@ -429,7 +488,7 @@ class FakeShell:
         elif "05-deploy-simulator.sh" in command:
             w.simulator = True
         elif "06-connect-edge-to-fabric.sh" in command:
-            topic = re.search(r'^EVENTSTREAM_TOPIC="([^"]*)"', (self.root / "config" / "demo.env").read_text(), re.M)[1]
+            topic = re.search(r'^EVENTSTREAM_TOPIC="([^"]*)"', settings.read_text(), re.M)[1]
             w.dataflows["windfarm-to-fabric"] = {"properties": {"mode": "Enabled", "operations": [
                 {"operationType": "Source"}, {"operationType": "Destination", "destinationSettings": {"dataDestination": topic}}]}}
         elif "07-sync-reference-data.sh" in command:

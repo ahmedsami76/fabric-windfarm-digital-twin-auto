@@ -57,8 +57,37 @@ OUT="$OUT
 exec:$([[ -x "$H/edge/scripts/simctl.sh" && -x "$H/infra/vm.sh" ]] && echo yes) stale:$([[ -e "$H/data/reference/maintenance_history.csv" ]] && echo present || echo gone) own:$([[ -f "$H/notes-of-the-user.txt" ]] && echo kept) git:$([[ -e "$H/.git" ]] && echo present || echo none) modules:$(find "$H" -name node_modules -o -name __pycache__ | wc -l) nb:$([[ -f "$H/fabric/notebooks/02_generate_history.ipynb" ]] && echo yes)"
 check "push: copies, restores execute bits, removes stale files, keeps other files" 0 "exec:yes" "stale:gone" "own:kept" "git:none" "modules:0" "nb:yes"
 
+# The settings in use are not config/demo.env (ENV_FILE, as for a deployment of tools/deploy.py): push puts them where the
+# scripts on the VM read them, and sends none of the checkpoints of .deploy.
+reset; touch "$STUB_DIR"/port_open; mkdir -p "$REPO/.deploy/zz9" && echo '{}' > "$REPO/.deploy/zz9/state.json"
+run bash "$REPO"/infra/vm.sh push; H="$STUB_DIR/home/fabric-windfarm-digital-twin"; rm -rf "$REPO/.deploy/zz9"; rmdir "$REPO/.deploy" 2>/dev/null
+OUT="$OUT
+same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes) deploy:$([[ -e "$H/.deploy" ]] && echo sent || echo none)"
+check "push with the settings elsewhere: they become config/demo.env on the VM, and .deploy stays here" 0 "same:yes" "deploy:none" "settings in use here"
+
 reset; touch "$STUB_DIR"/port_open
 run bash "$REPO"/infra/vm.sh push-env;                  check "push-env: copies the settings file" 0 "scp .*demo.env azureuser@20.45.58.189:fabric-windfarm-digital-twin/config/demo.env"
+
+# A deployment of tools/deploy.py keeps its settings in .deploy/<suffix>/demo.env, and .deploy/current names the one in use.
+# A script started by hand finds them: ENV_FILE first, then config/demo.env, then the current deployment.
+POINTED="$SCRATCH/pointed"; mkdir -p "$POINTED/config" "$POINTED/infra" "$POINTED/.deploy/k3f" "$POINTED/app"
+cp "$REPO/config/load-env.sh" "$POINTED/config/"; cp "$REPO/infra/99-cleanup.sh" "$POINTED/infra/"
+sed -e 's/^RESOURCE_GROUP=.*/RESOURCE_GROUP="rg-windfarm-edge-k3f"/' -e 's/^FABRIC_WORKSPACE_NAME=.*/FABRIC_WORKSPACE_NAME="WindFarmDigitalTwin-k3f"/' "$ENV_FILE" > "$POINTED/.deploy/k3f/demo.env"
+echo k3f > "$POINTED/.deploy/current"
+reset
+run env -u ENV_FILE bash -c 'source "$0"/config/load-env.sh && echo "group:$RESOURCE_GROUP file:${ENV_FILE#"$0"/}"' "$POINTED"
+check "settings: without ENV_FILE and without config/demo.env, the current deployment's are used" 0 "group:rg-windfarm-edge-k3f file:.deploy/k3f/demo.env"
+sed -e 's/^RESOURCE_GROUP=.*/RESOURCE_GROUP="rg-by-hand"/' "$ENV_FILE" > "$POINTED/config/demo.env"
+run env -u ENV_FILE bash -c 'source "$0"/config/load-env.sh && echo "group:$RESOURCE_GROUP"' "$POINTED"
+check "settings: config/demo.env, where it exists, comes before the current deployment" 0 "group:rg-by-hand"
+run env ENV_FILE="$POINTED/.deploy/k3f/demo.env" bash -c 'source "$0"/config/load-env.sh && echo "group:$RESOURCE_GROUP"' "$POINTED"
+check "settings: ENV_FILE comes before both" 0 "group:rg-windfarm-edge-k3f"
+rm "$POINTED/config/demo.env"; echo gone > "$POINTED/.deploy/current"
+run env -u ENV_FILE bash -c 'source "$0"/config/load-env.sh' "$POINTED"
+check "settings: a current deployment whose settings are missing is an error that names the file" 1 ".deploy/gone/demo.env not found" "tools/deploy.py plan"
+echo k3f > "$POINTED/.deploy/current"; reset
+run env -u ENV_FILE bash "$POINTED"/infra/99-cleanup.sh
+check "clean-up without ENV_FILE and without config/demo.env: reports on the current deployment" 0 "rg-windfarm-edge-k3f" "!rg-by-hand"
 
 reset; HOME_BACKUP="$HOME"; export HOME="$STUB_DIR/fakehome"; mkdir -p "$HOME"
 run bash "$REPO"/infra/vm.sh reset-key;                 check "reset-key without a key: creates one and installs it" 0 "ssh-keygen" "vm user update .*--username azureuser --ssh-key-value ssh-rsa AAAATESTKEY"
@@ -384,6 +413,14 @@ OUT="$OUT
 named:$(grep -c "^export const WORKSPACE_NAME = 'WindFarmDigitalTwin-3x9';" "$W/packages/functions/src/config.ts") overlay:$(grep -c "^export const WORKSPACE_NAME = 'WindFarmDigitalTwin';" "$APPDIR/overlay/packages/functions/src/config.ts")"
 check "create-app with a generated workspace name: the app's copy names it, the overlay is untouched, the hint names it" 0 "named:1" "overlay:1" "The app looks for the workspace WindFarmDigitalTwin-3x9" "npx rayfin up --workspace WindFarmDigitalTwin-3x9 --item-name WindFarmTwin"
 
+: > "$STUB_DIR/calls.log"; mkdir -p "$SCRATCH/.deploy/m2p"; echo m2p > "$SCRATCH/.deploy/current"
+sed -e 's/^FABRIC_WORKSPACE_NAME=.*/FABRIC_WORKSPACE_NAME="WindFarmDigitalTwin-m2p"/' "$ENV_FILE" > "$SCRATCH/.deploy/m2p/demo.env"
+OUT="$(env -u ENV_FILE PATH="$HERE/stubs-app:$PATH" bash "$CREATE" 2>&1)"; RC=$?
+OUT="$OUT
+named:$(grep -c "^export const WORKSPACE_NAME = 'WindFarmDigitalTwin-m2p';" "$W/packages/functions/src/config.ts")"
+check "create-app by hand beside a deployment of the runner: the workspace is the current deployment's" 0 "named:1" "The app looks for the workspace WindFarmDigitalTwin-m2p"
+rm -rf "$SCRATCH/.deploy"
+
 : > "$STUB_DIR/calls.log"; OUT="$(PATH="$HERE/stubs-app:$PATH" FABRIC_WORKSPACE_NAME="Wind'Farm" bash "$CREATE" 2>&1)"; RC=$?
 check "create-app, a workspace name with a quote in it: refused, nothing written" 1 "has a character this script does not write"
 
@@ -449,6 +486,11 @@ check "create-principal, run again: keeps the registration and the role, makes a
 
 pr_reset; touch "$STUB_DIR/not_signed_in"; pr_run
 check "create-principal, not signed in to Azure: stops" 1 "Not signed in to Azure" "!ad app"
+
+pr_reset; mkdir -p "$SCRATCH/.deploy/m2p"; echo m2p > "$SCRATCH/.deploy/current"
+sed -e 's/^FABRIC_WORKSPACE_NAME=.*/FABRIC_WORKSPACE_NAME="WindFarmDigitalTwin-m2p"/' "$ENV_FILE" > "$SCRATCH/.deploy/m2p/demo.env"
+OUT="$(env -u ENV_FILE PATH="$HERE/stubs-principal:$PATH" bash "$PRINCIPAL" 2>&1)"; RC=$?; rm -rf "$SCRATCH/.deploy"
+check "create-principal by hand beside a deployment of the runner: it looks for the current deployment's workspace" 1 "does not see a workspace named WindFarmDigitalTwin-m2p" "!ad app create"
 
 pr_reset; touch "$STUB_DIR/no_workspace"; pr_run
 check "create-principal, the sign-in does not see the workspace: stops before anything is created" 1 "does not see a workspace named WindFarmDigitalTwin" "az login --tenant" "!ad app create"

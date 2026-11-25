@@ -86,7 +86,7 @@ class State:
         self.folder, self.path = Path(folder), Path(folder) / "state.json"
         self._redact, self._clock = redact, clock
         self.data = {"version": 1, "target": {}, "steps": {}, "pending": {}, "confirmed": {}, "acknowledged": [],
-                     "remembered": {}}
+                     "remembered": {}, "choices": {}}
         # True while another process applies to this deployment: this run then reads the checkpoint and writes nothing
         # to it, because its copy is older than the one the apply keeps writing.
         self.frozen = False
@@ -275,6 +275,15 @@ class Context:
         # Called before a step is looked at, and after it with the seconds it took: a person sees life, and the first
         # real numbers of how long looking takes come out of every run.
         self.progress: Callable[[Step, float | None], None] | None = None
+        self.asker = None               # asks the questions of preflight and plan; None: nobody to ask, or not the time
+
+    @property
+    def env_label(self) -> str:
+        """The settings file as a person finds it from the folder of the repository."""
+        try:
+            return str(self.env_file.relative_to(self.root))
+        except ValueError:
+            return str(self.env_file)
 
     def say(self, text: str = "") -> None:
         print(self.redact(text), file=self._out, flush=True)
@@ -301,7 +310,7 @@ class Context:
 class Line:
     step: Step
     probe: Probe
-    decision: str                   # done | confirmed | unchecked | run | operator | needs | blocked | drift | optional
+    decision: str                   # done | confirmed | unchecked | run | measure | operator | needs | blocked | drift | optional
     missing: tuple = ()
 
 
@@ -322,6 +331,9 @@ def decide(ctx: Context, step: Step, probe: Probe) -> Line:
         return Line(step, probe, "drift", missing)
     if missing:
         return Line(step, probe, "needs", missing)
+    if step.act is None and step.wait_seconds:
+        # A gate without an action: the runner measures it when the steps before it are done, and waits for it.
+        return Line(step, probe, "measure")
     if step.act is None:
         return Line(step, probe, "operator")
     return Line(step, probe, "run")
@@ -400,7 +412,8 @@ def file_digest(root: Path, relative: str) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
-TARGET_KEYS = ("tenant_id", "subscription_id", "resource_group", "location", "workspace_name", "capacity_id", "suffix")
+TARGET_KEYS = ("tenant_id", "subscription_id", "resource_group", "location", "workspace_name", "workspace_chosen", "capacity_id",
+               "suffix")
 
 
 def plan_hash(ctx: Context, lines: list[Line], target: dict) -> str:
@@ -419,7 +432,8 @@ def plan_hash(ctx: Context, lines: list[Line], target: dict) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
-WORDS = {"done": "done", "confirmed": "confirmed by you", "unchecked": "NOT CHECKED", "run": "will run", "operator": "YOUR STEP",
+WORDS = {"done": "done", "confirmed": "confirmed by you", "unchecked": "NOT CHECKED", "run": "will run",
+         "measure": "will be measured", "operator": "YOUR STEP",
          "needs": "needs approval", "blocked": "BLOCKED", "drift": "DRIFT, will be redone", "optional": "optional, yours"}
 PASSED = {"done": "done", "unverified": "unchecked"}      # the first word of a line of apply for a step that passes
 
@@ -432,6 +446,8 @@ def manual_text(ctx: Context, step: Step, probe: Probe) -> str:
 NEED_HELP = {
     "roles": "role assignments, each limited to the demo's resource group or workspace. Add --approve-role-changes to "
              "plan and apply after reading which ones.",
+    "capacity": "your approval to make a Fabric capacity, which costs money for as long as it runs. Add "
+                "--approve-capacity-creation to plan and apply.",
 }
 
 
@@ -453,7 +469,7 @@ def print_plan(ctx: Context, lines: list[Line], digest: str = "") -> None:
             ctx.say(f"\n{phase}")
         word = WORDS[line.decision]
         ctx.say(f"  {line.step.id:<28} {word:<22} {line.step.title}")
-        if line.probe.detail and line.decision in ("done", "confirmed", "unchecked", "blocked", "drift", "optional"):
+        if line.probe.detail and line.decision in ("done", "confirmed", "unchecked", "measure", "blocked", "drift", "optional"):
             ctx.say(f"  {'':<28} {'':<22}   {line.probe.detail}")
         if line.decision == "run" and line.step.writes:
             ctx.say(f"  {'':<28} {'':<22}   changes: {line.step.writes}")
@@ -465,7 +481,7 @@ def print_plan(ctx: Context, lines: list[Line], digest: str = "") -> None:
                 ctx.say(f"  {'':<28} {'':<22}   > {row}")
     counts = {word: sum(1 for line in lines if line.decision == word) for word in WORDS}
     ctx.say(f"\n{counts['done']} done, {counts['confirmed']} confirmed by you, {counts['unchecked']} not checked, "
-            f"{counts['run'] + counts['drift']} for the runner, {counts['operator']} for you, "
+            f"{counts['run'] + counts['drift'] + counts['measure']} for the runner, {counts['operator']} for you, "
             f"{counts['needs']} waiting for an approval, {counts['blocked']} blocked, {counts['optional']} optional.")
     if counts["unchecked"]:
         ctx.say("NOT CHECKED: the runner could not read it. It does not stop the deployment; the step that depends on it "

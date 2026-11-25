@@ -5,11 +5,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import names
+from . import choices, deployments
 from .cloud import Az, Kusto, OneLake, Shell, make_fabric
 from .core import (EXIT_BLOCKED, EXIT_FAILED, EXIT_OK, EXIT_REFUSED, PHASES, Blocked, Context, Lock, Options, Redactor, Refused,
                    State, StepFailed, apply, make_plan, plan_hash, print_plan, select)
-from .steps import capacity_label, freshness, kql_database
+from .steps import capacity_label, creating, freshness, kql_database, new_capacity_label
 from .steps_later import catalogue
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +24,12 @@ def parser() -> argparse.ArgumentParser:
     top.add_argument("--approve", metavar="PLAN", default="", help="apply: the identifier that plan printed")
     top.add_argument("--approve-role-changes", action="store_true",
                      help="allow the role assignments the plan lists, each on the demo's resource group or workspace")
+    top.add_argument("--approve-capacity-creation", action="store_true",
+                     help="allow the plan to make the Fabric capacity you chose to have made. It costs money for as long as it runs")
+    top.add_argument("--no-input", action="store_true",
+                     help="preflight and plan: ask nothing. Where an answer is missing the plan blocks and names the setting")
+    top.add_argument("--ask", action="store_true",
+                     help="preflight and plan, in a terminal: ask the questions again whose subject does not exist yet")
     top.add_argument("--allow-preview", metavar="NAME", action="append", default=[], choices=("data-agent-sdk", "ontology"),
                      help="let the runner use a preview feature: data-agent-sdk, ontology")
     top.add_argument("--opt-in", metavar="NAME", action="append", default=[], choices=("pip-jobs",),
@@ -35,7 +41,10 @@ def parser() -> argparse.ArgumentParser:
     top.add_argument("--confirm", metavar="STEP", action="append", default=[], help="apply: you confirm a step the runner cannot read")
     top.add_argument("--acknowledge", metavar="ID", action="append", default=[],
                      help="apply: this resource or item in the demo's group or workspace belongs there")
-    top.add_argument("--new-names", action="store_true", help="plan: choose a new suffix, while nothing has been created")
+    top.add_argument("--new", action="store_true",
+                     help="preflight and plan: start a new deployment, with a new random suffix. The ones this folder already holds stay as they are")
+    top.add_argument("--deployment", metavar="SUFFIX", default="",
+                     help="work on this deployment of the folder, and make it the current one. status lists them")
     top.add_argument("--recheck", action="store_true",
                      help="ask again what was asked within the last twelve hours and kept: your roles, the resource providers, the VM sizes")
     return top
@@ -45,51 +54,22 @@ def options_of(args) -> Options:
     granted = {f"preview:{name}" for name in args.allow_preview} | {f"optin:{name}" for name in args.opt_in}
     if args.approve_role_changes:
         granted.add("roles")
+    if args.approve_capacity_creation:
+        granted.add("capacity")
     return Options(up_to=args.up_to, granted=granted, phase5a=args.enable_phase5a_isolated_simulator,
                    regenerate_history=args.regenerate_history)
-
-
-def settings(args, root: Path, az, say) -> dict:
-    """The settings file of this deployment. Made on the first plan, with generated names; never guessed afterwards."""
-    env_file, example = root / "config" / "demo.env", root / "config" / "demo.env.example"
-    if not env_file.exists():
-        if args.mode in ("apply", "status"):
-            raise Refused(f"{env_file} does not exist. Run plan first: it chooses the names and writes them there.")
-        suffix = names.new_suffix()
-        account = az.json("account", "show")
-        names.write_env(env_file, {**names.generated(suffix), "SUBSCRIPTION_ID": account["id"], "FABRIC_CAPACITY_ID": ""}, template=example)
-        say(f"Wrote {env_file.relative_to(root)} with names ending in -{suffix}, for subscription {account.get('name')}. "
-            "Nothing was changed in Azure or Fabric. Read the file; LOCATION and VM_SIZE are yours to change before the first apply.")
-    cfg = names.read_env(env_file)
-    suffix = cfg.get("DEPLOYMENT_SUFFIX", "")
-    if not names.valid_suffix(suffix):
-        raise Refused(f"{env_file} has no DEPLOYMENT_SUFFIX: it describes a deployment that was made by hand, from the guides. "
-                      "The runner works only in a resource group and a workspace that it made itself. To start one, move this "
-                      "file away (keep it: it is the record of your deployment) and run plan.")
-    expected = names.generated(suffix)
-    changed = [key for key, value in expected.items() if cfg.get(key) != value]
-    if changed:
-        raise Refused(f"{env_file}: {', '.join(changed)} no longer carry the suffix -{suffix}. The names of a deployment are not "
-                      "edited by hand. Put them back, or start a new deployment with plan --new-names.")
-    if args.new_names:
-        if args.mode != "plan":
-            raise Refused("--new-names goes with plan.")
-        made = State(root / ".deploy" / suffix, Redactor()).data["target"]
-        if made.get("resource_group_id") or made.get("workspace_id"):
-            raise Refused(f"Deployment -{suffix} has created resources. New names would leave them behind without a record. "
-                          "Remove that deployment first (bash infra/99-cleanup.sh), or go on with it.")
-        fresh = names.new_suffix()
-        names.write_env(env_file, {**names.generated(fresh), "EVENTSTREAM_BOOTSTRAP_SERVER": "", "EVENTSTREAM_TOPIC": ""})
-        say(f"New names, ending in -{fresh}.")
-        cfg = names.read_env(env_file)
-    return cfg
 
 
 def target_of(ctx: Context, account: dict) -> dict:
     cfg = ctx.cfg
     return {"tenant_id": account.get("tenantId"), "subscription_id": account.get("id"), "subscription": account.get("name"),
             "resource_group": cfg["RESOURCE_GROUP"], "location": cfg.get("LOCATION"), "workspace_name": cfg["FABRIC_WORKSPACE_NAME"],
-            "capacity_id": cfg.get("FABRIC_CAPACITY_ID", ""), "suffix": cfg["DEPLOYMENT_SUFFIX"], "user": (account.get("user") or {}).get("name")}
+            # A capacity the deployment makes is named by what it will be, which is the same before and after it is made:
+            # an approval given before the capacity exists still holds when an interrupted apply is run again.
+            "capacity_id": (f"new:{cfg.get('FABRIC_CAPACITY_NAME')}:{cfg.get('FABRIC_CAPACITY_CREATE_SKU')}:{cfg.get('FABRIC_CAPACITY_REGION')}"
+                            if cfg.get("FABRIC_CAPACITY_CREATE_SKU") else cfg.get("FABRIC_CAPACITY_ID", "")),
+            "workspace_chosen": cfg.get("FABRIC_WORKSPACE_ID", ""),
+            "suffix": cfg["DEPLOYMENT_SUFFIX"], "user": (account.get("user") or {}).get("name")}
 
 
 def show_target(ctx: Context, target: dict) -> None:
@@ -99,13 +79,19 @@ def show_target(ctx: Context, target: dict) -> None:
     ctx.say(f"  subscription    {target['subscription']}  ({target['subscription_id']})")
     ctx.say(f"  resource group  {target['resource_group']} in {target['location']}  "
             f"({'made by this deployment' if made.get('resource_group_id') else 'not created yet'})")
-    ctx.say(f"  workspace       {target['workspace_name']}  ({made.get('workspace_id') or 'not created yet'})")
+    chosen = ctx.cfg.get("FABRIC_WORKSPACE_ID")
+    ctx.say(f"  workspace       {target['workspace_name']}  ("
+            + (made.get("workspace_id") or (f"{chosen}, an existing empty one you chose" if chosen else "not created yet")) + ")")
     ctx.say(f"  capacity        {capacity_text(ctx, target['capacity_id'])}")
     ctx.say(f"  signed in as    {target['user']}")
 
 
 def capacity_text(ctx: Context, capacity_id: str) -> str:
     """The capacity by name and SKU when this run has read the list, so that a wrong one is seen before an approval."""
+    if creating(ctx):
+        made = ctx.cfg.get("FABRIC_CAPACITY_ID")
+        return f"{new_capacity_label(ctx)}, " + (f"made by this deployment  {made}" if made else
+                                                 f"to be made in {ctx.cfg['RESOURCE_GROUP']}: it costs money while it runs")
     if not capacity_id:
         return "not chosen yet: see pre.capacity"
     listed = ctx.cache.get("capacities")
@@ -121,7 +107,7 @@ def check_target(ctx: Context, target: dict) -> None:
     for key, label in (("tenant_id", "tenant"), ("subscription_id", "subscription")):
         if made.get(key) and made[key] != target[key]:
             raise Refused(f"This deployment began in {label} {made[key]}. The Azure CLI is now on {label} {target[key]}. "
-                          "Nothing was changed. Sign in to the right one, or start a new deployment in a new copy of the settings.")
+                          "Nothing was changed. Sign in to the right one, or start a deployment here: python3 tools/deploy.py plan --new")
 
 
 def build(args, root: Path, out, adapters=None) -> tuple[Context, list]:
@@ -129,15 +115,21 @@ def build(args, root: Path, out, adapters=None) -> tuple[Context, list]:
     say = lambda text: print(redact(text), file=out, flush=True)   # noqa: E731
     made = adapters(redact) if callable(adapters) else (adapters or {})    # the tests hand in stand-ins
     az = made.get("az") or Az(redact)
-    cfg = settings(args, root, az, say)
+    # Who answers questions: a script of answers in the tests, the keyboard in a real run. The output may go through a
+    # pipe (to tee, to keep what was printed): the questions are still seen and answered. Only preflight and plan ask.
+    read = made.get("ask") or (input if adapters is None and sys.stdin.isatty() else None)
+    asker = choices.Asker(say, read) if read and not args.no_input and args.mode in ("preflight", "plan") else None
+    suffix = deployments.choose(args, root, az, say, asker)
+    cfg = deployments.check(root, suffix)
     options = options_of(args)
-    state = State(root / ".deploy" / cfg["DEPLOYMENT_SUFFIX"], redact)
-    ctx = Context(root=root, cfg=cfg, env_file=root / "config" / "demo.env", state=state, options=options, redact=redact, az=az,
+    state = State(deployments.home(root) / suffix, redact)
+    ctx = Context(root=root, cfg=cfg, env_file=deployments.env_of(root, suffix), state=state, options=options, redact=redact, az=az,
                   shell=made.get("shell") or Shell(root, redact, out), out=out,
                   **{key: made[key] for key in ("clock", "sleep", "wall") if key in made})
     ctx.fabric = made.get("fabric") or make_fabric(az)
     ctx.kusto = made.get("kusto") or Kusto(az, redact)
     ctx.onelake = made.get("onelake") or OneLake(az)
+    ctx.asker = asker
     return ctx, select(catalogue(options), options)
 
 
@@ -159,6 +151,18 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
         if args.recheck:
             ctx.state.data["remembered"] = {}
             ctx.state.save()
+        others = [entry for entry in deployments.listed(root) if entry != ctx.cfg["DEPLOYMENT_SUFFIX"]]
+        ctx.say(f"Deployment {ctx.cfg['DEPLOYMENT_SUFFIX']}. Settings and checkpoint: .deploy/{ctx.cfg['DEPLOYMENT_SUFFIX']}/."
+                + (f" Also in this folder: {', '.join(others)} (--deployment SUFFIX)." if others else "")
+                + (" A new one beside it: add --new." if args.mode in ("preflight", "plan") else ""))
+        ask = ctx.asker
+        if ask and not ctx.state.frozen:
+            before = dict(ctx.state.data["choices"])
+            implied = choices.run_choices(ctx, ask, again=args.ask)
+            ctx.options.granted |= implied                 # a yes to "create a capacity" approves that step for this plan
+            if ctx.state.data["choices"] != before:
+                ctx.say("\n" + choices.summary(ctx) + "\n")
+            target = target_of(ctx, account)
         if args.mode == "status":
             return status(ctx, steps, target)
         # One line as each step is looked at. Looking is a dozen or more calls to the Azure CLI, each a few seconds and
@@ -189,8 +193,13 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
             return EXIT_BLOCKED if waiting else EXIT_OK
         digest = plan_hash(ctx, lines, target)
         print_plan(ctx, lines, digest)
-        ctx.say("Nothing was changed in Azure or Fabric. To carry this plan out, repeat the command with apply and "
-                f"--approve {digest}, and the same options.")
+        ctx.state.data["last_plan"] = digest       # so that an apply aimed at another deployment of the folder can say whose plan it is
+        ctx.state.save()
+        ctx.say("Nothing was changed in Azure or Fabric. To carry this plan out:")
+        ctx.say("  " + apply_command(ctx, args, digest))
+        waiting = [line.step.id for line in lines if line.decision == "operator" and line.step.id in CONFIRMABLE]
+        if waiting:
+            ctx.say("Add " + " ".join(f"--confirm {step}" for step in waiting) + " when that step of yours is done.")
         return EXIT_OK
     except Refused as stop:
         print(f"REFUSED  {stop}", file=out, flush=True)
@@ -201,6 +210,29 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
     except StepFailed as failure:
         print(f"FAILED   {failure}", file=out, flush=True)
         return EXIT_FAILED
+    except KeyboardInterrupt:
+        # At a question nothing has happened yet. In an apply, what was started in Azure or Fabric goes on there, and the
+        # next apply looks at it before it does anything.
+        print("\nSTOPPED  by Ctrl+C. Run the same command again: it looks at what is there before it does anything.", file=out, flush=True)
+        return 130
+
+
+def apply_command(ctx: Context, args, digest: str) -> str:
+    """The apply that carries out the plan just shown, written out: its options are part of what was approved."""
+    words = ["python3 tools/deploy.py apply", f"--approve {digest}"]
+    if args.up_to != "phase1":
+        words.append(f"--up-to {args.up_to}")
+    granted = ctx.options.granted
+    words += [flag for need, flag in (("roles", "--approve-role-changes"), ("capacity", "--approve-capacity-creation")) if need in granted]
+    words += [f"--allow-preview {need.split(':', 1)[1]}" for need in sorted(granted) if need.startswith("preview:")]
+    words += [f"--opt-in {need.split(':', 1)[1]}" for need in sorted(granted) if need.startswith("optin:")]
+    if ctx.options.phase5a:
+        words.append("--enable-phase5a-isolated-simulator")
+    if ctx.options.regenerate_history:
+        words.append(f"--regenerate-history {ctx.options.regenerate_history}")
+    if len(deployments.listed(ctx.root)) > 1:      # a line kept or pasted later still goes to the deployment it was printed for
+        words.append(f"--deployment {ctx.cfg['DEPLOYMENT_SUFFIX']}")
+    return " ".join(words)
 
 
 def run_apply(ctx: Context, steps: list, args, account: dict) -> int:
@@ -222,6 +254,10 @@ def run_apply(ctx: Context, steps: list, args, account: dict) -> int:
             raise Refused(f"apply needs the approval of a plan: --approve {digest} if this is the plan you have read. "
                           "Run plan with the same options to read it.")
         if args.approve != digest:
+            whose = deployments.owner_of_plan(ctx.root, args.approve, besides=ctx.cfg["DEPLOYMENT_SUFFIX"])
+            if whose:
+                raise Refused(f"Plan {args.approve} is the plan of deployment {whose}; this apply works on deployment "
+                              f"{ctx.cfg['DEPLOYMENT_SUFFIX']}. Nothing was changed. Add --deployment {whose} to apply that plan.")
             raise Refused(f"You approved plan {args.approve}; the plan is now {digest}. The target, the options, a file a step "
                           "uses, or the state of the cloud has changed since. Nothing was changed. Run plan again and read it.")
         if not ctx.state.data["target"].get("tenant_id"):
@@ -244,6 +280,11 @@ def status(ctx: Context, steps: list, target: dict) -> int:
             ctx.say(f"  {'':<28} {'':<12} {'':<21} (not looked at by the runner itself)")
     for step_id, work in ctx.state.data["pending"].items():
         ctx.say(f"  under way for {step_id}: {', '.join(work)}")
+    everything = deployments.listed(ctx.root)
+    if len(everything) > 1:
+        ctx.say("\nThe deployments of this folder:")
+        for entry in everything:
+            ctx.say(f"  {deployments.describe(ctx.root, entry)}{'   <- this one' if entry == ctx.cfg['DEPLOYMENT_SUFFIX'] else ''}")
     try:
         if ctx.target("workspace_id") and kql_database(ctx):
             seen = freshness(ctx)

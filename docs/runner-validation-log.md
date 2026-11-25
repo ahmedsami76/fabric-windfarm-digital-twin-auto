@@ -1,10 +1,14 @@
 # Deployment runner: validation log
 
-The record of `tools/deploy.py`, written while it was built on 25 November 2026. As in the other logs: **seen** means output or a screen was sent to me, **reported** means the user said so, **not run** means nobody has run it. Of the runner, `preflight` was seen on a tenant twice on 25 November; everything else of it on a tenant is **not run**.
+The record of `tools/deploy.py`, written while it was built on 25 November 2026. As in the other logs: **seen** means output or a screen was sent to me, **reported** means the user said so, **not run** means nobody has run it. Of the runner, `preflight` was seen on a tenant three times on 25 November; everything else of it on a tenant is **not run**.
 
 ## What was asked
 
 On 25 November at 01:55 the user asked for the repository to be consolidated and set aside, and for a second version with "one entry point that automates the supported steps and tells the operator exactly what to do when a manual step is required", with a written list of rules: read-only by default, apply only with the approval of a plan and its target, a resource group and a workspace of its own, no tenant settings, no capacity changes, no broad access, no deletion, checkpoints without secrets, bounded waits, no duplicates on resume, gates on observable results, preview behind opt-in, undocumented operations left manual, Phase 5a off by default and never a command, nothing deployed while building. And names of the form `rg-windfarm-edge-3x9`, generated.
+
+On 25 November at 15:51, after the plan had been reduced to one `sed` line and a command, the user wrote: "I would like a little more automation here. instead of running sed command to I'd rather : [ask: would you like to create a new fabric capacity or use one of the existing ones {yes, no}, if yes randomly pick a name and create F16 one in a proper region, if not enumerate all the existing capacities, and ask the user to pick one - next workspace - do the same - etc]". That changes two rules of the first list, by the person who wrote it: "never create or reassign capacity", and a workspace of the runner's own. The fourth issue follows the new instruction and keeps what is left of the old ones: see the decisions marked fourth issue.
+
+On 25 November at 16:35, a few minutes after the fourth issue went out, the user wrote: "one more thing, I don't want a pre-populated .env file. I want you to generate the random 3 alphanum suffix in the runtime. I might be building this demo over and over in the same tenant or new tenants". The archive held no settings file, only the template, and the suffix was already drawn by the first plan. What his sentence is right about is what happened after that: the first plan left a filled-in `config/demo.env` in the folder, one file for one deployment, in the place where the guides have a person fill one in; and a second build needed a second copy of the folder. The fifth issue makes the deployment, not the folder, the unit: see the decisions marked fifth issue and R39 to R46.
 
 ## Decisions
 
@@ -18,6 +22,19 @@ On 25 November at 01:55 the user asked for the repository to be consolidated and
 | Notebook 04 is imported and not run | It changes nothing, and a job's output is read by nobody |
 | The capacity is the operator's to name. The runner takes one by itself only when it is the single usable one in sight (third issue) | The rules say to stop on ambiguous matches and never to create or reassign a capacity. "The only one listed" turned out not to mean "the one to use" (R19) |
 | Three answers that hold for a day are asked once in twelve hours, "could not be read" included (third issue) | A run looks at every step, an apply twice. On a line where a question stands for a minute, asking it each time is most of the run (R25). A block is never kept, so nothing that has to be fixed is hidden |
+| The runner asks, in preflight and plan, in a terminal; an answer is a line of the settings and of the plan, never a change in Azure or Fabric (fourth issue) | The user asked for questions in place of edits to the settings file. The rules "read-only by default" and "apply only with the approval of a plan and its target" stand: a question changes what the plan says, and the plan is still read and approved. Without a terminal nothing is asked, so a pipeline behaves as before |
+| A capacity is made only on a yes to that question and with its own approval; it is never paused, resumed, resized or deleted by the runner (fourth issue) | The first list said "never create or reassign capacity". Its author now asks for creation as a choice. A capacity costs money while it runs, so making one gets the treatment the list gave role changes: its own approval, which the yes gives for the plan of the same run and `--approve-capacity-creation` gives otherwise. Everything else of the old rule stays |
+| The new capacity lives in the demo's resource group, with the deployment's tag and the suffix in its name (fourth issue) | Ownership by resource ID and a mark, as for everything else the runner makes; and the clean-up that removes the group removes the capacity, so that nothing that costs money is left behind without a record |
+| F16, as asked; another SKU by a setting, not by a question (fourth issue) | The user named the SKU. A question about it would be one more thing to answer for the one person who has run this |
+| The region for a new capacity: the edge's own, unless Microsoft's region table lists something the demo uses as missing there; then the next one that lacks nothing. A dated copy of the table is in the code (fourth issue) | "A proper region" had to mean something that can be checked. The table changes; a copy with its date can be wrong, so it proposes and cautions, and blocks only when a phase that was asked for needs what the table lists as missing (R30) |
+| An existing workspace is taken only when it is empty and on the chosen capacity, and is held by its ID (fourth issue) | The first list asked for a dedicated workspace, known by ID and recorded ownership, and for a stop on unrelated resources. An empty workspace that the person picked is dedicated from then on. One with items is not, whatever the items are called |
+| The resource group is not asked about (fourth issue) | The runner's proof that a group is its own is the tag it sets when it creates the group. Taking an existing group means writing to a resource somebody else made. Not built until it is asked for |
+| The settings of a deployment are kept beside its checkpoint, `.deploy/<suffix>/demo.env`. The runner reads and writes nothing in `config/` (fifth issue) | The user wants no settings file prepared, and builds the demo again and again. Settings and checkpoint are two halves of one record: which names, and what was made under them. Kept together and by suffix, a second deployment cannot overwrite the first, and `config/demo.env` goes back to meaning one thing, a deployment by hand |
+| They stay a file in the shell's format (fifth issue) | Every script reads its settings by sourcing a file, and the runner starts those scripts. Settings kept only inside the checkpoint would have to be written out as such a file for each script anyway, and a person could no longer read them or hand them to a script |
+| One folder holds many deployments. `.deploy/current` names the one that commands work on; `plan --new` starts one, `--deployment SUFFIX` goes back to one (fifth issue) | "Over and over in the same tenant or new tenants". A new copy of the folder for every build was the only way before, and `--new-names` was refused as soon as anything existed |
+| A new deployment in the same subscription takes over four things: the region of the edge, the VM sizes and their order, the shutdown hour, the Custom Locations object ID. Never a name, the capacity or the workspace (fifth issue) | The four are what a person settles once for a subscription, and the last is a lookup that needs a directory right. A capacity may be gone or paused by the next build and a workspace is the deployment's own, so those two are asked again. In another subscription nothing is taken over: none of it need hold there |
+| The runner offers a new deployment by itself only in a terminal, and only in two cases: signed in to another subscription, or the deployment's resource group is gone (fifth issue) | Both mean that going on with the current names leads nowhere, and both are what "the next build" looks like in practice: a new tenant, or a clean-up. Without a keyboard it starts nothing by itself, so a pipeline never changes its target because of what it found |
+| A script started by hand takes the file `ENV_FILE` names, then `config/demo.env`, then the current deployment's settings (fifth issue) | A deployment by hand in the same folder keeps working exactly as its guides say, and beside a deployment of the runner the same commands work without an option. The clean-up shows what it would remove before it removes anything, by name |
 | What the runner could not read is shown as `NOT CHECKED`, never as `done` (third issue) | A step is not complete because a command returned, and a check is not made because it did not stop anything (R21) |
 
 ## Found while building
@@ -79,21 +96,81 @@ Found through that run:
 
 What the output does not tell: which capacity the workspace `WindFarmDigitalTwin` runs on, and why answers of several megabytes do not arrive on this workstation while small ones take a second or two (the extension index on 24 November, `az vm list-skus`, the role definitions, the SKUs of one region). The next preflight prints the first. For the second, one timed download from the same shell would separate a slow line from a blocked one.
 
+## Third run on a tenant
+
+| When | Step | Result |
+|---|---|---|
+| 25 November 2026, about four hours before 15:40 | `preflight` with the third issue | **Not seen.** Known only from the next run, which showed three answers as `[asked 4 h ago]` |
+| 15:40 Houston | `python3 tools/deploy.py preflight --up-to phase4`, third issue, `config/demo.env` unchanged | **Seen**, pasted in full. Target with `capacity  Premium Per User - Reserved (PP3, Central US)  0aa47150-…`. `pre.rights  done  roles on the subscription: Owner, User Access Administrator [asked 4 h ago; --recheck asks again]`. `pre.providers  done … [asked 4 h ago …]`. `pre.region  NOT CHECKED … (az rest --method get did not answer within 60 seconds.) … [asked 4 h ago …]`. `pre.capacity  BLOCKED  FABRIC_CAPACITY_ID names Premium Per User - Reserved (PP3, Central US): a Premium Per User capacity …`, with two capacities listed: `d21d9da9-4054-4790-bc82-71aad3a91152  fabcentralussm01 (F32, Central US)  -> can hold the demo: a Fabric capacity`, and the Premium Per User one as `cannot hold the demo`. No list of capacities outside it. `p3.capacity  BLOCKED`. `9 done, 0 confirmed by you, 1 not checked, 0 for the runner, 3 for you, 0 waiting for an approval, 2 blocked, 0 optional.` No plan identifier; `Preflight is not a plan. …` |
+
+What that run proved, of the points that were unproven:
+
+- **The roles, read with the light question** (R23): `az ad signed-in-user show`, and Role Assignments - List For Scope through `az rest` with the filter `atScope() and assignedTo('…')` in `--url-parameters`. Answered, and the two role IDs were named rightly.
+- **Kept answers** (R25) across runs on his computer: three answers shown from the checkpoint, none asked again.
+- **The capacity by its SKU** (R19) on real data: `F32` and `PP3` read as what they are; the target shows name and SKU.
+- **The words** (R21, R22): `NOT CHECKED` with its count, no plan identifier after preflight.
+
+And what it did not: the question about VM sizes went unanswered a third time, now within 60 seconds. On this workstation that check is `NOT CHECKED` every time.
+
+Found through that run:
+
+| # | What I assumed | What is true | Source | Changed |
+|---|---|---|---|---|
+| R27 | The workspace of the deployment by hand "evidently runs on a capacity that is not in that list" (my words in R19), so the block would show a line `used by: WindFarmDigitalTwin`, and the capacity would pass as `NOT CHECKED` | Fabric lists an F32 for him, `fabcentralussm01` in Central US, and no workspace of his runs outside the list. At 10:09 the second issue had called the Premium Per User capacity "the only active one you see", and it looked at active capacities only: the F32 was most likely paused then, which nobody checked. I had made one explanation out of one line of output and told him what to look for on that basis; he found no such line and sent the output, as asked | The user's output of 15:40 | Nothing in the runner: the block printed the right list. The instruction to him was corrected: the ID of the F32 goes into `FABRIC_CAPACITY_ID`. A paused capacity is said to be paused and is not resumed (a test of the third issue) |
+| R28 | A step without an action is the operator's | The gate on fresh telemetry has no action, because it is a measurement, and the plan showed it as `YOUR STEP` with the line `> See the plan line above.`, and counted it under "for you". Nothing for a person to do there | Replaying his situation against the stand-ins before sending him on to `plan` | A gate that the runner measures shows as `will be measured` and counts as the runner's. A test. **Not in the archive he has**: his first plan shows the old line |
+| R29 | A capacity the agents cannot use means a workspace to move | For a capacity that cannot hold the demo at all, `p3.capacity` said to move the workspace to another capacity, before any workspace exists | The user's output | It points to the choice of `pre.capacity`. A test. Not in the archive he has |
+
+Open after that run:
+
+- **Quota.** The new VM stands beside the VM of the deployment by hand, in the same region and most likely of the same size family, and needs 8 vCPUs more. Preflight does not look at quota. He was given `az vm list-usage` to look for himself. To build: a check `pre.quota` (the regional total and the family of the first size of `VM_SIZE`), `NOT CHECKED` when the family cannot be told from the size's name.
+- **The plan and the apply**, which have still not run on a tenant.
+
+## Found while building the fourth issue
+
+| # | What I assumed | What is true | Source | Changed |
+|---|---|---|---|---|
+| R30 | "A proper region" for a new capacity is the region of the edge | For South Central US, the region of this deployment's edge, Microsoft's table lists the operations agent as not available for a capacity. A capacity made there would have carried Phases 1, 2 and 4 and stopped Phase 3 at its last step. The user's own capacity is in Central US, where the table lists nothing as missing. A search result for the same page, without a date, listed more as missing in South Central US (Fabric App, Ontology); the page as fetched, dated 17 November 2026, does not, and the runner follows the dated page | Learn, "Fabric region availability", 25 November | The edge's region when the table lists nothing the demo uses as missing; else Central US for South Central US and East US 2 for East US. The reason is printed with the proposal. A region with a gap needs a yes, and blocks the plan once the phase that uses it is asked for |
+| R31 | The quota of Fabric capacity units can be read before the capacity is asked for | The page on these quotas describes the portal; the operation behind its "API" tab was not in what I could read. Microsoft does say that a capacity needs enough quota and a registered provider | Learn, "Microsoft Fabric capacity quotas" and "Buy a Microsoft Fabric subscription" | Not checked beforehand, and said so. The capacity is the second thing an apply makes, straight after the resource group, so a refusal costs nothing; it becomes a block with the place to ask for more. The provider is a preflight check |
+| R32 | The request for a capacity returns when the capacity exists | It returns when Azure has taken the request; the answer documents a state `Provisioning` and an operation to follow. The engine's rule for a step whose result is not there after its wait is FAILED, which would have been the word for a capacity that is merely not ready | The first run of the test with a capacity in `Provisioning` | The step waits within the limit of an operation, 15 minutes, and then ends the apply with "still running" and exit code 4. The next apply finds the capacity and waits for it; the stand-in fails any test in which a second request is sent |
+| R33 | A plan's identifier covers the capacity by its ID | A capacity to be made has no ID until it exists. With the ID in the identifier, an apply that was interrupted after making the capacity would have been refused as "the plan has changed", for a change the plan itself made | Writing the test "the same approval still holds" before the code | A capacity to be made is part of the target by its name, SKU and region, before and after. Seen to hold in the test |
+| R34 | The new capacity is the demo's, so the checks let it be | The resource group's check stops on any resource of a provider the demo does not use, and `Microsoft.Fabric` was not on its list: the runner would have stopped at its own capacity on the next apply | Reading the group's check for what the new step adds to it; a planted fault confirms that a test sees it | `Microsoft.Fabric` is one of the providers of the demo's group |
+| R35 | Asking is harmless at any time | Two times are wrong: in `apply`, where the target has to be the one that was approved, and while an apply runs, where this run's copy of the checkpoint is older than the apply's (R26). The first tests of both passed with the fault planted, because nothing was left to ask in them | Planting the two faults | Questions only in preflight and plan and never beside a running apply. The tests now leave a question open on purpose |
+| R36 | Putting another VM size first is a change of the question to Azure | The kept answer was filed under the list of sizes as written, so a new order would have sent the unanswered question again, and a minute of waiting with it | Building the question about the VM size | The sizes are part of the key as a set |
+| R37 | A stopped VM gives its vCPUs back | "Quota is calculated based on the total number of cores in use both allocated and deallocated" (Microsoft). The VM of the deployment by hand counts against the new one whether it runs or not | Learn, "Virtual machine vCPU quotas", 25 November, read before telling the user what to do if the quota is short | A preflight check `pre.quota`: the region's total and the family of the size that is tried first, from `az vm list-usage`. The family's name is derived from the size's name; when the list has no such row the check says `NOT CHECKED` |
+| R38 | Ctrl+C needs no thought | At a question it printed a Python traceback | Reading the entry point after adding the first thing a person waits at | One line, exit code 130, and what was true before: the next run looks before it does anything |
+
+## Found while building the fifth issue
+
+| # | What I assumed | What is true | Source | Changed |
+|---|---|---|---|---|
+| R39 | The runner already did what was asked: no settings file in the archive, the suffix drawn at the first plan | For the first build, yes. But the first plan wrote a filled-in `config/demo.env` into the folder, where it looks like the file the guides have a person prepare, and it was the only one the folder could hold | Listing the archive of the fourth issue, then reading the request again with a second build in mind | Deployments: settings under `.deploy/<suffix>/`, nothing of the runner in `config/`, `--new` and `--deployment` |
+| R40 | `--new-names` covers a new start | It was refused once the deployment had made anything, which is exactly when a second build is wanted | The option's own text in the guide | Removed. `--new` starts a deployment at any time and leaves the earlier one as it is |
+| R41 | Scripts started by hand need no change | They read `config/demo.env`. With the settings elsewhere, `bash infra/vm.sh ssh`, the clean-up, `app/create-app.sh` and `app/create-principal.sh` typed by hand would have stopped, or, in a folder that also has a deployment by hand, acted on that one without a word | Searching the scripts for `ENV_FILE` and for the file's name | One order in `config/load-env.sh`, `infra/99-cleanup.sh` and the two app scripts. Eight scenarios |
+| R42 | `infra/vm.sh push` takes the settings to the VM with the rest | It sends the folder. With the settings in `.deploy/`, every deployment's settings and checkpoint would have gone to each VM, and `config/demo.env` on the VM, which the scripts there read, would have been missing | Reading `push` | `.deploy/` is not sent; the settings in use are written to `config/demo.env` on the VM. A scenario |
+| R43 | An apply with the wrong plan identifier gets the usual refusal | After `plan --new`, the line to paste for the earlier deployment is still on the screen. "The plan is now …; something has changed" would have sent a person looking for a change that is not there | Playing two deployments through against the stand-ins | Each checkpoint keeps the identifier of its last plan; the refusal says whose plan it is and how to apply it |
+| R44 | A copy of the template is a fine settings file | Its first lines say to copy it to `config/demo.env` and fill in the blanks, in a file that is to be neither copied nor filled in | Reading the first file the new code wrote | A deployment's file opens with what it is; so does a file moved from `config/` |
+| R45 | Every folder under `.deploy/` is a deployment | A checkpoint whose settings are gone is not one: nothing says what its names were. A planted fault that counted it passed every test | The planted faults | The test for the move now has such a folder beside it |
+| R46 | The refusal for another tenant gives usable advice | It said to "start a new deployment in a new copy of the settings" | Reading every message that names the settings | It gives the command, `plan --new` |
+
 ## Checked
 
 | Check | Result |
 |---|---|
-| `pytest simulator/tests/test_deploy_runner.py` | 73 tests against `deploy_fakes.py` (48 at the first issue, 53 at the second) |
+| `pytest simulator/tests/test_deploy_runner.py` | 97 tests against `deploy_fakes.py` (48 at the first issue, 53 at the second, 73 at the third, 89 at the fourth) |
 | 22 faults planted in the runner for the first issue, one at a time | 21 failed a test at once; one after the test was strengthened (R10) |
 | 28 faults planted for the third issue: in the capacity check, the words, the kept answers, the roles, the lock | Each failed a test at once |
-| `bash tools/script-tests/run.sh` | 144 scenarios: 6 new, for the app's workspace name, the command path created switched off, step 1 handed sizes that were checked, and step 1 told to ask nothing |
+| 43 faults planted for the fourth issue: in the questions, the new capacity, the chosen workspace, the quota | 39 failed a test at once; 4 after the test was made to look at the right place (R35, and two assertions that matched other text) |
+| 45 faults planted for the fifth issue: 37 in the runner (which deployment a command works on, what a new one takes over, the move of old settings, whose plan an identifier is, what the scripts are handed), 8 in the scripts' search for their settings | 44 failed a test or a scenario at once; one after a test was made to look for it (R45). The two faults of the fourth issue whose code moved from `cli.py` to `deployments.py` were planted again, and caught |
+| The questions played through as text, for the tenant as it was at 15:40 | Read, and reworded twice |
+| His folder as it is today (`config/demo.env` with the suffix 064 and a Premium Per User capacity in it, `.deploy/064/`), played through against the stand-ins, and a second build after it | The settings are moved once; the capacity is asked for again because the one in the settings cannot hold the demo; `--new` gives other names and leaves 064 as it was |
+| `bash tools/script-tests/run.sh` | 152 scenarios. 6 new at the fourth issue (144), for the app's workspace name, the command path created switched off, step 1 handed sizes that were checked, and step 1 told to ask nothing. 8 new at the fifth: the settings found through `.deploy/current`, `config/demo.env` before that, `ENV_FILE` before both, a current deployment without settings, `push` with the settings elsewhere, the clean-up and the two app scripts beside a deployment of the runner |
 | `python3 tools/build-deploy-gate.py --check`, `python3 tools/build-runner-docs.py --check` | The gate notebook and the table of steps are what their generators write |
 | The whole gate of the repository | Passes; see the README |
 | `python3 tools/deploy.py plan` on a computer without the Azure CLI | Says so and ends with exit code 1; writes nothing |
 
 ## Not run
 
-`plan`, `apply` and `status` on a tenant, and `preflight` with this issue. The eighteen points of [15-deployment-runner.md](15-deployment-runner.md), "Unproven on a tenant", in the order a first run meets them.
+`plan`, `apply` and `status` on a tenant, and everything of the fourth and fifth issue. The twenty-two points of [15-deployment-runner.md](15-deployment-runner.md), "Unproven on a tenant", in the order a first run meets them.
 
 ## Files
 
@@ -158,3 +235,38 @@ Twelve files differ from the second issue. They can be copied over a folder in w
 | `config/demo.env.example` | The comment of `FABRIC_CAPACITY_ID` says which kinds of capacity |
 | `simulator/tests/test_deploy_runner.py`, `simulator/tests/deploy_fakes.py` | Twenty tests more (73); the stand-in answers the two role questions and fails on `az role assignment list` |
 | `docs/15-deployment-runner.md`, `docs/runner-validation-log.md`, `README.md` | The second run, findings R19 to R26, the capacity, the two new words, `--recheck` |
+
+### Fourth issue, 25 November 2026: the questions
+
+One new file and eleven changed ones against the third issue. They can be copied over a folder in which `preflight` has run; `config/demo.env` and `.deploy/` stay as they are. The settings file needs no edit by hand: the next plan asks.
+
+| File | What changed |
+|---|---|
+| `tools/deployer/choices.py` (new) | The questions: region of the edge, capacity, workspace, VM size; who answers, and what an answer writes |
+| `tools/deployer/cli.py` | Asks before it looks; `--no-input`, `--ask`, `--approve-capacity-creation`; the apply command written out under the plan; a capacity to be made and a chosen workspace in the target; Ctrl+C as one line |
+| `tools/deployer/steps.py` | The step `p1.capacity` and the checks before it; the dated table of Fabric regions; a chosen workspace, empty and on the chosen capacity; `pre.quota`; the VM sizes kept as a set; the text of the telemetry gate (R28) |
+| `tools/deployer/steps_later.py` | Phase 3 reads a capacity that is to be made, and cautions about its region; the instruction for a capacity that cannot hold the demo (R29) |
+| `tools/deployer/core.py` | The record of choices in the checkpoint; the approval of a capacity; a chosen workspace as part of what a plan covers; a gate the runner measures shown as `will be measured` (R28) |
+| `tools/build-runner-docs.py` | The table of steps says who makes a capacity, and when |
+| `config/demo.env.example` | Four settings the questions write: `FABRIC_CAPACITY_CREATE_SKU`, `FABRIC_CAPACITY_NAME`, `FABRIC_CAPACITY_REGION`, `FABRIC_WORKSPACE_ID` |
+| `simulator/tests/test_deploy_runner.py`, `simulator/tests/deploy_fakes.py` | Sixteen tests more (89); a person who answers; Microsoft.Fabric in the pretend Azure; the usage list |
+| `docs/15-deployment-runner.md`, `docs/runner-validation-log.md`, `README.md` | The questions, the new capacity, the run of 15:40, findings R27 to R38 |
+
+### Fifth issue, 25 November 2026: no settings file, one folder for every build
+
+One new file and eighteen changed ones against the fourth issue; 272 files. They can be copied over a folder that holds an earlier issue. `config/demo.env` and `.deploy/` are not in the archive and stay as they are; the next run moves a `config/demo.env` that the runner wrote to `.deploy/<suffix>/demo.env`, once, and says so.
+
+| File | What changed |
+|---|---|
+| `tools/deployer/deployments.py` (new) | The deployments of a folder: where the settings and the checkpoint of each are, which one is current, starting one with a new suffix, what it takes over, the move of settings from `config/`, whose plan an identifier is |
+| `tools/deployer/cli.py` | `--new` and `--deployment`; `--new-names` is gone; the line that names the deployment and the others of the folder; `status` lists them; the apply line names its deployment once the folder holds several, and an apply with another deployment's plan says so (R43); the advice for another tenant (R46) |
+| `tools/deployer/core.py` | The settings file by its place in the folder, for messages |
+| `tools/deployer/steps.py`, `tools/deployer/steps_later.py`, `tools/deployer/choices.py` | Messages name the deployment's own settings file and `plan --new`; the hand-over text for the service principal |
+| `tools/deployer/names.py` | Its description |
+| `config/load-env.sh` | Finds the settings: `ENV_FILE`, then `config/demo.env`, then the current deployment's (R41) |
+| `infra/99-cleanup.sh`, `app/create-app.sh`, `app/create-principal.sh` | The same order |
+| `infra/vm.sh` | `push` sends nothing of `.deploy/` and writes the settings in use to `config/demo.env` on the VM (R42) |
+| `config/demo.env.example` | Its first lines say who copies it and who does not |
+| `tools/script-tests/run.sh` | Eight scenarios more (152) |
+| `simulator/tests/test_deploy_runner.py`, `simulator/tests/deploy_fakes.py` | Eight tests more (97); the bench follows the current deployment; the pretend shell fails a script that is not handed the settings of its deployment |
+| `docs/15-deployment-runner.md`, `docs/runner-validation-log.md`, `README.md` | The section Deployments, the request of 16:35, findings R39 to R46; in the README also the count of all tests, which still said 88 |
