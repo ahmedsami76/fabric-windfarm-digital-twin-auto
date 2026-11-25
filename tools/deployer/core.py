@@ -85,7 +85,11 @@ class State:
     def __init__(self, folder: Path, redact: Redactor, clock: Callable[[], float] = time.time):
         self.folder, self.path = Path(folder), Path(folder) / "state.json"
         self._redact, self._clock = redact, clock
-        self.data = {"version": 1, "target": {}, "steps": {}, "pending": {}, "confirmed": {}, "acknowledged": []}
+        self.data = {"version": 1, "target": {}, "steps": {}, "pending": {}, "confirmed": {}, "acknowledged": [],
+                     "remembered": {}}
+        # True while another process applies to this deployment: this run then reads the checkpoint and writes nothing
+        # to it, because its copy is older than the one the apply keeps writing.
+        self.frozen = False
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -97,6 +101,8 @@ class State:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._clock()))
 
     def save(self) -> None:
+        if self.frozen:
+            return
         self.folder.mkdir(parents=True, exist_ok=True)
         text = self._redact(json.dumps(self.data, indent=2, sort_keys=True)) + "\n"
         handle, temporary = tempfile.mkstemp(dir=self.folder, prefix=".state-", suffix=".tmp")
@@ -186,6 +192,16 @@ class Lock:
         except OSError:
             pass
 
+    def holder(self) -> dict | None:
+        """Who holds the lock now, for a run that only reads. None when nobody does, or only a process that has ended."""
+        try:
+            other = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if other.get("host") == socket.gethostname() and not _alive(other.get("pid")):
+            return None
+        return other
+
 
 # ----------------------------------------------------------------------------------------- steps
 @dataclass
@@ -209,9 +225,9 @@ def blocked(detail: str, action: str = "") -> Probe:
     return Probe("blocked", detail, action=action)
 
 
-def unverified(detail: str) -> Probe:
-    """Passes, and says that the runner could not check it."""
-    return Probe("unverified", detail)
+def unverified(detail: str, **evidence) -> Probe:
+    """Passes, and says that the runner could not check it. The plan shows it as NOT CHECKED, never as done."""
+    return Probe("unverified", detail, evidence)
 
 
 @dataclass
@@ -285,14 +301,17 @@ class Context:
 class Line:
     step: Step
     probe: Probe
-    decision: str                   # done | run | operator | needs | blocked | drift | optional
+    decision: str                   # done | confirmed | unchecked | run | operator | needs | blocked | drift | optional
     missing: tuple = ()
 
 
 def decide(ctx: Context, step: Step, probe: Probe) -> Line:
     saved = ctx.state.step(step.id).get("status")
-    if probe.state in ("done", "unverified"):
+    if probe.state == "done":
         return Line(step, probe, "done")
+    if probe.state == "unverified":
+        # Passes, and is not called done: either a person said so, or the question could not be asked.
+        return Line(step, probe, "confirmed" if probe.evidence.get("confirmed") else "unchecked")
     missing = tuple(need for need in step.needs if need not in ctx.options.granted)
     if step.optional:
         return Line(step, probe, "optional")
@@ -335,6 +354,41 @@ def look(ctx: Context, step: Step, quiet: bool = False) -> Probe:
             ctx.progress(step, ctx.clock() - began)
 
 
+KEEP_SECONDS = 12 * 3600
+
+
+def _ago(seconds: float) -> str:
+    return f"{seconds / 3600:.0f} h" if seconds >= 5400 else f"{max(1, round(seconds / 60))} min"
+
+
+def kept(step_id: str, live: Callable[[Context], Probe],
+         depends: Callable[[Context], str] = lambda ctx: "") -> Callable[[Context], Probe]:
+    """A check whose answer holds for a working day is asked once.
+
+    The answer stays in the checkpoint for twelve hours, and so does "could not be read": a question that stood for a
+    minute without an answer is not asked again by every plan and apply. --recheck asks again. What the answer depends
+    on (the subscription, a setting) is its key: change one and the question is asked again. A check that found
+    something missing is never kept: it is asked until it passes.
+    """
+    def probe(ctx: Context) -> Probe:
+        key, book = depends(ctx), ctx.state.data["remembered"]
+        saved = book.get(step_id) or {}
+        age = ctx.wall() - saved.get("epoch", 0)
+        if saved and saved.get("key") == key and 0 <= age < KEEP_SECONDS:
+            return Probe(saved["state"], f"{saved['detail']} [asked {_ago(age)} ago; --recheck asks again]",
+                         dict(saved.get("evidence", {})))
+        found = live(ctx)
+        if found.state in ("done", "unverified"):
+            book[step_id] = {"key": key, "epoch": ctx.wall(), "state": found.state, "detail": found.detail,
+                             "evidence": found.evidence}
+            ctx.state.save()
+        elif step_id in book:
+            del book[step_id]
+            ctx.state.save()
+        return found
+    return probe
+
+
 def make_plan(ctx: Context, steps: list[Step]) -> list[Line]:
     return [decide(ctx, step, look(ctx, step)) for step in steps]
 
@@ -365,8 +419,9 @@ def plan_hash(ctx: Context, lines: list[Line], target: dict) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
-WORDS = {"done": "done", "run": "will run", "operator": "YOUR STEP", "needs": "needs approval", "blocked": "BLOCKED",
-         "drift": "DRIFT, will be redone", "optional": "optional, yours"}
+WORDS = {"done": "done", "confirmed": "confirmed by you", "unchecked": "NOT CHECKED", "run": "will run", "operator": "YOUR STEP",
+         "needs": "needs approval", "blocked": "BLOCKED", "drift": "DRIFT, will be redone", "optional": "optional, yours"}
+PASSED = {"done": "done", "unverified": "unchecked"}      # the first word of a line of apply for a step that passes
 
 
 def manual_text(ctx: Context, step: Step, probe: Probe) -> str:
@@ -389,7 +444,8 @@ def explain_need(need: str) -> str:
     return f"an opt-in ({name}). Add --opt-in {name} to plan and apply, or do the step by hand."
 
 
-def print_plan(ctx: Context, lines: list[Line], digest: str) -> None:
+def print_plan(ctx: Context, lines: list[Line], digest: str = "") -> None:
+    """The table of steps. With a digest it is a plan that can be approved; preflight shows the table without one."""
     phase = None
     for line in lines:
         if line.step.phase != phase:
@@ -397,7 +453,7 @@ def print_plan(ctx: Context, lines: list[Line], digest: str) -> None:
             ctx.say(f"\n{phase}")
         word = WORDS[line.decision]
         ctx.say(f"  {line.step.id:<28} {word:<22} {line.step.title}")
-        if line.probe.detail and line.decision in ("done", "blocked", "drift", "optional"):
+        if line.probe.detail and line.decision in ("done", "confirmed", "unchecked", "blocked", "drift", "optional"):
             ctx.say(f"  {'':<28} {'':<22}   {line.probe.detail}")
         if line.decision == "run" and line.step.writes:
             ctx.say(f"  {'':<28} {'':<22}   changes: {line.step.writes}")
@@ -408,9 +464,14 @@ def print_plan(ctx: Context, lines: list[Line], digest: str) -> None:
             for row in manual_text(ctx, line.step, line.probe).splitlines():
                 ctx.say(f"  {'':<28} {'':<22}   > {row}")
     counts = {word: sum(1 for line in lines if line.decision == word) for word in WORDS}
-    ctx.say(f"\n{counts['done']} done, {counts['run'] + counts['drift']} for the runner, {counts['operator']} for you, "
+    ctx.say(f"\n{counts['done']} done, {counts['confirmed']} confirmed by you, {counts['unchecked']} not checked, "
+            f"{counts['run'] + counts['drift']} for the runner, {counts['operator']} for you, "
             f"{counts['needs']} waiting for an approval, {counts['blocked']} blocked, {counts['optional']} optional.")
-    ctx.say(f"Plan {digest}")
+    if counts["unchecked"]:
+        ctx.say("NOT CHECKED: the runner could not read it. It does not stop the deployment; the step that depends on it "
+                "says so if it fails.")
+    if digest:
+        ctx.say(f"Plan {digest}")
 
 
 # ----------------------------------------------------------------------------------------- apply
@@ -438,6 +499,11 @@ def _report_block(ctx: Context, step: Step, probe: Probe, why: str) -> int:
     return EXIT_BLOCKED
 
 
+def _passed(ctx: Context, step: Step, probe: Probe) -> None:
+    word = "confirmed" if probe.evidence.get("confirmed") else PASSED[probe.state]
+    ctx.say(f"{word:<8} {step.id}: {probe.detail or step.title}")
+
+
 def apply(ctx: Context, steps: list[Step], approved: set[str]) -> int:
     """Runs the steps in order and stops at the first that needs a person, fails, or is still running."""
     for step in steps:
@@ -448,7 +514,7 @@ def apply(ctx: Context, steps: list[Step], approved: set[str]) -> int:
             if saved.get("status") != "complete":
                 ctx.state.mark(step.id, "complete", detail=probe.detail, evidence={**saved.get("evidence", {}), **probe.evidence},
                                verified=probe.state == "done")
-            ctx.say(f"done     {step.id}: {probe.detail or step.title}")
+            _passed(ctx, step, probe)
             continue
         if step.optional:
             ctx.say(f"optional {step.id}: {step.title} (yours, when you want it)")
@@ -465,7 +531,7 @@ def apply(ctx: Context, steps: list[Step], approved: set[str]) -> int:
             probe = _wait_for(ctx, step, probe)
             if probe.state in ("done", "unverified"):
                 ctx.state.mark(step.id, "complete", detail=probe.detail, evidence=probe.evidence, verified=probe.state == "done")
-                ctx.say(f"done     {step.id}: {probe.detail or step.title}")
+                _passed(ctx, step, probe)
                 continue
             return _report_block(ctx, step, probe, "Not there yet.")
         ctx.say(f"\nrunning  {step.id}: {step.title}")
@@ -498,6 +564,6 @@ def apply(ctx: Context, steps: list[Step], approved: set[str]) -> int:
             return EXIT_FAILED
         ctx.state.mark(step.id, "complete", detail=probe.detail,
                        evidence={**ctx.state.step(step.id).get("evidence", {}), **probe.evidence}, verified=probe.state == "done")
-        ctx.say(f"done     {step.id}: {probe.detail or step.title}")
+        _passed(ctx, step, probe)
     ctx.current = ""
     return EXIT_OK

@@ -14,7 +14,7 @@ import json
 import re
 
 from .cloud import SQL_RESOURCE, CloudError, run_notebook
-from .core import Blocked, Options, Probe, Step, blocked, done, todo
+from .core import Blocked, Options, Probe, Step, blocked, done, todo, unverified
 from .steps import (DATA_AGENT, MODEL, NOTEBOOKS, ONTOLOGY, OPERATIONS_AGENT, REPORT, after, confirmation,
                     data_flow, freshness, gate_lakehouse, import_notebooks, instance, item, items, kql, kql_database, name,
                     need_item, notebook_probe, notebooks_probe, phase1, ran, run_kql_file, run_step, schedule_act,
@@ -113,14 +113,22 @@ def phase2(options: Options) -> list[Step]:
 
 
 def p3_capacity(ctx) -> Probe:
-    from .steps import capacity
-    chosen = capacity(ctx) or {}
-    sku = str(chosen.get("sku", ""))
-    if sku.upper().startswith("FT") or "trial" in sku.lower():
-        return blocked(f"The capacity is a trial ({sku}). The data agent and the operations agent need a paid capacity.",
-                       "Moving a workspace to another capacity is yours to decide and to do: workspace settings, License info. "
-                       "A workspace with items cannot move to a capacity in another region. Then set FABRIC_CAPACITY_ID and plan again.")
-    return done(f"capacity SKU {sku}")
+    from .steps import CANNOT_HOLD, capacity, capacity_kind
+    needs = "The data agent and the operations agent need a paid capacity; on a trial they do not run"
+    chosen = capacity(ctx)
+    if not chosen:
+        return unverified("the capacity is not in the list Fabric gives you, so the runner cannot read whether it is a paid "
+                          f"one. {needs}")
+    sku, kind = str(chosen.get("sku", "")), capacity_kind(chosen.get("sku"))
+    move = ("Moving a workspace to another capacity is yours to decide and to do: workspace settings, License info. "
+            "A workspace with items cannot move to a capacity in another region. Then set FABRIC_CAPACITY_ID and plan again.")
+    if kind == "trial":
+        return blocked(f"The capacity is a trial ({sku}). The data agent and the operations agent need a paid capacity.", move)
+    if kind in CANNOT_HOLD:
+        return blocked(f"The capacity ({sku}) is {CANNOT_HOLD[kind]}.", move)
+    if kind == "unknown":
+        return unverified(f"the runner does not know the SKU {sku}. {needs}")
+    return done(f"capacity SKU {sku}, a paid capacity")
 
 
 OPERATIONS_AGENT_STEPS = f"""The operations agent is set up in the portal; Fabric has no documented way to create one with its playbook.

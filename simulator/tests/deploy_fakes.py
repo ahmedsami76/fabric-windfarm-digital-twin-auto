@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from deployer.cloud import CloudError  # noqa: E402
+from deployer.steps import ROLE_IDS  # noqa: E402
 
 API = "https://api.fabric.microsoft.com/v1"
 KEY = "s3cr3tKeyOfTheEventstream0123456789abcdefghij="
@@ -26,7 +27,9 @@ class World:
     def __init__(self):
         self.account = {"id": "sub-1111", "name": "Demo subscription", "tenantId": "tenant-aaaa",
                         "user": {"name": "sami@contoso.example", "type": "user"}}
-        self.my_roles = ["Owner"]
+        self.my_roles = ["Owner"]            # at the subscription; a name the runner does not know stands for a custom role
+        self.my_object_id = "11111111-2222-3333-4444-555555555555"
+        self.role_calls = 0
         self.unregistered: set = set()
         self.skus = ["Standard_D8s_v5", "Standard_D8s_v6", "Standard_D8s_v7", "Standard_E4s_v5"]    # known in the region
         self.refused: dict = {}             # size -> reason code of a Location restriction
@@ -67,6 +70,7 @@ class World:
         self.missing_tools: set = set()
         self.extensions = ["azure-iot-ops", "ssh"]
         self.may_create_workspaces = True
+        self.closed_capacities: set = set()   # capacities a workspace cannot be put on by this person
 
     def new_id(self, prefix: str) -> str:
         self.counter += 1
@@ -115,6 +119,8 @@ class FakeAz:
                               "location": opt(args, "--location"), "tags": tags}
             w.wrote(f"az group create {name}")
         elif args[:3] == ("role", "assignment", "create"):
+            # by ID and with the kind of principal: the real CLI then asks neither for role definitions nor Microsoft Graph
+            assert re.fullmatch(r"[0-9a-f-]{36}", opt(args, "--role")) and opt(args, "--assignee-principal-type") == "ServicePrincipal"
             w.role_assignments.append((opt(args, "--assignee-object-id"), opt(args, "--role"), opt(args, "--scope")))
             w.wrote(f"az role assignment create {opt(args, '--role')} @ {opt(args, '--scope')}")
         else:
@@ -133,10 +139,24 @@ class FakeAz:
             assert opt(args, "--resource-type") == "Microsoft.Kubernetes/connectedClusters"
             return w.cluster
         if args[:3] == ("role", "assignment", "list"):
-            if "--include-inherited" in args:
-                return list(w.my_roles)
-            wanted = (opt(args, "--assignee"), opt(args, "--role"), opt(args, "--scope"))
-            return ["ra-1"] if wanted in w.role_assignments else []
+            raise AssertionError("the runner asked `az role assignment list`, which fetches every role definition to print names "
+                                 "and stood for three minutes on a workstation")
+        if args[:3] == ("ad", "signed-in-user", "show"):
+            assert opt(args, "--query") == "id" and timeout and timeout <= 60
+            return w.my_object_id
+        if args[:1] == ("rest",) and "Microsoft.Authorization/roleAssignments" in opt(args, "--url"):
+            assert "api-version=2022-04-01" in args and timeout and timeout <= 60
+            w.role_calls += 1
+            scope = opt(args, "--url").replace("https://management.azure.com", "").split("/providers/Microsoft.Authorization")[0]
+            asked = next(arg for arg in args if arg.startswith("$filter="))[len("$filter="):]
+            definition = "/subscriptions/sub-1111/providers/Microsoft.Authorization/roleDefinitions/"
+            if asked == f"atScope() and assignedTo('{w.my_object_id}')":
+                assert scope == f"/subscriptions/{w.account['id']}"
+                return [{"role": definition + ROLE_IDS.get(role, "0c0c0c0c-aaaa-bbbb-cccc-" + f"{index:012d}"), "scope": scope}
+                        for index, role in enumerate(w.my_roles)]
+            principal = re.fullmatch(r"principalId eq '([^']+)'", asked)
+            assert principal, f"a filter the documentation does not list: {asked}"
+            return [{"role": definition + role, "scope": at} for who, role, at in w.role_assignments if who == principal[1]]
         if args[:2] == ("vm", "list-skus"):
             raise AssertionError("the runner asked `az vm list-skus`, which fetches every region and stood for five minutes on a workstation")
         if args[:3] == ("storage", "account", "check-name"):
@@ -196,6 +216,9 @@ class FakeFabric:
         if route == "POST workspaces":
             if not w.may_create_workspaces:
                 raise CloudError("The Fabric API answered 403: InsufficientPrivileges", 403)
+            if body.get("capacityId") in w.closed_capacities:
+                # What Fabric answers here is not known; the stand-in names the capacity, as any honest answer would.
+                raise CloudError("The Fabric API answered 400: the workspace cannot be assigned to this capacity", 400)
             if any(ws["displayName"] == body["displayName"] for ws in w.workspaces):
                 raise CloudError("The Fabric API answered 409: WorkspaceNameAlreadyExists", 409)
             ws = {"id": w.new_id("ws"), "displayName": body["displayName"], "description": body.get("description", ""),
@@ -387,7 +410,7 @@ class FakeShell:
             w.fail_script = ""
             return 1, self._redact(f"ERROR: something went wrong; the connection was {CONNECTION}")
         w.wrote(command)
-        ws = w.workspaces[0]["id"] if w.workspaces else None
+        ws = next((entry["id"] for entry in w.workspaces if "Made by tools/deploy.py" in entry.get("description", "")), None)
         if "01-create-edge-vm.sh" in command:
             assert env.get("DEPLOY_RUNNER") == "1", "the VM script was started without DEPLOY_RUNNER"
             w.vm_env = dict(env)

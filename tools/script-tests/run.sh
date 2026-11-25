@@ -95,6 +95,12 @@ echo Standard_D8s_v6 > "$STUB_DIR"/refused; echo 99999999-aaaa-bbbb-cccc-0000000
 run env VM_SIZE_OFFERED="Standard_D8s_v6 Standard_D8s_v7" bash "$REPO"/infra/01-create-edge-vm.sh
 check "step 1 with sizes already checked: asks no list of sizes, still moves on when Azure refuses one" 0 "!vm list-skus" "!Each answer can take minutes" "Standard_D8s_v6: refused by Azure" "Created with size Standard_D8s_v7"
 
+# Nobody could ask which sizes are offered: every size of VM_SIZE is tried as it stands, and Azure's refusal moves on.
+reset; rm -f "$STUB_DIR"/power; printf 'Standard_D8s_v5\nStandard_D8s_v6\n' > "$STUB_DIR"/refused
+echo 99999999-aaaa-bbbb-cccc-000000000000 > "$STUB_DIR"/oid
+run env VM_SIZE_SKIP_CHECK=1 bash "$REPO"/infra/01-create-edge-vm.sh
+check "step 1 without the question about sizes: tries each size and lets Azure refuse" 0 "!vm list-skus" "!Each answer can take minutes" "Not asking Azure which sizes you are offered" "Standard_D8s_v5: refused by Azure" "Standard_D8s_v6: refused by Azure" "Created with size Standard_D8s_v7"
+
 reset; rm -f "$STUB_DIR"/power; printf 'Standard_D8s_v5\tNone\n' > "$STUB_DIR"/skus
 run bash "$REPO"/infra/01-create-edge-vm.sh
 check "step 1, object ID not readable: warns with the CLI message" 0 "Could not read the Custom Locations object ID" "Insufficient privileges"

@@ -52,9 +52,19 @@ else
   # VM_SIZE_OFFERED: sizes somebody has already checked, in order. tools/deploy.py sets it after one quick,
   # filtered question to Azure. Without it this script asks for each size with `az vm list-skus`, which
   # fetches the sizes of every region: seconds in Cloud Shell, minutes from some workstations.
-  [[ -n "${VM_SIZE_OFFERED:-}" ]] || info "Asking Azure which of these sizes you are offered: $VM_SIZE. Each answer can take minutes."
+  # VM_SIZE_SKIP_CHECK=1: nobody could ask (the question went unanswered). Each size of VM_SIZE is tried
+  # as it stands, and Azure's refusal of a size it does not offer moves on to the next.
+  ASK_AZURE=1
+  if [[ -n "${VM_SIZE_OFFERED:-}" ]]; then
+    ASK_AZURE=""
+  elif [[ "${VM_SIZE_SKIP_CHECK:-}" == "1" ]]; then
+    ASK_AZURE=""
+    info "Not asking Azure which sizes you are offered. Trying each in turn; Azure refuses the ones it does not offer you: $VM_SIZE"
+  else
+    info "Asking Azure which of these sizes you are offered: $VM_SIZE. Each answer can take minutes."
+  fi
   for SIZE in ${VM_SIZE_OFFERED:-$VM_SIZE}; do
-    if [[ -z "${VM_SIZE_OFFERED:-}" ]]; then
+    if [[ -n "$ASK_AZURE" ]]; then
       # The CLI prints the two values on two lines; paste joins them: "name<TAB>reason".
       OFFER="$(az vm list-skus --location "$LOCATION" --resource-type virtualMachines --all --size "$SIZE" \
         --query "[?name=='$SIZE'] | [0].[name, restrictions[?type=='Location'] | [0].reasonCode]" --output tsv 2>/dev/null \

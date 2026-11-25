@@ -14,7 +14,7 @@ import time
 
 from . import names
 from .cloud import CloudError, operation, run_notebook
-from .core import Blocked, Probe, Refused, Step, blocked, done, todo, unverified
+from .core import Blocked, Probe, Refused, Step, blocked, done, kept, todo, unverified
 
 TAG = "windfarm-demo-deployment"
 PROVIDERS = ("Microsoft.ExtendedLocation", "Microsoft.Kubernetes", "Microsoft.KubernetesConfiguration", "Microsoft.IoTOperations",
@@ -23,6 +23,14 @@ PROVIDERS = ("Microsoft.ExtendedLocation", "Microsoft.Kubernetes", "Microsoft.Ku
 IOT_OPERATIONS_REGIONS = ("eastus", "eastus2", "westus", "westus2", "westus3", "southcentralus", "westeurope", "northeurope",
                           "germanywestcentral")
 CUSTOM_LOCATIONS_APP = "bc313c14-388c-4e7d-a58e-70017303ee3b"
+# Built-in roles by the ID that is the same in every tenant (Microsoft Learn, Azure built-in roles, read 25 November 2026).
+# The runner reads and assigns roles by ID: asking Azure for the names means downloading every role definition.
+ROLE_NAMES = {"8e3af657-a8ff-443c-a75c-2fe8c4bcb635": "Owner", "b24988ac-6180-42a0-ab88-20f7382dd24c": "Contributor",
+              "acdd72a7-3385-48ef-bd42-f606fba81ae7": "Reader", "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9": "User Access Administrator",
+              "f58310d9-a9f6-439a-9e8d-f62e7b41a168": "Role Based Access Control Administrator",
+              "34e09817-6cbe-4d01-b1a2-e0eac5743d41": "Kubernetes Cluster - Azure Arc Onboarding"}
+ROLE_IDS = {role: guid for guid, role in ROLE_NAMES.items()}
+QUICK = 60      # seconds for a question preflight can do without: unanswered, the step says NOT CHECKED and the run goes on
 # Resource providers whose resources belong in the demo's resource group: what the scripts create, and what
 # Azure and a managed subscription add to it by themselves (just-in-time access, monitoring).
 RG_PROVIDERS = ("microsoft.compute", "microsoft.network", "microsoft.devtestlab", "microsoft.kubernetes",
@@ -58,6 +66,35 @@ def account(ctx) -> dict:
 
 def workspace_id(ctx) -> str | None:
     return ctx.target("workspace_id")
+
+
+def workspaces(ctx) -> list:
+    return ctx.remember("workspaces", lambda: ctx.fabric.listing("workspaces"))
+
+
+def role_assignments(ctx, scope: str, whose: str, timeout: int = QUICK) -> list[tuple[str, str]]:
+    """(role, scope) of the role assignments one filter selects: the role by name when it is one of ROLE_NAMES, by its
+    ID otherwise.
+
+    One question with a small answer, to the operation Role Assignments - List For Scope. `az role assignment list`
+    asks the same and then fetches every role definition of the subscription to print names (its own reference calls
+    that expensive): on 25 November 2026 it did not answer a workstation within three minutes.
+    """
+    rows = ctx.az.json("rest", "--method", "get",
+                       "--url", f"https://management.azure.com{scope}/providers/Microsoft.Authorization/roleAssignments",
+                       "--url-parameters", "api-version=2022-04-01", f"$filter={whose}",
+                       "--query", "value[].{role: properties.roleDefinitionId, scope: properties.scope}", timeout=timeout) or []
+    found = []
+    for row in rows:
+        guid = str(row.get("role") or "").rsplit("/", 1)[-1].lower()
+        found.append((ROLE_NAMES.get(guid, guid), str(row.get("scope") or "")))
+    return found
+
+
+def covers(assigned_at: str, scope: str) -> bool:
+    """A role assigned at a scope holds for everything below it."""
+    above, below = assigned_at.rstrip("/").lower(), scope.rstrip("/").lower()
+    return below == above or below.startswith(above + "/")
 
 
 def items(ctx) -> list:
@@ -134,7 +171,8 @@ def confirmation(ctx, step_id: str, what: str) -> Probe:
     """For what the runner cannot read: the operator says it is so, and the checkpoint keeps who and when."""
     said = ctx.confirmed(step_id)
     if said:
-        return unverified(f"{what}: confirmed by {said.get('by', 'the operator')} on {said.get('at')}; the runner cannot read it")
+        return unverified(f"{what}: confirmed by {said.get('by', 'the operator')} on {said.get('at')}; the runner cannot read it",
+                          confirmed=True)
     return todo("waiting for your confirmation")
 
 
@@ -222,23 +260,29 @@ def pre_providers(ctx) -> Probe:
 
 def pre_rights(ctx) -> Probe:
     me = account(ctx)
-    scope = f"/subscriptions/{me['id']}"
+    needed = ("Needed: Contributor or Owner on the subscription to create the resource group, and for the role steps a role "
+              "that assigns roles")
     try:
-        roles = ctx.az.json("role", "assignment", "list", "--assignee", me["user"]["name"], "--scope", scope,
-                            "--include-inherited", "--include-groups", "--query", "[].roleDefinitionName")
+        myself = ctx.az.json("ad", "signed-in-user", "show", "--query", "id", timeout=QUICK)
+        # at the subscription or above it, and through the groups you are in: assignedTo() follows groups
+        held = role_assignments(ctx, f"/subscriptions/{me['id']}", f"atScope() and assignedTo('{myself}')")
     except CloudError as error:
-        return unverified(f"could not read your roles ({str(error)[:160]}). Needed: Contributor on the subscription to create "
-                          "the resource group, and the right to assign roles inside it")
-    roles = set(roles or [])
+        return unverified(f"your roles could not be read ({str(error)[:160]}). {needed}")
+    roles = {role for role, _ in held}
+    known = roles & set(ROLE_IDS)
     creates = roles & {"Owner", "Contributor"}
     assigns = roles & {"Owner", "User Access Administrator", "Role Based Access Control Administrator"}
     if not creates:
-        return blocked(f"Your roles on the subscription are: {', '.join(sorted(roles)) or 'none'}. Creating the resource group "
+        if roles - known:
+            return unverified(f"you hold {len(roles - known)} role(s) on the subscription that the runner does not know by "
+                              f"their ID{', and ' + ', '.join(sorted(known)) if known else ''}. Whether they let you create a "
+                              f"resource group shows at the first step. {needed}")
+        return blocked(f"Your roles on the subscription are: {', '.join(sorted(known)) or 'none'}. Creating the resource group "
                        "needs Contributor or Owner.", "Ask the owner of the subscription for Contributor, or for a resource "
                        "group you own; the runner does not widen its own access.")
     if not assigns:
-        return unverified("you can create resources; you hold no role that assigns roles. The two role steps will stop and "
-                          "say what to ask for")
+        return done(f"roles on the subscription: {', '.join(sorted(creates))}. You hold none of the roles that assign roles: the "
+                    "role steps will stop and say what to ask for")
     return done("roles on the subscription: " + ", ".join(sorted(creates | assigns)))
 
 
@@ -252,9 +296,10 @@ def pre_region(ctx) -> Probe:
     try:
         usable, refused = offered_sizes(ctx)
     except CloudError as error:
-        # Not a reason to stop: step 1 tries the sizes of VM_SIZE in turn and says so when Azure refuses them all.
-        return unverified(f"{location} is supported. Which VM sizes you are offered could not be read ({str(error)[:140]}); "
-                          "step 1 tries the sizes of VM_SIZE in turn")
+        # Not a reason to stop: p1.edge_vm tries the sizes of VM_SIZE in their order, and Azure refuses what is not offered.
+        return unverified(f"{location} is supported. Which VM sizes you are offered could not be read ({str(error)[:140]}). "
+                          "p1.edge_vm tries the sizes of VM_SIZE in their order; Azure refuses the ones you are not offered. "
+                          "Put a size you know you are offered first", sizes_read=False)
     if not usable:
         return blocked(f"None of the sizes in VM_SIZE is offered to this subscription in {location}: "
                        + "; ".join(f"{size}: {why}" for size, why in refused.items()),
@@ -262,21 +307,23 @@ def pre_region(ctx) -> Probe:
                        "portal shows them under Virtual machines, Create, Size; sizes of the v6 and v7 families are the usual ones "
                        "in a managed subscription.")
     skipped = f" ({', '.join(refused)} not offered)" if refused else ""
-    return done(f"{location}; VM size {usable[0]} is offered{skipped}")
+    return done(f"{location}; VM size {usable[0]} is offered{skipped}", sizes=usable, sizes_read=True)
 
 
 def offered_sizes(ctx) -> tuple[list, dict]:
     """The sizes of VM_SIZE this subscription may create in LOCATION, in their order, and why the others are out.
 
     One call to the Resource SKUs API with its location filter. `az vm list-skus` asks the same API for every region
-    and filters on this computer: on 25 November 2026 that did not answer a workstation within five minutes.
+    and filters on this computer: on 25 November 2026 that did not answer a workstation within five minutes. The
+    filtered answer still holds every SKU of the region, and an hour later did not arrive within two minutes either:
+    the caller treats no answer as "not read" and goes on.
     """
     location, sizes = ctx.cfg["LOCATION"], ctx.cfg.get("VM_SIZE", "").split()
     rows = ctx.az.json(
         "rest", "--method", "get", "--url", f"https://management.azure.com/subscriptions/{account(ctx)['id']}/providers/Microsoft.Compute/skus",
         "--url-parameters", "api-version=2021-07-01", f"$filter=location eq '{location}'",
         "--query", "value[?resourceType=='virtualMachines'].{name: name, refused: restrictions[?type=='Location'] | [0].reasonCode}",
-        timeout=120) or []
+        timeout=QUICK) or []
     known = {row.get("name"): row.get("refused") for row in rows}
     usable = [size for size in sizes if size in known and not known[size]]
     refused = {size: (known[size] if size in known else f"not known in {location}") for size in sizes if size not in usable}
@@ -312,42 +359,128 @@ def pre_custom_locations(ctx) -> Probe:
 
 def pre_fabric(ctx) -> Probe:
     try:
-        ctx.remember("workspaces", lambda: ctx.fabric.listing("workspaces"))
+        workspaces(ctx)
     except CloudError as error:
         return blocked(f"The Fabric API did not answer the signed-in user: {error}", "az login   (in a session that can get a "
                        "token for https://api.fabric.microsoft.com; Azure Cloud Shell often cannot)")
     return done("the Fabric API answers")
 
 
+# What a capacity can hold, by its SKU (Microsoft Learn, "Microsoft Fabric concepts and licenses", read 25 November 2026):
+# F SKUs and the trial hold Fabric items; P SKUs do once Fabric is enabled on them; Premium Per User "doesn't provision
+# a Fabric capacity", and A and EM SKUs "only support Power BI items".
+CAN_HOLD = {"fabric": "a Fabric capacity", "trial": "a Fabric trial capacity",
+            "premium": "a Power BI Premium capacity (P SKU): Fabric has to be enabled on it"}
+CANNOT_HOLD = {"per-user": "a Premium Per User capacity. It holds Power BI items only",
+               "embedded": "an A or EM capacity. It holds Power BI items only"}
+
+
+def capacity_kind(sku) -> str:
+    sku = str(sku or "").strip().upper()
+    if re.fullmatch(r"F\d+", sku):
+        return "fabric"
+    if re.fullmatch(r"FT\d+", sku) or sku == "TRIAL":
+        return "trial"
+    if re.fullmatch(r"P\d+", sku):
+        return "premium"
+    if sku.startswith("PP"):
+        return "per-user"
+    if re.fullmatch(r"(A|EM)\d+", sku):
+        return "embedded"
+    return "unknown"
+
+
+def capacities(ctx) -> list:
+    return ctx.remember("capacities", lambda: ctx.fabric.listing("capacities"))
+
+
+def capacity_label(entry: dict) -> str:
+    return f"{entry.get('displayName')} ({entry.get('sku')}, {entry.get('region')})"
+
+
 def capacity(ctx) -> dict | None:
-    wanted = ctx.cfg.get("FABRIC_CAPACITY_ID", "")
-    capacities = ctx.remember("capacities", lambda: ctx.fabric.listing("capacities"))
-    if wanted:
-        return next((entry for entry in capacities if entry.get("id", "").lower() == wanted.lower()), None)
-    active = [entry for entry in capacities if entry.get("state") == "Active"]
-    return active[0] if len(active) == 1 else None
+    """The capacity the settings name, as Fabric lists it for the signed-in person. None when it is not in their list."""
+    wanted = ctx.cfg.get("FABRIC_CAPACITY_ID", "").lower()
+    return next((entry for entry in capacities(ctx) if wanted and str(entry.get("id", "")).lower() == wanted), None)
+
+
+def unlisted_capacities(ctx) -> dict:
+    """Capacities that workspaces of the signed-in person run on and that Fabric does not list for them: ID -> workspace names."""
+    listed = {str(entry.get("id", "")).lower() for entry in capacities(ctx)}
+    found: dict = {}
+    for workspace in workspaces(ctx):
+        on = str(workspace.get("capacityId") or "").lower()
+        if on and on not in listed:
+            found.setdefault(on, []).append(str(workspace.get("displayName")))
+    return found
+
+
+def some(texts: list, most: int = 4) -> str:
+    texts = sorted(texts)
+    return ", ".join(texts[:most]) + (f" and {len(texts) - most} more" if len(texts) > most else "")
+
+
+def capacity_choices(ctx) -> str:
+    """What a person needs to choose a capacity: what Fabric lists for them, with what each can hold, and where their workspaces run."""
+    rows = [f"Put the ID of a capacity that can hold the demo into FABRIC_CAPACITY_ID in config/{ctx.env_file.name}. The runner "
+            "does not choose between capacities and does not create one.",
+            "Capacities Fabric lists for you (those you administer or contribute to):"]
+    for entry in capacities(ctx):
+        kind = capacity_kind(entry.get("sku"))
+        if kind in CANNOT_HOLD:
+            verdict = "cannot hold the demo: " + CANNOT_HOLD[kind]
+        elif entry.get("state") != "Active":
+            verdict = f"is {entry.get('state')}"
+        elif kind in CAN_HOLD:
+            verdict = "can hold the demo: " + CAN_HOLD[kind]
+        else:
+            verdict = "a SKU the runner does not know"
+        rows.append(f"  {entry.get('id')}  {capacity_label(entry)}  -> {verdict}")
+    if not capacities(ctx):
+        rows.append("  none")
+    elsewhere = unlisted_capacities(ctx)
+    if elsewhere:
+        rows.append("Capacities that workspaces you can open run on, and that Fabric does not list for you (so their SKU "
+                    "cannot be read):")
+        rows += [f"  {capacity_id}  used by: {some(users)}" for capacity_id, users in sorted(elsewhere.items())]
+    return "\n".join(rows)
 
 
 def pre_capacity(ctx) -> Probe:
-    capacities = ctx.remember("capacities", lambda: ctx.fabric.listing("capacities"))
-    listing = "\n".join(f"  {c.get('id')}  {c.get('displayName')}  {c.get('sku')}  {c.get('region')}  {c.get('state')}" for c in capacities)
+    wanted = ctx.cfg.get("FABRIC_CAPACITY_ID", "")
+    if not wanted:
+        usable = [entry for entry in capacities(ctx)
+                  if entry.get("state") == "Active" and capacity_kind(entry.get("sku")) in CAN_HOLD]
+        if len(usable) == 1 and not unlisted_capacities(ctx):
+            # One candidate and no other in sight: not a choice. It is written down, and shown in the target before any approval.
+            names.write_env(ctx.env_file, {"FABRIC_CAPACITY_ID": usable[0]["id"]})
+            ctx.cfg["FABRIC_CAPACITY_ID"] = usable[0]["id"]
+            return done(f"capacity {capacity_label(usable[0])}: the only one in sight that can hold Fabric items. Its ID is now "
+                        f"in FABRIC_CAPACITY_ID", capacity_id=usable[0]["id"])
+        return blocked(f"The settings name no capacity, and Fabric lists {len(usable)} for you that can hold the demo"
+                       + (", with others in use by your workspaces." if unlisted_capacities(ctx) else "."), capacity_choices(ctx))
     chosen = capacity(ctx)
     if not chosen:
-        if ctx.cfg.get("FABRIC_CAPACITY_ID"):
-            return blocked(f"FABRIC_CAPACITY_ID is {ctx.cfg['FABRIC_CAPACITY_ID']}, and you see no capacity with that ID.",
-                           "Capacities you can see:\n" + (listing or "  none"))
-        return blocked(f"You can see {len(capacities)} capacities, and the settings name none. The runner does not choose a "
-                       "capacity and does not create one.",
-                       f"Put the ID of the capacity for this demo into FABRIC_CAPACITY_ID in {ctx.env_file.name}:\n" + (listing or "  none"))
+        users = unlisted_capacities(ctx).get(wanted.lower())
+        if not users:
+            return blocked(f"FABRIC_CAPACITY_ID is {wanted}. Fabric lists no capacity with that ID for you, and no workspace "
+                           "you can open runs on it.", capacity_choices(ctx))
+        return unverified(f"capacity {wanted} is not in the list Fabric gives you, so its SKU and state cannot be read. "
+                          f"Workspaces you can open run on it ({some(users)}). Whether you may put a new workspace on it shows "
+                          "when the runner creates the workspace: that takes the contributor role on the capacity (Fabric "
+                          "admin portal, Capacity settings, the capacity, Details, Contributor permissions)",
+                          capacity_id=wanted)
+    kind = capacity_kind(chosen.get("sku"))
+    if kind in CANNOT_HOLD:
+        return blocked(f"FABRIC_CAPACITY_ID names {capacity_label(chosen)}: {CANNOT_HOLD[kind]}, so the Eventhouse, the Lakehouse "
+                       "and the notebooks cannot be created on it.", capacity_choices(ctx))
     if chosen.get("state") != "Active":
-        return blocked(f"Capacity {chosen.get('displayName')} is {chosen.get('state')}.", "Resume it in the Azure portal or the "
+        return blocked(f"Capacity {capacity_label(chosen)} is {chosen.get('state')}.", "Resume it in the Azure portal or the "
                        "Fabric admin portal. The runner does not change a capacity.")
-    if not ctx.cfg.get("FABRIC_CAPACITY_ID"):
-        names.write_env(ctx.env_file, {"FABRIC_CAPACITY_ID": chosen["id"]})
-        ctx.cfg["FABRIC_CAPACITY_ID"] = chosen["id"]
-    return done(f"capacity {chosen.get('displayName')} ({chosen.get('sku')}, {chosen.get('region')}), the only active one you see"
-                if len([c for c in capacities if c.get("state") == "Active"]) == 1 else
-                f"capacity {chosen.get('displayName')} ({chosen.get('sku')}, {chosen.get('region')})", capacity_id=chosen["id"])
+    if kind == "unknown":
+        return unverified(f"capacity {capacity_label(chosen)}: the runner does not know this SKU. Whether it holds Fabric items "
+                          "shows when the workspace is created", capacity_id=chosen["id"])
+    return done(f"capacity {capacity_label(chosen)}: {CAN_HOLD[kind]}", capacity_id=chosen["id"])
 
 
 TENANT_SETTINGS = {
@@ -418,41 +551,44 @@ def p1_edge_vm(ctx) -> Probe:
 
 
 def act_edge_vm(ctx) -> None:
+    # What preflight or plan read about the sizes, from the checkpoint when that was within the last hours. Either way
+    # the script does not ask `az vm list-skus`: it gets the sizes that were read, or the word to try each size and let
+    # Azure refuse.
+    sizes = PRE_REGION(ctx).evidence
     env = {"DEPLOY_RUNNER": "1"}
-    try:
-        usable, _ = offered_sizes(ctx)
-        if usable:
-            env["VM_SIZE_OFFERED"] = " ".join(usable)       # the script then skips its own, slow, question to Azure
-    except CloudError:
-        pass                                                # the script asks for itself, and says that it can take minutes
+    if sizes.get("sizes_read") and sizes.get("sizes"):
+        env["VM_SIZE_OFFERED"] = " ".join(sizes["sizes"])
+    else:
+        env["VM_SIZE_SKIP_CHECK"] = "1"
     script(ctx, "infra/01-create-edge-vm.sh", env=env)
 
 
-def vm_roles(ctx) -> list[tuple[str, str, str]]:
-    """(principal, role, scope) for the VM's identity: both on the demo's resource group, neither on the subscription."""
+VM_ROLES = ("Kubernetes Cluster - Azure Arc Onboarding", "Reader")
+
+
+def vm_roles_missing(ctx) -> tuple[str, str, list]:
+    """The VM identity's object ID, the demo's resource group, and which of the two roles it does not hold there yet."""
     principal = ((vm(ctx) or {}).get("identity") or {}).get("principalId", "")
     scope = ctx.target("resource_group_id", "")
-    return [(principal, "Kubernetes Cluster - Azure Arc Onboarding", scope), (principal, "Reader", scope)]
+    held = {role for role, at in role_assignments(ctx, scope, f"principalId eq '{principal}'") if covers(at, scope)}
+    return principal, scope, [role for role in VM_ROLES if role not in held]
 
 
 def p1_vm_roles(ctx) -> Probe:
     if not vm(ctx):
         return after("p1.edge_vm")
-    held = []
-    for principal, role, scope in vm_roles(ctx):
-        found = ctx.az.json("role", "assignment", "list", "--assignee", principal, "--scope", scope, "--role", role, "--query", "[].id")
-        if found:
-            held.append(role)
-    if len(held) == 2:
+    missing = vm_roles_missing(ctx)[2]
+    if not missing:
         return done("the VM's identity holds Arc onboarding and Reader on the resource group")
-    return todo(f"{len(held)} of 2 role assignments are there")
+    return todo(f"{len(VM_ROLES) - len(missing)} of {len(VM_ROLES)} role assignments are there")
 
 
 def act_vm_roles(ctx) -> None:
-    for principal, role, scope in vm_roles(ctx):
-        if not ctx.az.json("role", "assignment", "list", "--assignee", principal, "--scope", scope, "--role", role, "--query", "[].id"):
-            ctx.az.run("role", "assignment", "create", "--assignee-object-id", principal, "--assignee-principal-type",
-                       "ServicePrincipal", "--role", role, "--scope", scope)
+    principal, scope, missing = vm_roles_missing(ctx)
+    for role in missing:
+        # By ID and with the kind of principal: the CLI then neither looks the role up nor asks Microsoft Graph.
+        ctx.az.run("role", "assignment", "create", "--assignee-object-id", principal, "--assignee-principal-type",
+                   "ServicePrincipal", "--role", ROLE_IDS[role], "--scope", scope)
 
 
 def cluster(ctx) -> dict | None:
@@ -512,8 +648,7 @@ def edge_identities(ctx) -> dict:
 def p1_workspace(ctx) -> Probe:
     workspace_name, known = ctx.cfg["FABRIC_WORKSPACE_NAME"], workspace_id(ctx)
     marker = f"deployment {suffix(ctx)}"
-    workspaces = ctx.remember("workspaces", lambda: ctx.fabric.listing("workspaces"))
-    same_name = [w for w in workspaces if w.get("displayName") == workspace_name]
+    same_name = [w for w in workspaces(ctx) if w.get("displayName") == workspace_name]
     if not known:
         if not same_name:
             return todo(f"{workspace_name} does not exist yet")
@@ -523,7 +658,7 @@ def p1_workspace(ctx) -> Probe:
         else:
             return blocked(f"A workspace named {workspace_name} exists, and this deployment did not make it. The runner works "
                            "in a workspace of its own only.", "Choose other names: python3 tools/deploy.py plan --new-names")
-    mine = next((w for w in workspaces if w.get("id") == known), None)
+    mine = next((w for w in workspaces(ctx) if w.get("id") == known), None)
     if not mine:
         return todo(f"the workspace this deployment made ({known}) is gone")
     wanted = ctx.cfg.get("FABRIC_CAPACITY_ID", "")
@@ -560,10 +695,13 @@ def act_workspace(ctx) -> None:
     try:
         made = operation(ctx, "workspace", lambda: ctx.fabric.call("POST", "workspaces", body))
     except CloudError as error:
-        if error.status in (401, 403):
-            raise Blocked(f"Fabric did not let you create the workspace: {error}",
+        if error.status in (401, 403) or "capacity" in f"{error} {error.code}".lower():
+            raise Blocked(f"Fabric did not let you create the workspace on capacity {ctx.cfg['FABRIC_CAPACITY_ID']}: {error}",
                           "Creating a workspace needs two things the runner does not give itself: the tenant's permission to "
-                          "create workspaces, and Contributor or Admin on the capacity. Ask a Fabric administrator, then run apply again.") from None
+                          "create workspaces, and the contributor role on the capacity. An administrator of the capacity sets "
+                          "that in the Fabric admin portal: Capacity settings, the kind of capacity, the capacity, Details, "
+                          "Contributor permissions. Ask for it, or put another capacity into FABRIC_CAPACITY_ID and plan again "
+                          "(python3 tools/deploy.py preflight lists them). Then run apply again.") from None
         raise
     if made and made.get("id"):
         ctx.set_target(workspace_id=made["id"])
@@ -1008,6 +1146,19 @@ def act_history(ctx) -> None:
         ctx.state.note("p1.history", regenerated=ctx.options.regenerate_history)
 
 
+def _who(ctx) -> str:
+    me = account(ctx)
+    return f"{me.get('id')}|{(me.get('user') or {}).get('name')}"
+
+
+# Three checks ask Azure for answers that hold for a day and that can take a minute each to arrive, or not arrive.
+PRE_RIGHTS = kept("pre.rights", pre_rights, _who)
+PRE_PROVIDERS = kept("pre.providers", pre_providers, lambda ctx: str(account(ctx).get("id")))
+PRE_REGION = kept("pre.region", pre_region, lambda ctx: "|".join((
+    str(account(ctx).get("id")), ctx.cfg.get("LOCATION", ""), ctx.cfg.get("VM_SIZE", ""),
+    str(ctx.state.step("p1.edge_vm").get("status") == "complete"))))
+
+
 def phase1() -> list[Step]:
     settings_probe, settings_manual = tenant_settings("phase1")
     gate_probe, gate_act = gate_lakehouse("phase1", "p1.gate_lakehouse", "p1.notebooks")
@@ -1017,15 +1168,17 @@ def phase1() -> list[Step]:
         Step("pre.signin", "preflight", "Signed in to Azure as a person, on the right subscription", pre_signin, proof="live",
              basis="az account show"),
         Step("pre.extensions", "preflight", "Azure CLI extension on this computer", pre_extensions, basis="az extension list"),
-        Step("pre.rights", "preflight", "Your roles on the subscription", pre_rights, basis="az role assignment list"),
-        Step("pre.providers", "preflight", "Resource providers registered", pre_providers, basis="az provider show",
+        Step("pre.rights", "preflight", "Your roles on the subscription", PRE_RIGHTS,
+             basis="Role Assignments - List For Scope, filter atScope() and assignedTo(); az ad signed-in-user show"),
+        Step("pre.providers", "preflight", "Resource providers registered", PRE_PROVIDERS, basis="az provider show",
              manual="Register the providers the plan names."),
-        Step("pre.region", "preflight", "Region and VM size", pre_region,
+        Step("pre.region", "preflight", "Region and VM size", PRE_REGION,
              basis="Resource SKUs - List, with its location filter"),
         Step("pre.names", "preflight", "Generated names are free", pre_names, basis="az storage account check-name"),
         Step("pre.custom_locations", "preflight", "Custom Locations object ID", pre_custom_locations, basis="az ad sp show"),
         Step("pre.fabric", "preflight", "The Fabric API answers you", pre_fabric, basis="GET /v1/workspaces"),
-        Step("pre.capacity", "preflight", "One Fabric capacity, active", pre_capacity, basis="GET /v1/capacities"),
+        Step("pre.capacity", "preflight", "A capacity that can hold Fabric items, active", pre_capacity,
+             basis="GET /v1/capacities and GET /v1/workspaces; SKUs as in the Fabric licenses article"),
         Step("phase1.tenant_settings", "preflight", "Tenant settings for Phase 1", settings_probe, manual=settings_manual,
              observable=False, basis="Fabric admin portal; no API for a person who is not an administrator", proof="none"),
 
@@ -1037,7 +1190,7 @@ def phase1() -> list[Step]:
         Step("p1.vm_identity_roles", "phase1", "Roles for the VM's identity, on the resource group only", p1_vm_roles, act_vm_roles,
              needs=("roles",), writes="'Kubernetes Cluster - Azure Arc Onboarding' and 'Reader' for the VM's managed identity, "
              "both on the demo's resource group. The manual guide gives Reader on the subscription; the runner does not",
-             basis="az role assignment create", proof="offline"),
+             basis="az role assignment create, the role by its ID; read with Role Assignments - List For Scope", proof="offline"),
         Step("p1.edge_host", "phase1", "K3s and tools on the VM", lambda ctx: recorded(ctx, "p1.edge_host", "host prepared")
              if vm(ctx) else after("p1.edge_vm"), lambda ctx: on_vm(ctx, "./edge/scripts/02-prepare-host.sh"),
              inputs=("edge/scripts/02-prepare-host.sh", "infra/vm.sh"), observable=False, witness="p1.arc", writes="installs K3s and the Azure CLI on the VM",

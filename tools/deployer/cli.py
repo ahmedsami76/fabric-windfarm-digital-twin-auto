@@ -9,7 +9,7 @@ from . import names
 from .cloud import Az, Kusto, OneLake, Shell, make_fabric
 from .core import (EXIT_BLOCKED, EXIT_FAILED, EXIT_OK, EXIT_REFUSED, PHASES, Blocked, Context, Lock, Options, Redactor, Refused,
                    State, StepFailed, apply, make_plan, plan_hash, print_plan, select)
-from .steps import freshness, kql_database
+from .steps import capacity_label, freshness, kql_database
 from .steps_later import catalogue
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +36,8 @@ def parser() -> argparse.ArgumentParser:
     top.add_argument("--acknowledge", metavar="ID", action="append", default=[],
                      help="apply: this resource or item in the demo's group or workspace belongs there")
     top.add_argument("--new-names", action="store_true", help="plan: choose a new suffix, while nothing has been created")
+    top.add_argument("--recheck", action="store_true",
+                     help="ask again what was asked within the last twelve hours and kept: your roles, the resource providers, the VM sizes")
     return top
 
 
@@ -98,8 +100,19 @@ def show_target(ctx: Context, target: dict) -> None:
     ctx.say(f"  resource group  {target['resource_group']} in {target['location']}  "
             f"({'made by this deployment' if made.get('resource_group_id') else 'not created yet'})")
     ctx.say(f"  workspace       {target['workspace_name']}  ({made.get('workspace_id') or 'not created yet'})")
-    ctx.say(f"  capacity        {target['capacity_id'] or 'not chosen yet: see pre.capacity'}")
+    ctx.say(f"  capacity        {capacity_text(ctx, target['capacity_id'])}")
     ctx.say(f"  signed in as    {target['user']}")
+
+
+def capacity_text(ctx: Context, capacity_id: str) -> str:
+    """The capacity by name and SKU when this run has read the list, so that a wrong one is seen before an approval."""
+    if not capacity_id:
+        return "not chosen yet: see pre.capacity"
+    listed = ctx.cache.get("capacities")
+    if listed is None:
+        return capacity_id
+    found = next((entry for entry in listed if str(entry.get("id", "")).lower() == capacity_id.lower()), None)
+    return f"{capacity_label(found)}  {capacity_id}" if found else f"{capacity_id}  (not in the list of capacities Fabric gives you)"
 
 
 def check_target(ctx: Context, target: dict) -> None:
@@ -136,6 +149,16 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
         account = ctx.az.json("account", "show")
         target = target_of(ctx, account)
         check_target(ctx, target)
+        if args.mode != "apply":
+            busy = Lock(ctx.state.folder).holder()
+            if busy:
+                # This run's copy of the checkpoint is older than the one the apply keeps writing: read it, keep nothing.
+                ctx.state.frozen = True
+                ctx.say(f"An apply is running against this deployment (process {busy.get('pid')} on {busy.get('host')}, since "
+                        f"{busy.get('started')}). This run reads, and writes nothing to the checkpoint.")
+        if args.recheck:
+            ctx.state.data["remembered"] = {}
+            ctx.state.save()
         if args.mode == "status":
             return status(ctx, steps, target)
         # One line as each step is looked at. Looking is a dozen or more calls to the Azure CLI, each a few seconds and
@@ -158,12 +181,14 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
         ctx.say("")
         target = target_of(ctx, account)          # the capacity may have been found by its probe just now
         show_target(ctx, target)
-        digest = plan_hash(ctx, lines, target)
-        print_plan(ctx, lines, digest)
         if args.mode == "preflight":
+            print_plan(ctx, lines)                 # the table without an identifier: there is nothing here to approve
             waiting = [line for line in lines if line.decision in ("blocked", "operator")]
             ctx.say("Preflight: " + (f"{len(waiting)} things need you before a deployment can run." if waiting else "nothing stands in the way."))
+            ctx.say(f"Preflight is not a plan. The plan to read and approve: python3 tools/deploy.py plan --up-to {args.up_to}")
             return EXIT_BLOCKED if waiting else EXIT_OK
+        digest = plan_hash(ctx, lines, target)
+        print_plan(ctx, lines, digest)
         ctx.say("Nothing was changed in Azure or Fabric. To carry this plan out, repeat the command with apply and "
                 f"--approve {digest}, and the same options.")
         return EXIT_OK

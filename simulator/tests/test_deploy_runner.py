@@ -32,6 +32,7 @@ class Bench:
 
     def __init__(self, folder: Path):
         self.root, self.world, self.now, self.kusto = folder, World(), [0.0], None
+        self.wall = [1795600000.0]
         for part in ("fabric/kql", "fabric/notebooks", "app/overlay/packages/functions/src"):
             shutil.copytree(ROOT / part, folder / part)
         (folder / "config").mkdir()
@@ -46,7 +47,7 @@ class Bench:
         az.token("https://api.fabric.microsoft.com")            # as the real adapters do before their first call
         return {"az": az, "fabric": FakeFabric(self.world), "kusto": self.kusto,
                 "shell": FakeShell(self.world, self.root, redact), "onelake": FakeOneLake(self.world),
-                "clock": lambda: self.now[0], "sleep": sleep, "wall": lambda: 1795600000.0}
+                "clock": lambda: self.now[0], "sleep": sleep, "wall": lambda: self.wall[0]}
 
     def run(self, *argv) -> tuple[int, str]:
         out = io.StringIO()
@@ -179,8 +180,8 @@ def test_role_changes_wait_for_their_own_approval_and_stay_inside_the_demo(bench
     code, text = bench.apply(ROLES)
     assert code == 0
     group = next(iter(bench.world.groups.values()))["id"]
-    assert sorted(bench.world.role_assignments) == [("principal-vm", "Kubernetes Cluster - Azure Arc Onboarding", group),
-                                                    ("principal-vm", "Reader", group)]      # nothing on the subscription
+    assert sorted(bench.world.role_assignments) == [                                      # by ID; nothing on the subscription
+        ("principal-vm", steps.ROLE_IDS["Kubernetes Cluster - Azure Arc Onboarding"], group), ("principal-vm", steps.ROLE_IDS["Reader"], group)]
     assert bench.world.access[bench.world.workspaces[0]["id"]] == {"principal-vm": "Contributor", "principal-aio": "Contributor"}
 
 
@@ -531,7 +532,7 @@ def test_preflight_names_what_is_missing_and_changes_nothing(bench):
     code, text = bench.run("preflight", "--up-to", "phase4")
     assert code == core.EXIT_BLOCKED and world.writes == []
     assert "az provider register --namespace Microsoft.IoTOperations" in text and "a change to the whole subscription" in text
-    assert "cap-0001" in text and "cap-0002" in text and "does not choose a capacity" in text
+    assert "cap-0001" in text and "cap-0002" in text and "does not choose between capacities" in text
     assert "az ad sp show --id bc313c14" in text
     assert "Creating the resource group needs Contributor or Owner" in text and "does not widen its own access" in text
     assert "Fabric Apps" in text and "phase4.tenant_settings" in text
@@ -753,7 +754,7 @@ def test_a_missing_tool_and_a_missing_right_are_named_and_nothing_is_widened(ben
     bench.world.missing_tools = set()
     bench.world.may_create_workspaces = False
     code, text = bench.apply(ROLES, confirm=[SETTINGS])
-    assert code == core.EXIT_BLOCKED and "blocked  p1.workspace" in text and "Ask a Fabric administrator" in text
+    assert code == core.EXIT_BLOCKED and "blocked  p1.workspace" in text and "Contributor permissions" in text
     assert bench.world.workspaces == [] and len(bench.world.role_assignments) == 2       # the two on the resource group, no more
     bench.world.may_create_workspaces = True
     assert bench.apply(ROLES)[0] == 0
@@ -795,7 +796,7 @@ def test_every_check_is_announced_as_it_starts_so_that_waiting_does_not_look_lik
                 bench.now[0] += 74
             return super().maybe(*args, timeout=timeout)
     bench.adapters = lambda redact: dict(real(redact), az=Slow(bench.world, redact))
-    rows = bench.run("preflight")[1].splitlines()
+    rows = bench.run("preflight", "--recheck")[1].splitlines()
     assert rows[next(i for i, row in enumerate(rows) if "looking at pre.region" in row) + 1] == "    74 s"
     assert sum(1 for row in rows if re.fullmatch(r"    \d+ s", row)) == 1
 
@@ -823,22 +824,27 @@ def test_the_vm_sizes_are_asked_with_one_filtered_call_that_cannot_stop_a_run(be
     assert "VM size Standard_D8s_v6 is offered (Standard_D8s_v5, Standard_D8as_v5, Standard_D8as_v6, Standard_D8as_v7 not offered)" in text
     # none of them: a block that names each size with its reason
     world.refused = {name: "NotAvailableForSubscription" for name in world.skus}
-    text = bench.run("preflight")[1]
+    text = bench.run("preflight", "--recheck")[1]
     assert "None of the sizes in VM_SIZE is offered" in text and "Standard_D8s_v7: NotAvailableForSubscription" in text
     assert "Standard_D8as_v5: not known in southcentralus" in text
-    # the question cannot be asked: said in one line, and no reason to stop, because step 1 tries the sizes in turn
+    # the question cannot be asked: said in one line as NOT CHECKED, never as done, and no reason to stop
     world.refused = {"Standard_D8s_v5": "NotAvailableForSubscription"}
-    real = bench.adapters
+    real, unanswered = bench.adapters, []
 
     class Deaf(FakeAz):
         def maybe(self, *args, timeout=0):
             if args[:1] == ("rest",) and "Microsoft.Compute/skus" in " ".join(args):
-                raise CloudError("az rest --method get did not answer within 120 seconds.")
+                unanswered.append(timeout)
+                raise CloudError("az rest --method get did not answer within 60 seconds.")
             return super().maybe(*args, timeout=timeout)
     bench.adapters = lambda redact: dict(real(redact), az=Deaf(world, redact))
-    text = bench.run("preflight")[1]
-    assert re.search(r"pre\.region\s+done", text) and "could not be read" in text and "step 1 tries the sizes of VM_SIZE in turn" in text
-    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0 and "VM_SIZE_OFFERED" not in world.vm_env     # the script asks for itself
+    text = bench.run("preflight")[1]              # a block is not kept: the question is asked again without --recheck
+    assert re.search(r"pre\.region\s+NOT CHECKED", text) and not re.search(r"pre\.region\s+done", text)
+    assert "could not be read" in text and "p1.edge_vm tries the sizes of VM_SIZE in their order" in text
+    assert unanswered == [60]
+    # the apply does not ask a third and a fourth time, and the script is told to try the sizes instead of asking for itself
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0 and unanswered == [60]
+    assert world.vm_env.get("VM_SIZE_SKIP_CHECK") == "1" and "VM_SIZE_OFFERED" not in world.vm_env
 
 
 def test_the_vm_script_is_handed_the_sizes_that_were_checked_and_the_question_ends_with_the_vm(bench):
@@ -857,3 +863,210 @@ def test_a_missing_cli_extension_is_the_operators_to_install_and_is_never_asked_
     # and the cluster is read as a plain resource: the fake fails the test on any `az connectedk8s`, which a workstation may lack
     bench.world.extensions = ["azure-iot-ops"]
     assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0
+
+
+# ------------------------------------------------------------------------------------------ after the second run on a tenant
+PPU = {"id": "0aa47150-0000-0000-0000-00000000pp30", "displayName": "Premium Per User - Reserved", "sku": "PP3",
+       "region": "Central US", "state": "Active"}
+ELSEWHERE = "7c1e2d3f-0000-0000-0000-0000000trial"
+
+
+def as_on_the_tenant(world) -> None:
+    """25 November 2026, 10:09: the only capacity Fabric listed was Premium Per User; the existing workspace ran on another."""
+    world.capacities = [dict(PPU)]
+    world.workspaces = [{"id": "ws-by-hand", "displayName": "WindFarmDigitalTwin", "description": "", "capacityId": ELSEWHERE},
+                        {"id": "ws-mine", "displayName": "My workspace", "description": "", "type": "Personal"}]
+
+
+def set_capacity(bench, value: str) -> None:
+    names.write_env(bench.root / "config" / "demo.env", {"FABRIC_CAPACITY_ID": value})
+
+
+def test_a_capacity_that_cannot_hold_fabric_items_is_never_chosen_and_never_accepted(bench):
+    """The second issue took "the only capacity you see" for "the capacity to use", wrote a Premium Per User capacity
+    into the settings, showed `done`, and called it a paid capacity for Phase 3."""
+    as_on_the_tenant(bench.world)
+    code, text = bench.run("preflight", "--up-to", "phase3")
+    assert code == core.EXIT_BLOCKED and bench.cfg["FABRIC_CAPACITY_ID"] == ""             # nothing chosen, nothing written
+    assert re.search(r"pre\.capacity\s+BLOCKED", text) and "Fabric lists 0 for you that can hold the demo" in text
+    assert f"{PPU['id']}  Premium Per User - Reserved (PP3, Central US)  -> cannot hold the demo: a Premium Per User capacity" in text
+    assert f"{ELSEWHERE}  used by: WindFarmDigitalTwin" in text and "My workspace" not in text
+    assert "capacity        not chosen yet" in text
+    # the ID the second issue wrote: refused by what it is, with the same list to choose from
+    set_capacity(bench, PPU["id"])
+    code, text = bench.run("preflight", "--up-to", "phase3")
+    assert code == core.EXIT_BLOCKED and "FABRIC_CAPACITY_ID names Premium Per User - Reserved (PP3, Central US): a Premium Per User capacity" in text
+    assert "cannot be created on it" in text and f"{ELSEWHERE}  used by: WindFarmDigitalTwin" in text
+    assert f"capacity        Premium Per User - Reserved (PP3, Central US)  {PPU['id']}" in text     # the target names it
+    assert re.search(r"p3\.capacity\s+BLOCKED", text) and "a paid capacity" not in text.split("p3.capacity")[2].split("\n")[1]
+    # an ID nobody has
+    set_capacity(bench, "cap-nowhere")
+    text = bench.run("preflight")[1]
+    assert "Fabric lists no capacity with that ID for you, and no workspace you can open runs on it" in text
+    assert bench.world.writes == []
+
+
+def test_a_capacity_fabric_does_not_list_is_accepted_as_not_checked_and_the_workspace_decides(bench):
+    as_on_the_tenant(bench.world)
+    bench.plan()
+    set_capacity(bench, ELSEWHERE)
+    code, text = bench.run("plan", ROLES, "--up-to", "phase3")
+    assert re.search(r"pre\.capacity\s+NOT CHECKED", text) and "is not in the list Fabric gives you" in text
+    assert "Workspaces you can open run on it (WindFarmDigitalTwin)" in text and "Contributor permissions" in text
+    assert f"capacity        {ELSEWHERE}  (not in the list of capacities Fabric gives you)" in text
+    assert re.search(r"p3\.capacity\s+NOT CHECKED", text) and "cannot read whether it is a paid one" in text
+    # Fabric refuses the workspace on that capacity: a block that names the capacity, and nothing half-made
+    bench.world.closed_capacities = {ELSEWHERE}
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == core.EXIT_BLOCKED and "blocked  p1.workspace" in text and f"on capacity {ELSEWHERE}" in text
+    assert "put another capacity into FABRIC_CAPACITY_ID" in text and len(bench.world.workspaces) == 2
+    # it lets him: the workspace is made there, and the deployment goes on to the end of Phase 1
+    bench.world.closed_capacities = set()
+    code, text = bench.apply(ROLES)
+    assert code == 0, text
+    made = next(entry for entry in bench.world.workspaces if entry["displayName"] == bench.cfg["FABRIC_WORKSPACE_NAME"])
+    assert made["capacityId"] == ELSEWHERE and "unchecked pre.capacity" in text
+
+
+@pytest.mark.parametrize("sku, kind", [("F2", "fabric"), ("F64", "fabric"), ("FT1", "trial"), ("Trial", "trial"), ("P1", "premium"),
+                                       ("PP3", "per-user"), ("A4", "embedded"), ("EM3", "embedded"), ("DCT1", "unknown"),
+                                       ("", "unknown"), (None, "unknown")])
+def test_what_a_capacity_can_hold_is_read_from_its_sku(sku, kind):
+    assert steps.capacity_kind(sku) == kind
+    assert (kind in steps.CAN_HOLD) + (kind in steps.CANNOT_HOLD) + (kind == "unknown") == 1
+
+
+def test_one_usable_capacity_and_no_other_in_sight_is_taken_and_two_candidates_are_a_choice(bench):
+    bench.world.capacities.append(dict(PPU))                       # a second one that cannot hold the demo is no rival
+    text = bench.run("preflight")[1]
+    assert bench.cfg["FABRIC_CAPACITY_ID"] == "cap-0001" and "the only one in sight that can hold Fabric items" in text
+    assert "capacity        demo-capacity (F64, South Central US)  cap-0001" in text
+    # with a workspace on a capacity that is not listed there are two candidates, and the runner does not pick
+    set_capacity(bench, "")
+    bench.world.workspaces = [{"id": "ws-other", "displayName": "Sales", "description": "", "capacityId": ELSEWHERE}]
+    code, text = bench.run("preflight")
+    assert code == core.EXIT_BLOCKED and bench.cfg["FABRIC_CAPACITY_ID"] == "" and "with others in use by your workspaces" in text
+    assert "cap-0001  demo-capacity (F64, South Central US)  -> can hold the demo: a Fabric capacity" in text
+    # a paused capacity is said to be paused, and is not resumed
+    bench.world.workspaces, bench.world.capacities[0]["state"] = [], "Inactive"
+    set_capacity(bench, "cap-0001")
+    text = bench.run("preflight")[1]
+    assert "Capacity demo-capacity (F64, South Central US) is Inactive" in text and "does not change a capacity" in text
+
+
+class Unanswered(FakeAz):
+    """The two calls with large answers stand until the time limit, as on the workstation of 25 November."""
+    asked: list = []
+
+    def maybe(self, *args, timeout=0):
+        text = " ".join(args)
+        if args[:1] == ("rest",) and ("Microsoft.Compute/skus" in text or "roleAssignments" in text and "assignedTo" in text):
+            Unanswered.asked.append("sizes" if "skus" in text else "roles")
+            raise CloudError(f"az rest --method get did not answer within {timeout} seconds.")
+        return super().maybe(*args, timeout=timeout)
+
+
+@pytest.fixture
+def slow_line(bench):
+    Unanswered.asked = []
+    real = bench.adapters
+    bench.adapters = lambda redact: dict(real(redact), az=Unanswered(bench.world, redact))
+    return bench
+
+
+def test_what_could_not_be_checked_is_never_called_done(slow_line):
+    """The second issue printed `pre.rights  done  ... could not read your roles`."""
+    code, text = slow_line.run("preflight")
+    for step in ("pre.rights", "pre.region"):
+        assert re.search(rf"{re.escape(step)}\s+NOT CHECKED", text) and not re.search(rf"{re.escape(step)}\s+done", text)
+    assert "your roles could not be read (az rest --method get did not answer within 60 seconds.)" in text
+    assert " 2 not checked," in text and "NOT CHECKED: the runner could not read it. It does not stop the deployment" in text
+    assert code == core.EXIT_BLOCKED and "Preflight: 1 things need you" in text          # the tenant settings; not the two checks
+    code, text = slow_line.apply(ROLES, confirm=[SETTINGS])
+    assert code == 0, text
+    assert "unchecked pre.rights:" in text and "unchecked pre.region:" in text and "done     pre.rights" not in text
+    assert "confirmed phase1.tenant_settings:" in text
+    plan = slow_line.run("plan", ROLES)[1]
+    # the VM exists now, so its size is no longer a question; the roles stay what they were: not read
+    assert re.search(r"phase1\.tenant_settings\s+confirmed by you", plan) and " 1 confirmed by you, 1 not checked," in plan
+    assert re.search(r"pre\.rights\s+NOT CHECKED", plan) and re.search(r"pre\.region\s+done", plan)
+    status = slow_line.run("status")[1]
+    assert status.count("(not looked at by the runner itself)") >= 3
+
+
+def test_preflight_shows_no_plan_to_approve(bench):
+    """The second issue ended preflight with `Plan a45d1f787e4f`, which no apply would have taken."""
+    text = bench.run("preflight", "--up-to", "phase4")[1]
+    assert not re.search(r"^Plan ", text, re.M) and not re.search(r"--approve [0-9a-f]{12}", text)
+    assert "Preflight is not a plan. The plan to read and approve: python3 tools/deploy.py plan --up-to phase4" in text
+    assert re.search(r"^Plan \w{12}$", bench.run("plan", "--up-to", "phase4")[1], re.M)
+
+
+def test_your_roles_are_read_with_one_small_question_and_never_with_the_slow_one(bench):
+    """`az role assignment list` fetches every role definition to print names; the fake fails the test if it is asked."""
+    world = bench.world
+    text = bench.run("preflight")[1]
+    assert re.search(r"pre\.rights\s+done", text) and "roles on the subscription: Owner" in text and world.role_calls == 1
+    world.my_roles = ["Contributor"]
+    text = bench.run("preflight", "--recheck")[1]
+    assert re.search(r"pre\.rights\s+done", text) and "You hold none of the roles that assign roles" in text
+    world.my_roles = ["Reader", "Corp Custom Operator"]                 # a role the runner has no ID for
+    text = bench.run("preflight", "--recheck")[1]
+    assert re.search(r"pre\.rights\s+NOT CHECKED", text) and "1 role(s) on the subscription that the runner does not know by their ID, and Reader" in text
+    world.my_roles = []
+    code, text = bench.run("preflight", "--recheck")
+    assert re.search(r"pre\.rights\s+BLOCKED", text) and "Your roles on the subscription are: none" in text
+    # a role held above the resource group counts for the VM's identity, one below it does not
+    assert steps.covers("/subscriptions/s", "/subscriptions/s/resourceGroups/rg") and steps.covers("/", "/subscriptions/s/resourceGroups/rg")
+    assert steps.covers("/subscriptions/S/resourceGroups/RG", "/subscriptions/s/resourceGroups/rg")
+    assert not steps.covers("/subscriptions/s/resourceGroups/rg/providers/x/y/z", "/subscriptions/s/resourceGroups/rg")
+    assert not steps.covers("/subscriptions/s/resourceGroups/rg-other", "/subscriptions/s/resourceGroups/rg")
+
+
+def test_a_question_that_stood_without_an_answer_is_not_asked_again_by_every_run(slow_line):
+    """25 November 2026, 10:09: 180 s and 120 s of waiting in preflight, due again in every plan and twice in every apply."""
+    slow_line.run("preflight")
+    assert Unanswered.asked == ["roles", "sizes"]
+    text = slow_line.run("plan", ROLES)[1]
+    assert Unanswered.asked == ["roles", "sizes"] and text.count("--recheck asks again]") == 3      # and the providers
+    assert re.search(r"pre\.region\s+NOT CHECKED", text)                # kept as what it was, not promoted
+    assert slow_line.apply(ROLES, confirm=[SETTINGS])[0] == 0 and Unanswered.asked == ["roles", "sizes"]
+    # asked again: on request, after twelve hours, and when what the answer depends on has changed
+    slow_line.run("plan", ROLES, "--recheck")
+    assert Unanswered.asked == ["roles", "sizes", "roles"]              # the VM exists: its size is no longer a question
+    slow_line.wall[0] += 11 * 3600
+    assert "[asked 11 h ago; --recheck asks again]" in slow_line.run("plan", ROLES)[1] and len(Unanswered.asked) == 3
+    slow_line.wall[0] += 2 * 3600
+    slow_line.run("plan", ROLES)
+    assert Unanswered.asked == ["roles", "sizes", "roles", "roles"]
+
+
+def test_a_kept_answer_is_for_the_settings_it_was_read_with_and_a_block_is_never_kept(bench):
+    world = bench.world
+    world.unregistered = {"Microsoft.IoTOperations"}
+    assert "az provider register --namespace Microsoft.IoTOperations" in bench.run("preflight")[1]
+    world.unregistered = set()
+    assert re.search(r"pre\.providers\s+done\s+Resource providers registered\n\s+8 resource providers registered\n", bench.run("preflight")[1])
+    asked = world.sku_calls
+    bench.run("preflight")
+    assert world.sku_calls == asked
+    names.write_env(bench.root / "config" / "demo.env", {"VM_SIZE": "Standard_D8s_v7 Standard_D8s_v6"})
+    text = bench.run("preflight")[1]
+    assert world.sku_calls == asked + 1 and "VM size Standard_D8s_v7 is offered" in text
+    # the sizes that were read reach the script from the checkpoint, without another question
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0 and world.sku_calls == asked + 1
+    assert world.vm_env["VM_SIZE_OFFERED"] == "Standard_D8s_v7 Standard_D8s_v6" and "VM_SIZE_SKIP_CHECK" not in world.vm_env
+
+
+def test_a_plan_made_while_an_apply_runs_reads_the_checkpoint_and_writes_nothing_to_it(deployed):
+    folder = deployed.root / ".deploy" / deployed.cfg["DEPLOYMENT_SUFFIX"]
+    (folder / "apply.lock").write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "started": "2026-11-25T16:00:00Z"}))
+    before = (folder / "state.json").read_bytes()
+    deployed.wall[0] += 60
+    code, text = deployed.run("plan", ROLES, "--recheck")              # would clear and rewrite what was kept
+    assert code == 0 and "An apply is running against this deployment" in text and "writes nothing to the checkpoint" in text
+    assert (folder / "state.json").read_bytes() == before
+    # a lock left by a process that has ended is nobody's
+    (folder / "apply.lock").write_text(json.dumps({"pid": 2 ** 22 + 12345, "host": socket.gethostname(), "started": "x"}))
+    text = deployed.run("plan", ROLES, "--recheck")[1]
+    assert "An apply is running" not in text and (folder / "state.json").read_bytes() != before
