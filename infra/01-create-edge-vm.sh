@@ -49,19 +49,25 @@ else
   # offered, so each size is checked, and the next one is tried when Azure refuses one.
   CREATED=""
   ERROR_FILE="$(mktemp)"
-  for SIZE in $VM_SIZE; do
-    # The CLI prints the two values on two lines; paste joins them: "name<TAB>reason".
-    OFFER="$(az vm list-skus --location "$LOCATION" --resource-type virtualMachines --all --size "$SIZE" \
-      --query "[?name=='$SIZE'] | [0].[name, restrictions[?type=='Location'] | [0].reasonCode]" --output tsv 2>/dev/null \
-      | paste -sd '\t' - || true)"
-    if [[ -z "$OFFER" ]]; then
-      info "$SIZE: not known in $LOCATION, skipping"
-      continue
-    fi
-    REASON="$(cut -f2 <<< "$OFFER")"
-    if [[ -n "$REASON" && "$REASON" != "None" ]]; then
-      info "$SIZE: not offered to this subscription in $LOCATION ($REASON), skipping"
-      continue
+  # VM_SIZE_OFFERED: sizes somebody has already checked, in order. tools/deploy.py sets it after one quick,
+  # filtered question to Azure. Without it this script asks for each size with `az vm list-skus`, which
+  # fetches the sizes of every region: seconds in Cloud Shell, minutes from some workstations.
+  [[ -n "${VM_SIZE_OFFERED:-}" ]] || info "Asking Azure which of these sizes you are offered: $VM_SIZE. Each answer can take minutes."
+  for SIZE in ${VM_SIZE_OFFERED:-$VM_SIZE}; do
+    if [[ -z "${VM_SIZE_OFFERED:-}" ]]; then
+      # The CLI prints the two values on two lines; paste joins them: "name<TAB>reason".
+      OFFER="$(az vm list-skus --location "$LOCATION" --resource-type virtualMachines --all --size "$SIZE" \
+        --query "[?name=='$SIZE'] | [0].[name, restrictions[?type=='Location'] | [0].reasonCode]" --output tsv 2>/dev/null \
+        | paste -sd '\t' - || true)"
+      if [[ -z "$OFFER" ]]; then
+        info "$SIZE: not known in $LOCATION, skipping"
+        continue
+      fi
+      REASON="$(cut -f2 <<< "$OFFER")"
+      if [[ -n "$REASON" && "$REASON" != "None" ]]; then
+        info "$SIZE: not offered to this subscription in $LOCATION ($REASON), skipping"
+        continue
+      fi
     fi
     log "Creating VM $VM_NAME ($SIZE, Ubuntu 24.04 LTS)"
     if az vm create \

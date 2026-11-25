@@ -256,6 +256,9 @@ class Context:
         self._out, self.clock, self.sleep, self.wall = out, clock, sleep, wall
         self.cache: dict = {}
         self.current: str = ""          # the step that is running, for the helpers that keep pending work
+        # Called before a step is looked at, and after it with the seconds it took: a person sees life, and the first
+        # real numbers of how long looking takes come out of every run.
+        self.progress: Callable[[Step, float | None], None] | None = None
 
     def say(self, text: str = "") -> None:
         print(self.redact(text), file=self._out, flush=True)
@@ -314,8 +317,26 @@ def select(steps: list[Step], options: Options) -> list[Step]:
     return [step for step in steps if step.phase in wanted]
 
 
+def look(ctx: Context, step: Step, quiet: bool = False) -> Probe:
+    """Asks a step's probe. A question that could not be asked becomes that step's line, and the others are still asked:
+    one slow or failing call does not cost the whole plan."""
+    if ctx.progress and not quiet:
+        ctx.progress(step, None)
+    began = ctx.clock()
+    try:
+        return step.probe(ctx)
+    except Blocked as stop:
+        return Probe("blocked", stop.detail, action=stop.action)
+    except StepFailed as failure:
+        return Probe("blocked", f"could not be looked at: {failure}",
+                     action="Run the same command again. If it says the same, that line is what to send.")
+    finally:
+        if ctx.progress and not quiet:
+            ctx.progress(step, ctx.clock() - began)
+
+
 def make_plan(ctx: Context, steps: list[Step]) -> list[Line]:
-    return [decide(ctx, step, step.probe(ctx)) for step in steps]
+    return [decide(ctx, step, look(ctx, step)) for step in steps]
 
 
 def file_digest(root: Path, relative: str) -> str:
@@ -395,12 +416,12 @@ def print_plan(ctx: Context, lines: list[Line], digest: str) -> None:
 # ----------------------------------------------------------------------------------------- apply
 def _wait_for(ctx: Context, step: Step, first: Probe | None = None) -> Probe:
     """Asks the probe until it says done, or the step's time is over. Always asks at least once."""
-    probe = first or step.probe(ctx)
+    probe = first or look(ctx, step, quiet=True)
     deadline = ctx.clock() + step.wait_seconds
     while probe.state not in ("done", "unverified", "blocked") and ctx.clock() < deadline:
         ctx.sleep(ctx.options.limits["poll"])
         ctx.cache.clear()
-        probe = step.probe(ctx)
+        probe = look(ctx, step, quiet=True)
     return probe
 
 
@@ -421,7 +442,7 @@ def apply(ctx: Context, steps: list[Step], approved: set[str]) -> int:
     """Runs the steps in order and stops at the first that needs a person, fails, or is still running."""
     for step in steps:
         ctx.current = step.id
-        probe = step.probe(ctx)
+        probe = look(ctx, step, quiet=True)
         saved = ctx.state.step(step.id)
         if probe.state in ("done", "unverified"):
             if saved.get("status") != "complete":

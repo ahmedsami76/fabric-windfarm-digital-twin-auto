@@ -70,13 +70,15 @@ class Az:
 
     def _call(self, args, timeout):
         try:
-            return self._run(["az", *args], capture_output=True, text=True, timeout=timeout)
+            # No keyboard for the CLI: with its output captured, a question it asked (to install an extension, say)
+            # would be seen by nobody, and it would wait for an answer until the time limit.
+            return self._run(["az", *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         except FileNotFoundError:
             raise CloudError("The Azure CLI (az) is not installed on this computer.") from None
         except subprocess.TimeoutExpired:
             raise CloudError(f"az {' '.join(args[:3])} did not answer within {timeout} seconds.") from None
 
-    def json(self, *args, timeout: int = 300):
+    def json(self, *args, timeout: int = 180):
         """The parsed answer. Raises when the CLI fails."""
         result = self._call([*args, "--output", "json"], timeout)
         if result.returncode != 0:
@@ -84,7 +86,7 @@ class Az:
         text = result.stdout.strip()
         return json.loads(text) if text else None
 
-    def maybe(self, *args, timeout: int = 300):
+    def maybe(self, *args, timeout: int = 180):
         """The parsed answer, or None when the thing does not exist. Any other failure raises."""
         result = self._call([*args, "--output", "json"], timeout)
         if result.returncode != 0:
@@ -141,6 +143,10 @@ class Shell:
             process.kill()
             raise CloudError(f"{' '.join(argv[:3])} did not finish within {timeout} seconds.") from None
         return code, "\n".join(kept)
+
+    def which(self, tool: str) -> bool:
+        import shutil
+        return shutil.which(tool) is not None
 
     def capture(self, argv: list[str], env: dict | None = None, cwd: Path | None = None, timeout: int = 180) -> tuple[int, str]:
         """A short command whose answer is read, not shown. What it prints still passes the redactor before it is used."""

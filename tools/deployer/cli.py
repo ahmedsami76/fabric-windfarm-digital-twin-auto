@@ -138,11 +138,24 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
         check_target(ctx, target)
         if args.mode == "status":
             return status(ctx, steps, target)
+        # One line as each step is looked at. Looking is a dozen or more calls to the Azure CLI, each a few seconds and
+        # one of them a minute or two; without the lines a person sees an empty screen and cannot tell waiting from stuck.
+        ctx.say(f"Looking at {len([s for s in steps if s.prerequisite]) if args.mode == 'preflight' else len(steps)} steps. "
+                "This reads and changes nothing. Each line is one or more calls to the Azure CLI or to Fabric; the whole can "
+                "take a few minutes.")
+
+        def progress(step, seconds):
+            if seconds is None:
+                ctx.say(f"  looking at {step.id}: {step.title}")
+            elif seconds >= 5:
+                ctx.say(f"    {seconds:.0f} s")
+        ctx.progress = progress
         if args.mode == "preflight":
             steps = [step for step in steps if step.prerequisite]
         if args.mode == "apply":
             return run_apply(ctx, steps, args, account)
         lines = make_plan(ctx, steps)
+        ctx.say("")
         target = target_of(ctx, account)          # the capacity may have been found by its probe just now
         show_target(ctx, target)
         digest = plan_hash(ctx, lines, target)

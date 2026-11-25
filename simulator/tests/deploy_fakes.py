@@ -28,7 +28,9 @@ class World:
                         "user": {"name": "sami@contoso.example", "type": "user"}}
         self.my_roles = ["Owner"]
         self.unregistered: set = set()
-        self.skus = ["Standard_D8s_v5", "Standard_D8s_v7"]
+        self.skus = ["Standard_D8s_v5", "Standard_D8s_v6", "Standard_D8s_v7", "Standard_E4s_v5"]    # known in the region
+        self.refused: dict = {}             # size -> reason code of a Location restriction
+        self.sku_calls = 0
         self.storage_free = True
         self.custom_locations = "040ca937-7748-471b-a3ea-31d1ebd5da8a"
         self.groups: dict = {}
@@ -63,6 +65,7 @@ class World:
         self.gate_file = True
         self.node = "v22.23.5"
         self.missing_tools: set = set()
+        self.extensions = ["azure-iot-ops", "ssh"]
         self.may_create_workspaces = True
 
     def new_id(self, prefix: str) -> str:
@@ -101,8 +104,7 @@ class FakeAz:
         return token
 
     def json(self, *args, timeout=0):
-        found = self.maybe(*args)
-        return found
+        return self.maybe(*args, timeout=timeout)
 
     def run(self, *args, timeout=0):
         w = self.w
@@ -123,14 +125,20 @@ class FakeAz:
         if args[:2] == ("account", "show"):
             return w.account
         if args[:2] == ("provider", "show"):
-            return {"registrationState": "NotRegistered" if opt(args, "--namespace") in w.unregistered else "Registered"}
+            assert opt(args, "--query") == "registrationState"
+            return "NotRegistered" if opt(args, "--namespace") in w.unregistered else "Registered"
+        if args[:2] == ("extension", "list"):
+            return list(w.extensions)
+        if args[:2] == ("resource", "show"):
+            assert opt(args, "--resource-type") == "Microsoft.Kubernetes/connectedClusters"
+            return w.cluster
         if args[:3] == ("role", "assignment", "list"):
             if "--include-inherited" in args:
                 return list(w.my_roles)
             wanted = (opt(args, "--assignee"), opt(args, "--role"), opt(args, "--scope"))
             return ["ra-1"] if wanted in w.role_assignments else []
         if args[:2] == ("vm", "list-skus"):
-            return list(w.skus)
+            raise AssertionError("the runner asked `az vm list-skus`, which fetches every region and stood for five minutes on a workstation")
         if args[:3] == ("storage", "account", "check-name"):
             return {"nameAvailable": w.storage_free, "reason": None if w.storage_free else "AlreadyExists"}
         if args[:3] == ("ad", "sp", "show"):
@@ -141,12 +149,16 @@ class FakeAz:
             return list(w.resources)
         if args[:2] == ("vm", "show"):
             return w.vm
-        if args[:2] == ("connectedk8s", "show"):
-            return w.cluster
+        if args[:1] == ("connectedk8s",):
+            raise AssertionError("the runner asked the Azure CLI for an extension command a workstation need not have")
         if args[:4] == ("iot", "ops", "dataflow", "show"):
             return w.dataflows.get(opt(args, "--name"))
         if args[:3] == ("iot", "ops", "show"):
             return w.instance
+        if args[:1] == ("rest",) and "Microsoft.Compute/skus" in opt(args, "--url"):
+            assert "$filter=location eq 'southcentralus'" in args and "api-version=2021-07-01" in args and timeout and timeout <= 120
+            w.sku_calls += 1
+            return [{"name": name, "refused": w.refused.get(name)} for name in w.skus]
         if args[:1] == ("rest",):
             return {"value": [{"name": "azure-iot-operations-ab1cd", "identity": {"principalId": "principal-aio"},
                                "properties": {"extensionType": "microsoft.iotoperations"}}] if w.instance else []}
@@ -355,10 +367,11 @@ class FakeShell:
             raise CloudError(f"{' '.join(argv[:4])} ended with exit code {code}. Its last lines are above.")
         return text
 
+    def which(self, tool):
+        return tool not in self.w.missing_tools
+
     def capture(self, argv, env=None, cwd=None, timeout=0):
         w = self.w
-        if argv[0] in ("az", "bash", "ssh"):
-            return (127, "") if argv[0] in w.missing_tools else (0, "ok")
         if argv[:2] == ["node", "--version"]:
             return (0, w.node + "\n") if w.node else (127, "")
         if argv[:2] == ["node", "app/probe-lakehouse-route.mjs"]:
@@ -377,6 +390,7 @@ class FakeShell:
         ws = w.workspaces[0]["id"] if w.workspaces else None
         if "01-create-edge-vm.sh" in command:
             assert env.get("DEPLOY_RUNNER") == "1", "the VM script was started without DEPLOY_RUNNER"
+            w.vm_env = dict(env)
             name = next(n for n in w.groups)
             w.vm = {"id": f"{w.groups[name]['id']}/providers/Microsoft.Compute/virtualMachines/vm", "name": "vm-windfarm-edge-" + name[-3:],
                     "provisioningState": "Succeeded", "powerState": "VM running", "identity": {"principalId": "principal-vm"},
@@ -386,7 +400,7 @@ class FakeShell:
             w.host = True
         elif "03-arc-enable.sh" in command:
             w.cluster = {"id": "/subscriptions/sub-1111/resourceGroups/rg/providers/Microsoft.Kubernetes/connectedClusters/arc",
-                         "name": "arc", "connectivityStatus": "Connected"}
+                         "name": "arc", "properties": {"connectivityStatus": "Connected"}}
         elif "04-deploy-iot-operations.sh" in command:
             w.instance = {"id": "/subscriptions/sub-1111/x/instances/aio", "name": "aio", "properties": {"provisioningState": "Succeeded"}}
         elif "05-deploy-simulator.sh" in command:

@@ -634,8 +634,10 @@ def test_the_azure_cli_adapter_tells_missing_from_failed_and_hides_the_token():
     }
     seen = []
 
-    def run(argv, **_):
+    def run(argv, **how):
         seen.append(argv)
+        import subprocess
+        assert how["stdin"] == subprocess.DEVNULL, "the Azure CLI could wait for a key that nobody is asked to press"
         code, out, err = answers[tuple(argv[1:3])]
         return types.SimpleNamespace(returncode=code, stdout=out, stderr=err)
     redact = core.Redactor()
@@ -771,3 +773,87 @@ def test_a_long_apply_gets_a_new_token_before_the_old_one_ends():
     with pytest.raises(CloudError):           # nothing listens there; the token is renewed before the attempt
         fabric.call("GET", "workspaces")
     assert len(asked) == 2 and fabric._token.startswith("token-2")
+
+
+# ------------------------------------------------------------------------------------------ after the first run on a tenant
+def test_every_check_is_announced_as_it_starts_so_that_waiting_does_not_look_like_a_hang(bench):
+    """25 November 2026, 09:47: preflight printed one line and then nothing, and the user asked whether that was expected."""
+    code, text = bench.run("preflight", "--up-to", "phase4")
+    rows = text.splitlines()
+    notice = next(i for i, row in enumerate(rows) if row.startswith("Looking at "))
+    assert "changes nothing" in rows[notice] and "can take a few minutes" in rows[notice]
+    announced = [row.split()[2].rstrip(":") for row in rows if row.startswith("  looking at ")]
+    assert announced[:4] == ["pre.tools", "pre.signin", "pre.extensions", "pre.rights"] and "pre.region" in announced and "p4.node" in announced
+    assert rows.index("Target") > max(i for i, row in enumerate(rows) if row.startswith("  looking at "))   # the table comes after
+    assert "  looking at p1.workspace" in bench.run("plan")[1]
+    # a check that took long says how long, which is where the first real numbers come from
+    real = bench.adapters
+
+    class Slow(FakeAz):
+        def maybe(self, *args, timeout=0):
+            if args[:1] == ("rest",) and "Microsoft.Compute/skus" in " ".join(args):
+                bench.now[0] += 74
+            return super().maybe(*args, timeout=timeout)
+    bench.adapters = lambda redact: dict(real(redact), az=Slow(bench.world, redact))
+    rows = bench.run("preflight")[1].splitlines()
+    assert rows[next(i for i, row in enumerate(rows) if "looking at pre.region" in row) + 1] == "    74 s"
+    assert sum(1 for row in rows if re.fullmatch(r"    \d+ s", row)) == 1
+
+
+def test_one_check_that_cannot_be_made_is_one_line_and_the_others_are_still_made(bench):
+    real = bench.adapters
+
+    class Slow(FakeAz):
+        def maybe(self, *args, timeout=0):
+            if args[:2] == ("provider", "show"):
+                raise CloudError("az provider show did not answer within 180 seconds.")
+            return super().maybe(*args, timeout=timeout)
+    bench.adapters = lambda redact: dict(real(redact), az=Slow(bench.world, redact))
+    code, text = bench.run("preflight")
+    assert code == core.EXIT_BLOCKED and "FAILED" not in text
+    assert "could not be looked at: az provider show" in text and "Run the same command again" in text
+    assert re.search(r"pre\.capacity\s+done", text) and re.search(r"pre\.region\s+done", text)
+
+
+def test_the_vm_sizes_are_asked_with_one_filtered_call_that_cannot_stop_a_run(bench):
+    """25 November 2026, 09:53: `az vm list-skus --location did not answer within 300 seconds`, and preflight ended there."""
+    world = bench.world
+    world.refused = {"Standard_D8s_v5": "NotAvailableForSubscription"}
+    code, text = bench.run("preflight")
+    assert "VM size Standard_D8s_v6 is offered (Standard_D8s_v5, Standard_D8as_v5, Standard_D8as_v6, Standard_D8as_v7 not offered)" in text
+    # none of them: a block that names each size with its reason
+    world.refused = {name: "NotAvailableForSubscription" for name in world.skus}
+    text = bench.run("preflight")[1]
+    assert "None of the sizes in VM_SIZE is offered" in text and "Standard_D8s_v7: NotAvailableForSubscription" in text
+    assert "Standard_D8as_v5: not known in southcentralus" in text
+    # the question cannot be asked: said in one line, and no reason to stop, because step 1 tries the sizes in turn
+    world.refused = {"Standard_D8s_v5": "NotAvailableForSubscription"}
+    real = bench.adapters
+
+    class Deaf(FakeAz):
+        def maybe(self, *args, timeout=0):
+            if args[:1] == ("rest",) and "Microsoft.Compute/skus" in " ".join(args):
+                raise CloudError("az rest --method get did not answer within 120 seconds.")
+            return super().maybe(*args, timeout=timeout)
+    bench.adapters = lambda redact: dict(real(redact), az=Deaf(world, redact))
+    text = bench.run("preflight")[1]
+    assert re.search(r"pre\.region\s+done", text) and "could not be read" in text and "step 1 tries the sizes of VM_SIZE in turn" in text
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0 and "VM_SIZE_OFFERED" not in world.vm_env     # the script asks for itself
+
+
+def test_the_vm_script_is_handed_the_sizes_that_were_checked_and_the_question_ends_with_the_vm(bench):
+    bench.world.refused = {"Standard_D8s_v5": "NotAvailableForSubscription"}
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0
+    assert bench.world.vm_env["VM_SIZE_OFFERED"] == "Standard_D8s_v6 Standard_D8s_v7"
+    asked = bench.world.sku_calls
+    code, text = bench.run("plan", ROLES)
+    assert bench.world.sku_calls == asked and "the VM exists, so its size is no longer a question" in text
+
+
+def test_a_missing_cli_extension_is_the_operators_to_install_and_is_never_asked_for_on_the_way(bench):
+    bench.world.extensions = ["ssh"]
+    code, text = bench.run("preflight")
+    assert code == core.EXIT_BLOCKED and "az extension add --name azure-iot-ops --yes" in text and "nobody would see the question" in text
+    # and the cluster is read as a plain resource: the fake fails the test on any `az connectedk8s`, which a workstation may lack
+    bench.world.extensions = ["azure-iot-ops"]
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == 0

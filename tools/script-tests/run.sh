@@ -87,7 +87,13 @@ check "step 1 again: keeps the existing VM" 0 "exists already (Standard_D8s_v7)"
 
 reset; rm -f "$STUB_DIR"/power; printf 'Standard_D8s_v5\tNotAvailableForSubscription\n' > "$STUB_DIR"/skus
 run bash "$REPO"/infra/01-create-edge-vm.sh
-check "step 1, nothing offered: stops and says what to do" 1 "None of these sizes is offered" "az vm list-skus" "!vm create"
+check "step 1, nothing offered: stops and says what to do" 1 "None of these sizes is offered" "az vm list-skus" "!vm create" "Each answer can take minutes"
+
+# The sizes were checked by whoever starts the script (tools/deploy.py): the slow question to Azure is not asked again.
+reset; rm -f "$STUB_DIR"/power; printf 'Standard_D8s_v5\tNotAvailableForSubscription\n' > "$STUB_DIR"/skus
+echo Standard_D8s_v6 > "$STUB_DIR"/refused; echo 99999999-aaaa-bbbb-cccc-000000000000 > "$STUB_DIR"/oid
+run env VM_SIZE_OFFERED="Standard_D8s_v6 Standard_D8s_v7" bash "$REPO"/infra/01-create-edge-vm.sh
+check "step 1 with sizes already checked: asks no list of sizes, still moves on when Azure refuses one" 0 "!vm list-skus" "!Each answer can take minutes" "Standard_D8s_v6: refused by Azure" "Created with size Standard_D8s_v7"
 
 reset; rm -f "$STUB_DIR"/power; printf 'Standard_D8s_v5\tNone\n' > "$STUB_DIR"/skus
 run bash "$REPO"/infra/01-create-edge-vm.sh

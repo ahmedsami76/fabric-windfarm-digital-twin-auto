@@ -2,7 +2,7 @@
 
 `tools/deploy.py` deploys the demo step by step, from an empty subscription and an existing Fabric capacity to the twin in a workspace. It starts the scripts and notebooks of this repository in the order of the guides, looks at Azure and Fabric before and after every step, and stops with an exact instruction wherever a person has to act.
 
-**Status. Written on 25 November 2026. The runner has never run against Azure or Fabric.** Everything it does was exercised against stand-ins on the computer it was written on (48 tests, 22 planted faults, all caught). Most of what it starts, the scripts of `infra/` and `edge/` and the notebooks, ran on a tenant between 19 and 25 November, started by hand. [What has been proven where](#what-has-been-proven-where) keeps the two apart, and [Unproven on a tenant](#unproven-on-a-tenant) lists what your first run decides. Expect that first run to find something; send me what it prints.
+**Status. Written on 25 November 2026. Its first command on a tenant, `preflight`, was run the same morning and ended after six minutes at one check, the VM sizes, which the Azure CLI did not answer; that check is a different call now and can no longer end a run. No other check of that run was seen, and nothing of `apply` has run.** Everything it does was exercised against stand-ins on the computer it was written on (53 tests, 22 planted faults, all caught). Most of what it starts, the scripts of `infra/` and `edge/` and the notebooks, ran on a tenant between 19 and 25 November, started by hand. [What has been proven where](#what-has-been-proven-where) keeps the two apart, and [Unproven on a tenant](#unproven-on-a-tenant) lists what your first run decides. Expect that first run to find something; send me what it prints.
 
 It does not replace the guides. Each step names the guide's step it comes from, and the guides remain the way to deploy by hand or to understand what a step does.
 
@@ -27,6 +27,7 @@ python3 -m zipfile -e fabric-windfarm-digital-twin-auto.zip . && cd fabric-windf
 
 
 - The Azure CLI, signed in as yourself: `az login`. A service principal is refused, because several steps accept a person only.
+- The Azure CLI extension `azure-iot-ops` on this computer: `az extension add --name azure-iot-ops --yes`. A workstation that has run the guides has it. Preflight says when it is missing; the runner never lets the CLI install one on the way.
 - Python 3.10 or newer, `bash`, `ssh`. For Phase 4, Node.js 22 as in step 2 of [11-deployment-guide-phase4.md](11-deployment-guide-phase4.md).
 - A Fabric capacity that you may create workspaces on. For Phase 3 a paid one.
 - No `config/demo.env` yet. The runner writes it. A settings file from a deployment made by hand is refused; move it away and keep it.
@@ -40,6 +41,8 @@ Every command is typed in the repository folder.
 ```bash
 python3 tools/deploy.py preflight --up-to phase4
 ```
+
+While it looks, it prints one line for each check as it starts, and the seconds for any that took five or more. Looking is a dozen or more calls to the Azure CLI, each a few seconds. Every call has a time limit of three minutes; a check that cannot be made becomes one `BLOCKED` line, and the others are still made. (The first issue printed nothing until all were done, which looked like a hang, and then ended at the first call that ran out of time.)
 
 **2. Read the plan.** Changes nothing in Azure or Fabric. The first plan writes `config/demo.env` with generated names; `LOCATION` and `VM_SIZE` in it are yours to change before the first apply.
 
@@ -141,11 +144,12 @@ Generated from the runner's own list (`python3 tools/build-runner-docs.py`). "Re
 
 | Step | What | Who | Changes | Rests on |
 |---|---|---|---|---|
-| `pre.tools` | The tools the scripts need | check | nothing | az version; ssh -V |
+| `pre.tools` | The tools the scripts need | check | nothing | looks for az, bash and ssh on this computer |
 | `pre.signin` | Signed in to Azure as a person, on the right subscription | check | nothing | az account show |
+| `pre.extensions` | Azure CLI extension on this computer | check | nothing | az extension list |
 | `pre.rights` | Your roles on the subscription | check | nothing | az role assignment list |
 | `pre.providers` | Resource providers registered | check | nothing | az provider show |
-| `pre.region` | Region and VM size | check | nothing | az vm list-skus |
+| `pre.region` | Region and VM size | check | nothing | Resource SKUs - List, with its location filter |
 | `pre.names` | Generated names are free | check | nothing | az storage account check-name |
 | `pre.custom_locations` | Custom Locations object ID | check | nothing | az ad sp show |
 | `pre.fabric` | The Fabric API answers you | check | nothing | GET /v1/workspaces |
@@ -277,6 +281,7 @@ Phases 5b and 5c are not the runner's. Deploy them from their guides.
 | Guide | Runner | Why |
 |---|---|---|
 | Step 1 registers eight resource providers | You register them | A change to the whole subscription |
+| Step 1 asks `az vm list-skus` for each size | One call to the Resource SKUs API with its location filter; the script is handed the sizes that passed | `az vm list-skus` fetches the sizes of every region. From a workstation it did not answer in five minutes on 25 November |
 | Step 1 gives the VM's identity Reader on the subscription | Reader on the resource group | The runner grants nothing outside the demo. **Unproven**: whether Arc onboarding from the VM then still passes its provider check. If step 3 fails on it, grant Reader on the subscription by hand for the length of that step |
 | Step 6.4 and 6.7: the eventstream in the portal, the mapping chosen in a wizard | Created from a definition with the mapping named in it | Microsoft's article "Create an Eventstream with an Eventhouse DirectIngestion destination by using APIs" |
 | Steps 6.5 and 7.3: access and shortcuts in the portal | The Fabric API | Documented operations |
@@ -288,7 +293,7 @@ Phases 5b and 5c are not the runner's. Deploy them from their guides.
 
 | | Documented by Microsoft | Run against stand-ins here | Run on a tenant |
 |---|---|---|---|
-| The engine: plan, approval, checkpoint, lock, resume, redaction | not applicable | yes | **no** |
+| The engine: plan, approval, checkpoint, lock, resume, redaction | not applicable | yes | The settings file of a first run, with its generated names: yes, 25 November. Everything else: **no** |
 | Scripts `infra/01`, `04`, `06`, `edge/scripts/02`, `03`, `05`, `07`, `app/create-app.sh`, `npx rayfin up` | their commands, yes | started by the runner: yes | by hand: yes, 19 to 25 November. Started by the runner, and `infra/01` with `DEPLOY_RUNNER=1`: **no** |
 | Workspace, Eventhouse, KQL database, Lakehouse, shortcuts, role assignment, notebook import, schedules through the Fabric API | yes, each read on 25 November | yes | **no**. The workspace role assignment by a script of Phase 4: yes |
 | Eventstream with direct ingestion and a named mapping | yes | yes | **no** |
@@ -317,11 +322,11 @@ In the order a first run meets them:
 11. **The result file of the gate** over the OneLake API. The verdict does not depend on it.
 12. **The SQL probe** with a token for `https://database.windows.net`.
 13. **`npx rayfin up` started without a terminal**, and how it says that it is not signed in. The runner recognises the words sign in, log in, keychain and 401; anything else is reported as a failure with the tool's own lines.
-14. **The times.** No step has been timed under the runner, so this document promises none.
+14. **The times.** No step has been timed under the runner, so this document promises none. From the second issue on, every check that takes five seconds or more prints its seconds: the first numbers will come from your run.
 
 ## Tests
 
-`simulator/tests/test_deploy_runner.py`, 48 tests against `simulator/tests/deploy_fakes.py`, a pretend Azure and Fabric that answer in the documented shapes and record every change:
+`simulator/tests/test_deploy_runner.py`, 53 tests against `simulator/tests/deploy_fakes.py`, a pretend Azure and Fabric that answer in the documented shapes and record every change:
 
 | Asked for | Test |
 |---|---|
@@ -330,6 +335,7 @@ In the order a first run meets them:
 | No duplicates on a second apply | every write of a full Phase 1 counted, and a second apply adds none: one group, one workspace, four jobs, one schedule, two plus two role assignments |
 | Unsupported API handoffs | a destination in `Warning`; no rows after the wait; the gate notebook failing; each operator step of Phases 2 to 4 in turn; the fallback from a failed job to the person |
 | Secret redaction | tokens, both keys, the connection string and the middle of each key searched in everything printed and written; a script that prints a secret; the redactor by itself; the checkpoint file |
+| After the first run on a tenant | every check announced as it starts; one check that cannot be made is one line; a missing CLI extension is the operator's; the Azure CLI is started without a keyboard; the VM sizes asked with one filtered call, which cannot stop a run and is not asked again once the VM exists |
 | And | approval of exactly one plan; a changed file and drift void it; role changes wait and stay on the resource group; Phase 5a absent by default, switched off when present, notebooks 12 and 13 impossible to run; the history once and once per label; the schedule in the future; preflight; the KQL splitter; the gate notebook's logic; the real adapters |
 
 Twenty-two faults were planted in the runner one at a time. Twenty-one made a test fail at once. The twenty-second, a key written into the settings with its last character cut off, passed until the test also searched for the middle of each key.
@@ -348,5 +354,6 @@ Microsoft Learn, read on 25 November 2026.
 - [Workspaces - Create Workspace](https://learn.microsoft.com/en-us/rest/api/fabric/core/workspaces/create-workspace), [Add Workspace Role Assignment](https://learn.microsoft.com/en-us/rest/api/fabric/core/workspaces/add-workspace-role-assignment), [Create KQL Database](https://learn.microsoft.com/en-us/rest/api/fabric/kqldatabase/items/create-kql-database), [Create Shortcut](https://learn.microsoft.com/en-us/rest/api/fabric/core/onelake-shortcuts/create-shortcut) and [List Shortcuts](https://learn.microsoft.com/en-us/rest/api/fabric/core/onelake-shortcuts/list-shortcuts), [Create Notebook](https://learn.microsoft.com/en-us/rest/api/fabric/notebook/items/create-notebook): users, service principals and managed identities are supported; none is marked preview.
 - [Job Scheduler - Run On Demand Item Job](https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/run-on-demand-item-job), [Get Item Job Instance](https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/get-item-job-instance), [List Item Job Instances](https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/list-item-job-instances), [Create Item Schedule](https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/create-item-schedule), [List Item Schedules](https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/list-item-schedules). A job instance has a state and a failure reason and no exit value, which is why the gate notebook passes or fails as a whole. The reference writes the job type into the path; Microsoft's notebook article writes it as `?jobType=RunNotebook`, the form that ran here on 24 November and the one the runner uses.
 - [Lakehouse - List Tables](https://learn.microsoft.com/en-us/rest/api/fabric/lakehouse/tables/list-tables): marked preview, so not used; the gate notebook reads the tables instead.
+- [Resource SKUs - List](https://learn.microsoft.com/en-us/rest/api/compute/resource-skus/list): `$filter=location eq '…'`, the only filter it supports; a size's `restrictions` of type `Location` with the reason.
 - [Manage Apache Spark libraries in Microsoft Fabric](https://learn.microsoft.com/en-us/fabric/data-engineering/library-management): inline installation in pipeline runs, and `_inlineInstallationEnabled`.
 - [Create a data flow in Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/connect-to-cloud/howto-create-dataflow) and the [Dataflow REST reference](https://learn.microsoft.com/en-us/rest/api/iotoperations/dataflow/create-or-update): `mode`, `Enabled` or `Disabled`.

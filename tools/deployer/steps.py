@@ -166,8 +166,7 @@ def keep_done(ctx, step_id: str, live) -> Probe:
 
 # ------------------------------------------------------------------------------------------- preflight
 def pre_tools(ctx) -> Probe:
-    missing = [tool for tool, argv in (("az", ["az", "version"]), ("bash", ["bash", "--version"]), ("ssh", ["ssh", "-V"]))
-               if ctx.shell.capture(argv)[0] not in (0,)]
+    missing = [tool for tool in ("az", "bash", "ssh") if not ctx.shell.which(tool)]
     if missing:
         return blocked("Not on this computer: " + ", ".join(missing) + ".", "Install them as in step 0 of "
                        "docs/01-deployment-guide-phase1.md (Workstation), then sign in: az login")
@@ -195,12 +194,24 @@ def pre_signin(ctx) -> Probe:
                 tenant_id=me.get("tenantId"), subscription_id=me.get("id"))
 
 
+EXTENSIONS = ("azure-iot-ops",)     # what the runner itself asks the Azure CLI on this computer; the scripts check their own
+
+
+def pre_extensions(ctx) -> Probe:
+    have = set(ctx.az.json("extension", "list", "--query", "[].name") or [])
+    missing = [extension for extension in EXTENSIONS if extension not in have]
+    if missing:
+        return blocked("The Azure CLI on this computer lacks the extension " + ", ".join(missing) + ". The runner does not let "
+                       "the CLI install it on the way, because the CLI asks before it does and nobody would see the question.",
+                       "\n".join(f"az extension add --name {extension} --yes" for extension in missing))
+    return done("Azure CLI extension azure-iot-ops is installed")
+
+
 def pre_providers(ctx) -> Probe:
-    missing = []
-    for namespace in PROVIDERS:
-        state = (ctx.az.maybe("provider", "show", "--namespace", namespace) or {}).get("registrationState")
-        if state != "Registered":
-            missing.append(namespace)
+    # One small question for each. A single `az provider list` would be one call, and a download of every provider
+    # with all its resource types: on a slow line that is the kind of call this runner has learned to avoid.
+    missing = [namespace for namespace in PROVIDERS
+               if ctx.az.maybe("provider", "show", "--namespace", namespace, "--query", "registrationState") != "Registered"]
     if missing:
         return blocked("Not registered in the subscription: " + ", ".join(missing) + ". Registering is a change to the whole "
                        "subscription, so the runner leaves it to you.",
@@ -236,15 +247,40 @@ def pre_region(ctx) -> Probe:
     if location not in IOT_OPERATIONS_REGIONS:
         return blocked(f"LOCATION is {location}. Azure IoT Operations supports Arc clusters in: {', '.join(IOT_OPERATIONS_REGIONS)}.",
                        f"Set LOCATION in {ctx.env_file.name} to one of these.")
-    sizes = ctx.cfg.get("VM_SIZE", "").split()
-    offered = ctx.az.json("vm", "list-skus", "--location", location, "--resource-type", "virtualMachines",
-                          "--query", "[?length(restrictions)==`0`].name") or []
-    usable = [size for size in sizes if size in offered]
+    if ctx.state.step("p1.edge_vm").get("status") == "complete":
+        return done(f"{location}; the VM exists, so its size is no longer a question")
+    try:
+        usable, refused = offered_sizes(ctx)
+    except CloudError as error:
+        # Not a reason to stop: step 1 tries the sizes of VM_SIZE in turn and says so when Azure refuses them all.
+        return unverified(f"{location} is supported. Which VM sizes you are offered could not be read ({str(error)[:140]}); "
+                          "step 1 tries the sizes of VM_SIZE in turn")
     if not usable:
-        return blocked(f"None of the sizes in VM_SIZE is offered to this subscription in {location}.",
-                       f"az vm list-skus --location {location} --resource-type virtualMachines --output table\n"
-                       f"Then put a size with 8 vCPUs and 32 GB that is offered into VM_SIZE in {ctx.env_file.name}.")
-    return done(f"{location}; VM size {usable[0]} is offered")
+        return blocked(f"None of the sizes in VM_SIZE is offered to this subscription in {location}: "
+                       + "; ".join(f"{size}: {why}" for size, why in refused.items()),
+                       f"Put a size with 8 vCPUs and 32 GB that you are offered into VM_SIZE in {ctx.env_file.name}. The Azure "
+                       "portal shows them under Virtual machines, Create, Size; sizes of the v6 and v7 families are the usual ones "
+                       "in a managed subscription.")
+    skipped = f" ({', '.join(refused)} not offered)" if refused else ""
+    return done(f"{location}; VM size {usable[0]} is offered{skipped}")
+
+
+def offered_sizes(ctx) -> tuple[list, dict]:
+    """The sizes of VM_SIZE this subscription may create in LOCATION, in their order, and why the others are out.
+
+    One call to the Resource SKUs API with its location filter. `az vm list-skus` asks the same API for every region
+    and filters on this computer: on 25 November 2026 that did not answer a workstation within five minutes.
+    """
+    location, sizes = ctx.cfg["LOCATION"], ctx.cfg.get("VM_SIZE", "").split()
+    rows = ctx.az.json(
+        "rest", "--method", "get", "--url", f"https://management.azure.com/subscriptions/{account(ctx)['id']}/providers/Microsoft.Compute/skus",
+        "--url-parameters", "api-version=2021-07-01", f"$filter=location eq '{location}'",
+        "--query", "value[?resourceType=='virtualMachines'].{name: name, refused: restrictions[?type=='Location'] | [0].reasonCode}",
+        timeout=120) or []
+    known = {row.get("name"): row.get("refused") for row in rows}
+    usable = [size for size in sizes if size in known and not known[size]]
+    refused = {size: (known[size] if size in known else f"not known in {location}") for size in sizes if size not in usable}
+    return usable, refused
 
 
 def pre_names(ctx) -> Probe:
@@ -381,6 +417,17 @@ def p1_edge_vm(ctx) -> Probe:
     return done(f"{machine['name']} ({(machine.get('hardwareProfile') or {}).get('vmSize')})", id=machine["id"])
 
 
+def act_edge_vm(ctx) -> None:
+    env = {"DEPLOY_RUNNER": "1"}
+    try:
+        usable, _ = offered_sizes(ctx)
+        if usable:
+            env["VM_SIZE_OFFERED"] = " ".join(usable)       # the script then skips its own, slow, question to Azure
+    except CloudError:
+        pass                                                # the script asks for itself, and says that it can take minutes
+    script(ctx, "infra/01-create-edge-vm.sh", env=env)
+
+
 def vm_roles(ctx) -> list[tuple[str, str, str]]:
     """(principal, role, scope) for the VM's identity: both on the demo's resource group, neither on the subscription."""
     principal = ((vm(ctx) or {}).get("identity") or {}).get("principalId", "")
@@ -409,8 +456,10 @@ def act_vm_roles(ctx) -> None:
 
 
 def cluster(ctx) -> dict | None:
-    return ctx.remember("cluster", lambda: ctx.az.maybe("connectedk8s", "show", "--resource-group", ctx.cfg["RESOURCE_GROUP"],
-                                                        "--name", ctx.cfg["CLUSTER_NAME"]))
+    # Read as a plain resource: `az connectedk8s` is an extension the scripts use on the VM, and a workstation need not have it.
+    return ctx.remember("cluster", lambda: ctx.az.maybe(
+        "resource", "show", "--resource-group", ctx.cfg["RESOURCE_GROUP"], "--name", ctx.cfg["CLUSTER_NAME"],
+        "--resource-type", "Microsoft.Kubernetes/connectedClusters"))
 
 
 def p1_arc(ctx) -> Probe:
@@ -419,10 +468,11 @@ def p1_arc(ctx) -> Probe:
     found = cluster(ctx)
     if not found:
         return todo()
-    if found.get("connectivityStatus") != "Connected":
+    connected = (found.get("properties") or {}).get("connectivityStatus")
+    if connected != "Connected":
         if (vm(ctx) or {}).get("powerState", "VM running") != "VM running":
-            return blocked(f"The cluster is {found.get('connectivityStatus')}: the VM is stopped.", "bash infra/vm.sh start")
-        return todo(f"the cluster is {found.get('connectivityStatus')}")
+            return blocked(f"The cluster is {connected}: the VM is stopped.", "bash infra/vm.sh start")
+        return todo(f"the cluster is {connected}")
     return done(f"{found['name']} is connected to Azure Arc", id=found["id"])
 
 
@@ -963,13 +1013,15 @@ def phase1() -> list[Step]:
     gate_probe, gate_act = gate_lakehouse("phase1", "p1.gate_lakehouse", "p1.notebooks")
     kql_files = ("fabric/kql/01-tables.kql", "fabric/kql/02-update-policies.kql")
     return [
-        Step("pre.tools", "preflight", "The tools the scripts need", pre_tools, basis="az version; ssh -V"),
+        Step("pre.tools", "preflight", "The tools the scripts need", pre_tools, basis="looks for az, bash and ssh on this computer"),
         Step("pre.signin", "preflight", "Signed in to Azure as a person, on the right subscription", pre_signin, proof="live",
              basis="az account show"),
+        Step("pre.extensions", "preflight", "Azure CLI extension on this computer", pre_extensions, basis="az extension list"),
         Step("pre.rights", "preflight", "Your roles on the subscription", pre_rights, basis="az role assignment list"),
         Step("pre.providers", "preflight", "Resource providers registered", pre_providers, basis="az provider show",
              manual="Register the providers the plan names."),
-        Step("pre.region", "preflight", "Region and VM size", pre_region, basis="az vm list-skus"),
+        Step("pre.region", "preflight", "Region and VM size", pre_region,
+             basis="Resource SKUs - List, with its location filter"),
         Step("pre.names", "preflight", "Generated names are free", pre_names, basis="az storage account check-name"),
         Step("pre.custom_locations", "preflight", "Custom Locations object ID", pre_custom_locations, basis="az ad sp show"),
         Step("pre.fabric", "preflight", "The Fabric API answers you", pre_fabric, basis="GET /v1/workspaces"),
@@ -979,8 +1031,7 @@ def phase1() -> list[Step]:
 
         Step("p1.resource_group", "phase1", "Resource group of the demo", p1_resource_group, act_resource_group,
              writes=f"creates the resource group with the tag {TAG}", basis="az group create", proof="offline"),
-        Step("p1.edge_vm", "phase1", "Edge VM", p1_edge_vm,
-             lambda ctx: script(ctx, "infra/01-create-edge-vm.sh", env={"DEPLOY_RUNNER": "1"}),
+        Step("p1.edge_vm", "phase1", "Edge VM", p1_edge_vm, act_edge_vm,
              inputs=("infra/01-create-edge-vm.sh",), writes="VM, network, SSH rule for your address, daily shutdown",
              basis="infra/01-create-edge-vm.sh, without its provider registration and role assignments", proof="live"),
         Step("p1.vm_identity_roles", "phase1", "Roles for the VM's identity, on the resource group only", p1_vm_roles, act_vm_roles,
