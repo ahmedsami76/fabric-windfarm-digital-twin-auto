@@ -1,0 +1,44 @@
+# Diagnostic MQTT client (mosquitto tools) for looking at the broker from inside
+# the cluster. Test use only. Based on the Azure IoT Operations sample
+# samples/quickstarts/mqtt-client.yaml in Azure-Samples/explore-iot-operations.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mqtt-client
+  namespace: azure-iot-operations
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mqtt-client
+  namespace: azure-iot-operations
+spec:
+  serviceAccountName: mqtt-client
+  containers:
+    - name: mqtt-client
+      image: alpine
+      command: ["sh", "-c"]
+      args: ["apk add --no-cache mosquitto-clients && sleep infinity"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 200Mi
+      volumeMounts:
+        - name: broker-sat
+          mountPath: /var/run/secrets/tokens
+        - name: trust-bundle
+          mountPath: /var/run/certs
+  volumes:
+    - name: broker-sat
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: broker-sat
+              audience: aio-internal
+              expirationSeconds: 86400
+    - name: trust-bundle
+      configMap:
+        name: azure-iot-operations-aio-ca-trust-bundle

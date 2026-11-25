@@ -1,0 +1,22 @@
+{
+  "mode": "__DATAFLOW_MODE__",
+  "operations": [
+    {
+      "operationType": "Source",
+      "sourceSettings": {
+        "endpointRef": "__ENDPOINT_NAME__",
+        "serializationFormat": "Json",
+        "dataSources": [
+          "__COMMAND_TOPIC__"
+        ]
+      }
+    },
+    {
+      "operationType": "Destination",
+      "destinationSettings": {
+        "endpointRef": "default",
+        "dataDestination": "__CONTROL_TOPIC__"
+      }
+    }
+  ]
+}

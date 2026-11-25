@@ -1,0 +1,236 @@
+{
+  "siteId": "northwind-ridge",
+  "siteName": "Northwind Ridge Wind Farm",
+  "operator": "Contoso Energy",
+  "fictional": true,
+  "timezone": "America/Chicago",
+  "origin": {
+    "latitude": 32.215,
+    "longitude": -100.48
+  },
+  "prevailingWindDirectionDeg": 195.0,
+  "ppaPriceUsdPerMwh": 38.5,
+  "gridEmissionFactorKgCo2PerMwh": 370.0,
+  "capacityMw": 50.4,
+  "terrain": {
+    "seed": 42,
+    "sizeM": 6000.0,
+    "grid": 129,
+    "file": "terrain/heightmap.json"
+  },
+  "turbineModel": {
+    "model": "CT-4.2-150",
+    "manufacturer": "Contoso Turbines",
+    "ratedPowerKw": 4200.0,
+    "rotorDiameterM": 150.0,
+    "hubHeightM": 105.0,
+    "cutInWindSpeed": 3.0,
+    "ratedWindSpeed": 12.0,
+    "cutOutWindSpeed": 25.0,
+    "gearRatio": 97.0,
+    "ratedRotorRpm": 12.3
+  },
+  "metMast": {
+    "id": "MET-01",
+    "name": "Met mast 01",
+    "assetType": "MetMast",
+    "x": -186,
+    "y": -1137,
+    "latitude": 32.204786,
+    "longitude": -100.481975,
+    "elevationM": 746.7
+  },
+  "substation": {
+    "id": "SUB-01",
+    "name": "Collector substation",
+    "assetType": "Substation",
+    "x": 1350,
+    "y": -2100,
+    "latitude": 32.196135,
+    "longitude": -100.465666,
+    "elevationM": 707.4
+  },
+  "omBuilding": {
+    "id": "OM-01",
+    "name": "Operations and maintenance building",
+    "assetType": "Building",
+    "x": 1470,
+    "y": -2160,
+    "latitude": 32.195596,
+    "longitude": -100.464392,
+    "elevationM": 708.3
+  },
+  "turbines": [
+    {
+      "turbineId": "WT-01",
+      "name": "Turbine 01",
+      "x": -2100.0,
+      "y": 675.0,
+      "latitude": 32.221064,
+      "longitude": -100.502297,
+      "elevationM": 792.2,
+      "string": "A",
+      "commissionedDate": "2021-03-29",
+      "serialNumber": "CT42-126225"
+    },
+    {
+      "turbineId": "WT-02",
+      "name": "Turbine 02",
+      "x": -1425.0,
+      "y": 525.0,
+      "latitude": 32.219716,
+      "longitude": -100.49513,
+      "elevationM": 795.1,
+      "string": "A",
+      "commissionedDate": "2021-05-10",
+      "serialNumber": "CT42-356787"
+    },
+    {
+      "turbineId": "WT-03",
+      "name": "Turbine 03",
+      "x": -675.0,
+      "y": 375.0,
+      "latitude": 32.218369,
+      "longitude": -100.487167,
+      "elevationM": 798.6,
+      "string": "A",
+      "commissionedDate": "2021-04-27",
+      "serialNumber": "CT42-246316"
+    },
+    {
+      "turbineId": "WT-04",
+      "name": "Turbine 04",
+      "x": -375.0,
+      "y": -225.0,
+      "latitude": 32.212979,
+      "longitude": -100.483982,
+      "elevationM": 761.8,
+      "string": "A",
+      "commissionedDate": "2021-03-27",
+      "serialNumber": "CT42-809570"
+    },
+    {
+      "turbineId": "WT-05",
+      "name": "Turbine 05",
+      "x": -75.0,
+      "y": 600.0,
+      "latitude": 32.22039,
+      "longitude": -100.480796,
+      "elevationM": 777.5,
+      "string": "B",
+      "commissionedDate": "2021-07-18",
+      "serialNumber": "CT42-191161"
+    },
+    {
+      "turbineId": "WT-06",
+      "name": "Turbine 06",
+      "x": 225.0,
+      "y": -1125.0,
+      "latitude": 32.204894,
+      "longitude": -100.477611,
+      "elevationM": 767.3,
+      "string": "B",
+      "commissionedDate": "2021-06-17",
+      "serialNumber": "CT42-133326"
+    },
+    {
+      "turbineId": "WT-07",
+      "name": "Turbine 07",
+      "x": 225.0,
+      "y": -450.0,
+      "latitude": 32.210958,
+      "longitude": -100.477611,
+      "elevationM": 788.5,
+      "string": "B",
+      "commissionedDate": "2021-03-08",
+      "serialNumber": "CT42-198246"
+    },
+    {
+      "turbineId": "WT-08",
+      "name": "Turbine 08",
+      "x": 450.0,
+      "y": 150.0,
+      "latitude": 32.216347,
+      "longitude": -100.475222,
+      "elevationM": 831.7,
+      "string": "B",
+      "commissionedDate": "2021-04-25",
+      "serialNumber": "CT42-343962"
+    },
+    {
+      "turbineId": "WT-09",
+      "name": "Turbine 09",
+      "x": 675.0,
+      "y": 750.0,
+      "latitude": 32.221737,
+      "longitude": -100.472833,
+      "elevationM": 762.8,
+      "string": "C",
+      "commissionedDate": "2021-07-08",
+      "serialNumber": "CT42-731262"
+    },
+    {
+      "turbineId": "WT-10",
+      "name": "Turbine 10",
+      "x": 1125.0,
+      "y": 150.0,
+      "latitude": 32.216347,
+      "longitude": -100.468055,
+      "elevationM": 789.6,
+      "string": "C",
+      "commissionedDate": "2021-03-07",
+      "serialNumber": "CT42-688508"
+    },
+    {
+      "turbineId": "WT-11",
+      "name": "Turbine 11",
+      "x": 1650.0,
+      "y": -225.0,
+      "latitude": 32.212979,
+      "longitude": -100.462481,
+      "elevationM": 764.1,
+      "string": "C",
+      "commissionedDate": "2021-04-20",
+      "serialNumber": "CT42-850800"
+    },
+    {
+      "turbineId": "WT-12",
+      "name": "Turbine 12",
+      "x": 2100.0,
+      "y": 225.0,
+      "latitude": 32.217021,
+      "longitude": -100.457703,
+      "elevationM": 787.0,
+      "string": "C",
+      "commissionedDate": "2021-07-18",
+      "serialNumber": "CT42-539898"
+    }
+  ],
+  "climateSeed": 20211,
+  "historyStart": "2025-01-01T00:00:00+00:00",
+  "standingConditions": [
+    {
+      "turbineId": "WT-07",
+      "kind": "gearbox_wear",
+      "oilTempAdd": 4.5,
+      "bearingTempAdd": 6.0,
+      "vibrationAdd": 1.3,
+      "sinceDays": 130,
+      "note": "High-speed shaft bearing wear, iron in oil rising"
+    },
+    {
+      "turbineId": "WT-05",
+      "kind": "yaw_offset",
+      "offsetDeg": 9.0,
+      "sinceDays": 96,
+      "note": "Wind vane replaced and not calibrated"
+    },
+    {
+      "turbineId": "WT-09",
+      "kind": "blade_erosion",
+      "efficiency": 0.968,
+      "sinceDays": 600,
+      "note": "Leading-edge erosion on blades A and C"
+    }
+  ]
+}

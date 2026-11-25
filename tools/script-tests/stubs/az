@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Stand-in for the Azure CLI: answers from files in $STUB_DIR and logs every call.
+S="$STUB_DIR"; echo "az $*" >> "$S/calls.log"
+args="$*"
+case "$args" in
+  # ---- rebuilding the settings file (infra/rebuild-env.sh)
+  "account show --query id"*)           echo 00000000-0000-0000-0000-000000000000 ;;
+  "group show"*"--query location"*)     echo southcentralus ;;
+  "vm show --resource-group"*osProfile.adminUsername*) echo azureuser ;;
+  "resource show"*schemaRegistries*properties.namespace*) echo sr-windfarm-ns ;;
+  "iot ops dataflow endpoint show"*)    [[ -s "$S/eventstream" ]] && sed -n 1p "$S/eventstream" || { echo "ERROR: (ResourceNotFound)" >&2; exit 3; } ;;
+  "iot ops dataflow show"*)             [[ -s "$S/eventstream" ]] && sed -n 2p "$S/eventstream" || { echo "ERROR: (ResourceNotFound)" >&2; exit 3; } ;;
+  "account show"*)                      cat "$S/login" 2>/dev/null || echo user ;;
+  "account set"*)                       ;;
+  "provider register"*|"group create"*|"role assignment create"*) ;;
+  "provider show"*)                     echo Registered ;;
+  "group show"*)                        echo "/subscriptions/s/resourceGroups/rg-windfarm-edge" ;;
+  "ad sp show"*)                        if [[ -s "$S/oid" ]]; then cat "$S/oid"; else echo "ERROR: Insufficient privileges to complete the operation." >&2; exit 1; fi ;;
+  "vm show --resource-group"*hardwareProfile.vmSize*) [[ -s "$S/vmsize" ]] && cat "$S/vmsize" || exit 3 ;;
+  "vm show --resource-group"*identity.principalId*)   [[ -f "$S/no_vm" ]] && exit 3; echo 11111111-2222-3333-4444-555555555555 ;;
+  # ---- clean-up (infra/99-cleanup.sh)
+  "group exists"*)                      if [[ -f "$S/rg" ]]; then echo true; else echo false; fi ;;
+  "group delete"*)                      if [[ -f "$S/group_delete_fails" ]]; then echo "(ResourceGroupDeletionBlocked) Deletion of resource group failed." >&2; exit 1; fi
+                                        rm -f "$S/rg"; : > "$S/resources" ;;
+  "resource list"*IoTOperations/instances*) cat "$S/instance" 2>/dev/null ;;
+  "resource list"*)                     cat "$S/resources" 2>/dev/null ;;
+  "resource show --ids"*connectedClusters*) [[ -s "$S/cluster" ]] && cat "$S/cluster" || exit 3 ;;
+  "rest --method get --url https://management.azure.com"*KubernetesConfiguration/extensions*) cat "$S/extension" 2>/dev/null ;;   # two lines: name, principal ID
+  "iot ops delete"*)
+      # As azure-iot-ops 2.11.2 does: without --force it refuses when Azure shows the cluster as not
+      # connected; then the first deletion has to reach the cluster. unreachable = number of attempts
+      # that still fail; a cluster shown as not connected is unreachable unless reachable_anyway exists.
+      if [[ -f "$S/uninstall_fails" ]]; then echo "ERROR: (AuthorizationFailed) The client does not have authorization to perform action" >&2; exit 1; fi
+      shown="$(cat "$S/cluster" 2>/dev/null)"
+      if [[ "$shown" != "Connected" && "$args" != *"--force"* ]]; then
+        echo "ERROR: The cluster is not connected to Azure (status: $shown). Use --force to continue anyway, which may lead to errors." >&2; exit 1
+      fi
+      left="$(cat "$S/unreachable" 2>/dev/null || echo 0)"
+      if [[ "$shown" != "Connected" && ! -f "$S/reachable_anyway" ]]; then left=1; elif [[ "$left" -gt 0 ]]; then echo $((left - 1)) > "$S/unreachable"; fi
+      if [[ "$left" -gt 0 ]]; then
+        echo "ERROR: (ClusterNetworkUnavailable) Failed to establish a network connection with the kubernetes cluster '/subscriptions/s/resourceGroups/rg-windfarm-edge/providers/Microsoft.Kubernetes/connectedClusters/arc-windfarm-edge'. Please make sure the underlying cluster is running and has network connectivity before retrying the operation." >&2
+        echo "Exception Details:      (None) Cannot connect to the hybrid connection because no agent is connected in the target arc resource." >&2
+        exit 1
+      fi
+      : > "$S/instance"; rm -f "$S/extension" ;;
+  "extension show"*)                    if [[ -f "$S/no_cli_extension" ]]; then echo "ERROR: The extension azure-iot-ops is not installed." >&2; exit 1; fi ;;
+  "extension add"*)                     rm -f "$S/no_cli_extension" ;;
+  "role assignment list"*)              cat "$S/roles" 2>/dev/null ;;
+  "role assignment delete"*)            ;;
+  "rest --resource https://api.fabric.microsoft.com --method get"*)
+      if [[ -f "$S/fabric_no_token" ]]; then echo "ERROR: AADSTS65001: The user or administrator has not consented to use the application" >&2; exit 1; fi
+      url="$(echo "$args" | sed -E 's/.*--url ([^ ]+).*/\1/')"
+      case "$url" in
+        */v1/workspaces)                   cat "$S/fabric/workspaces.json" ;;
+        */v1/workspaces\?continuationToken=*) cat "$S/fabric/workspaces2.json" ;;
+        */items)                           cat "$S/fabric/items.json" ;;
+        */roleAssignments)                 cat "$S/fabric/access.json" ;;
+        *) echo "STUB: unexpected Fabric GET $url" >&2; exit 9 ;;
+      esac ;;
+  "rest --resource https://api.fabric.microsoft.com --method delete"*)
+      url="$(echo "$args" | sed -E 's/.*--url ([^ ]+).*/\1/')"; id="$(basename "${url%%\?*}")"
+      if grep -q "^${id}$" "$S/fabric/undeletable" 2>/dev/null; then echo "ERROR: (InsufficientWorkspaceRole)" >&2; exit 1; fi
+      if [[ "$url" == *hardDelete=true* ]] && grep -q "^${id}$" "$S/fabric/no_hard" 2>/dev/null; then echo "ERROR: (FeatureNotAvailable)" >&2; exit 1; fi
+      echo "$id" >> "$S/fabric/deleted" ;;
+  "vm list-skus"*)                      size="$(echo "$args" | sed -E 's/.*--size ([^ ]+).*/\1/')"; grep -P "^${size}\t" "$S/skus" 2>/dev/null | tr '\t' '\n' || true ;;   # two lines, as the real CLI prints a list
+  "vm create"*)                         size="$(echo "$args" | sed -E 's/.*--size ([^ ]+).*/\1/')"
+                                        if grep -q "^${size}$" "$S/refused" 2>/dev/null; then echo "(SkuNotAvailable) The requested VM size for resource 'Following SKUs have failed for Capacity Restrictions: ${size}' is currently not available in location 'southcentralus'." >&2; exit 1; fi
+                                        echo "$size" > "$S/vmsize"; echo "VM running" > "$S/power" ;;
+  "vm show --show-details"*"[powerState, publicIps]"*) cat "$S/power" "$S/ip" ;;
+  "vm show --show-details"*powerState*) cat "$S/power" ;;
+  "vm show"*publicIps*)                 cat "$S/ip" ;;
+  "network nsg rule show"*)             [[ -s "$S/rule" ]] && cat "$S/rule" || exit 3 ;;
+  "network nsg rule update"*|"network nsg rule create"*)
+      src="$(echo "$args" | sed -E 's/.*--source-address-prefixes ([^ ]+).*/\1/')"; echo "$src" > "$S/rule"
+      printf '%s\tallow-ssh-from-admin\n' "$src" > "$S/openings"; touch "$S/port_open" ;;
+  "resource show"*DevTestLab/schedules*) [[ -s "$S/schedule" ]] && cat "$S/schedule" || exit 3 ;;
+  "vm start"*)                          echo "VM running" > "$S/power"; if [[ -f "$S/connect_on_start" ]]; then echo Connected > "$S/cluster"; fi ;;
+  "vm deallocate"*)                     echo "VM deallocated" > "$S/power" ;;
+  "vm auto-shutdown"*--off*)            : > "$S/schedule" ;;
+  "vm auto-shutdown"*--time*)           echo "Enabled $(echo "$args" | sed -E 's/.*--time ([0-9]+).*/\1/')" > "$S/schedule" ;;
+  "vm user update"*)                    echo "$args" | grep -q -- "--ssh-key-value ssh-rsa " || { echo "bad key" >&2; exit 4; } ;;
+  "monitor activity-log list"*)         printf 'Time  Operation  By\n' ;;
+  "network nsg rule list"*direction*)   cat "$S/openings" 2>/dev/null ;;
+  "security jit-policy list"*)          cat "$S/jitpolicy" 2>/dev/null ;;
+  "vm show --resource-group"*"--query id"*) echo "/subscriptions/s/resourceGroups/rg-windfarm-edge/providers/Microsoft.Compute/virtualMachines/vm-windfarm-edge" ;;
+  "rest --method post"*initiate*)       b="$(echo "$args" | sed -E 's/.*--body (.*) --output none/\1/')"; ip="$(echo "$b" | python3 -c "import json,sys; print(json.load(sys.stdin)['virtualMachines'][0]['ports'][0]['allowedSourceAddressPrefix'])")"; printf '%s\tMicrosoftDefenderForCloud-JITRule-1-ABC\n' "$ip" > "$S/openings"; touch "$S/port_open" ;;
+  "network nsg rule list"*)             printf 'Priority  Name\n' ;;
+  "vm run-command invoke"*)             while [[ $# -gt 0 ]]; do [[ "$1" == "--scripts" ]] && { sc="$2"; break; }; shift; done; printf 'Enable succeeded: \n[stdout]\n%s\n' "$sc" ;;
+  *) echo "STUB: unexpected: az $args" >&2; exit 9 ;;
+esac

@@ -1,0 +1,1 @@
+Everything except the last 24 hours. History of the wind farm: 10-minute SCADA periods with energy, lost energy and availability category, downtime events, work orders and parts, alarms, oil samples, blade inspections, budget, market prices, the power forecast for the coming week, contracts, spare parts, technicians, and the catalogue of alarm codes with the procedure for each.

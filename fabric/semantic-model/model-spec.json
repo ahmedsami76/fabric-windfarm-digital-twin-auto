@@ -1,0 +1,603 @@
+{
+ "name": "WindFarm Operations",
+ "tables": [
+  {
+   "name": "Date",
+   "lakehouseTable": "dim_date",
+   "columns": [
+    "Date",
+    "Year",
+    "Quarter",
+    "MonthNo",
+    "Month",
+    "YearMonth",
+    "MonthStart",
+    "ContractYear",
+    "DayOfWeekNo",
+    "DayOfWeek"
+   ]
+  },
+  {
+   "name": "Turbine",
+   "lakehouseTable": "dim_turbine",
+   "columns": [
+    "TurbineId",
+    "Name",
+    "Model",
+    "RatedPowerKw",
+    "String",
+    "Latitude",
+    "Longitude",
+    "CommissionedDate"
+   ]
+  },
+  {
+   "name": "Site",
+   "lakehouseTable": "dim_site",
+   "columns": [
+    "SiteId",
+    "SiteName",
+    "Timezone",
+    "CapacityMw",
+    "PpaPriceUsdPerMwh",
+    "GridEmissionFactorKgCo2PerMwh"
+   ]
+  },
+  {
+   "name": "Scada",
+   "lakehouseTable": "fact_scada_10min",
+   "columns": [
+    "Timestamp",
+    "Date",
+    "TurbineId",
+    "Source",
+    "State",
+    "AvailabilityCategory",
+    "LossCause",
+    "WindSpeed",
+    "AmbientTemp",
+    "AirDensity",
+    "ActivePower",
+    "PowerSetpoint",
+    "PossiblePower",
+    "GearboxOilTemp",
+    "GearboxBearingTemp",
+    "GearboxVibration",
+    "GeneratorWindingTemp",
+    "MainBearingTemp",
+    "EnergyKwh",
+    "PossibleEnergyKwh",
+    "LostEnergyKwh"
+   ]
+  },
+  {
+   "name": "Events",
+   "lakehouseTable": "fact_turbine_events",
+   "columns": [
+    "EventId",
+    "TurbineId",
+    "StartTime",
+    "EndTime",
+    "StartDate",
+    "DurationHours",
+    "AvailabilityCategory",
+    "Cause",
+    "Component",
+    "AlarmCode",
+    "FailureMode",
+    "ResponsibleParty",
+    "Description",
+    "LostEnergyMwh"
+   ]
+  },
+  {
+   "name": "Work Orders",
+   "lakehouseTable": "fact_work_orders",
+   "columns": [
+    "WorkOrderId",
+    "TurbineId",
+    "WorkType",
+    "Priority",
+    "Status",
+    "OpenedDate",
+    "ScheduledDate",
+    "ClosedDate",
+    "Summary",
+    "LaborHours",
+    "TotalCostUsd",
+    "DowntimeHours",
+    "WaitingForPartsHours",
+    "CostBorneBy",
+    "PmResult"
+   ]
+  },
+  {
+   "name": "Curtailments",
+   "lakehouseTable": "fact_curtailments",
+   "columns": [
+    "CurtailmentId",
+    "StartTime",
+    "StartDate",
+    "DurationHours",
+    "Reason",
+    "InstructedBy",
+    "Compensation",
+    "LostEnergyMwh",
+    "AvgRealTimePriceUsdPerMwh"
+   ]
+  },
+  {
+   "name": "Budget",
+   "lakehouseTable": "fact_monthly_budget",
+   "columns": [
+    "YearMonth",
+    "MonthStart",
+    "P50EnergyMwh",
+    "P90EnergyMwh",
+    "LongTermWindSpeed",
+    "BudgetRevenueUsd",
+    "BudgetCorrectiveMaintenanceUsd",
+    "BudgetOpexUsd"
+   ]
+  },
+  {
+   "name": "Market",
+   "lakehouseTable": "fact_market_hourly",
+   "columns": [
+    "Timestamp",
+    "Date",
+    "DayAheadPriceUsdPerMwh",
+    "RealTimePriceUsdPerMwh",
+    "SiteEnergyMwh"
+   ]
+  },
+  {
+   "name": "Forecast",
+   "lakehouseTable": "fact_forecast_hourly",
+   "columns": [
+    "TargetTime",
+    "Date",
+    "ForecastPowerMw",
+    "PowerMwP10",
+    "PowerMwP90",
+    "PossiblePowerMw",
+    "ActualPowerMw",
+    "AbsErrorMw"
+   ]
+  },
+  {
+   "name": "Met",
+   "lakehouseTable": "fact_met_10min",
+   "columns": [
+    "Timestamp",
+    "Date",
+    "Source",
+    "WindSpeed",
+    "AmbientTemp",
+    "AirDensity"
+   ]
+  },
+  {
+   "name": "KPIs",
+   "lakehouseTable": "kpi",
+   "columns": [
+    "KpiId"
+   ]
+  }
+ ],
+ "relationships": [
+  {
+   "fromTable": "Scada",
+   "fromColumn": "Date",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Scada",
+   "fromColumn": "TurbineId",
+   "toTable": "Turbine",
+   "toColumn": "TurbineId",
+   "active": true
+  },
+  {
+   "fromTable": "Events",
+   "fromColumn": "StartDate",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Events",
+   "fromColumn": "TurbineId",
+   "toTable": "Turbine",
+   "toColumn": "TurbineId",
+   "active": true
+  },
+  {
+   "fromTable": "Work Orders",
+   "fromColumn": "OpenedDate",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Work Orders",
+   "fromColumn": "ScheduledDate",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": false
+  },
+  {
+   "fromTable": "Work Orders",
+   "fromColumn": "TurbineId",
+   "toTable": "Turbine",
+   "toColumn": "TurbineId",
+   "active": true
+  },
+  {
+   "fromTable": "Curtailments",
+   "fromColumn": "StartDate",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Budget",
+   "fromColumn": "MonthStart",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Market",
+   "fromColumn": "Date",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Forecast",
+   "fromColumn": "Date",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  },
+  {
+   "fromTable": "Met",
+   "fromColumn": "Date",
+   "toTable": "Date",
+   "toColumn": "Date",
+   "active": true
+  }
+ ],
+ "hidden": [
+  [
+   "KPIs",
+   "KpiId"
+  ],
+  [
+   "Scada",
+   "Date"
+  ],
+  [
+   "Events",
+   "StartDate"
+  ],
+  [
+   "Market",
+   "Date"
+  ],
+  [
+   "Forecast",
+   "Date"
+  ],
+  [
+   "Met",
+   "Date"
+  ],
+  [
+   "Budget",
+   "MonthStart"
+  ],
+  [
+   "Curtailments",
+   "StartDate"
+  ],
+  [
+   "Date",
+   "MonthNo"
+  ],
+  [
+   "Date",
+   "DayOfWeekNo"
+  ]
+ ],
+ "sortBy": [
+  [
+   "Date",
+   "Month",
+   "MonthNo"
+  ],
+  [
+   "Date",
+   "DayOfWeek",
+   "DayOfWeekNo"
+  ]
+ ],
+ "measures": [
+  {
+   "name": "Energy MWh",
+   "folder": "Energy",
+   "format": "#,0",
+   "expression": "DIVIDE(SUM('Scada'[EnergyKwh]), 1000)",
+   "description": "Energy delivered by the turbines."
+  },
+  {
+   "name": "Possible Energy MWh",
+   "folder": "Energy",
+   "format": "#,0",
+   "expression": "DIVIDE(SUM('Scada'[PossibleEnergyKwh]), 1000)",
+   "description": "What the turbines would have delivered in the wind they had, by the power curve at the air density of the moment."
+  },
+  {
+   "name": "Lost Energy MWh",
+   "folder": "Energy",
+   "format": "#,0",
+   "expression": "DIVIDE(SUM('Scada'[LostEnergyKwh]), 1000)",
+   "description": "Possible minus delivered energy in periods when a turbine was stopped or limited. Split it by Scada[LossCause]."
+  },
+  {
+   "name": "Turbine Hours",
+   "folder": "Energy",
+   "format": "#,0",
+   "expression": "DIVIDE(COUNTROWS('Scada'), 6)",
+   "description": "Hours covered by the data, summed over the turbines."
+  },
+  {
+   "name": "Capacity Factor",
+   "folder": "Energy",
+   "format": "0.0%",
+   "expression": "DIVIDE(SUM('Scada'[EnergyKwh]), SUMX('Turbine', 'Turbine'[RatedPowerKw] * CALCULATE(COUNTROWS('Scada'))) / 6)",
+   "description": "Energy as a share of what the turbines would deliver at rated power all the time."
+  },
+  {
+   "name": "Average Wind Speed",
+   "folder": "Energy",
+   "format": "0.0",
+   "expression": "AVERAGE('Scada'[WindSpeed])",
+   "description": "Mean wind speed at the nacelles, m/s."
+  },
+  {
+   "name": "CO2 Avoided t",
+   "folder": "Energy",
+   "format": "#,0",
+   "expression": "DIVIDE([Energy MWh] * MAX('Site'[GridEmissionFactorKgCo2PerMwh]), 1000)",
+   "description": "Energy times the average emission intensity of the grid, in tonnes."
+  },
+  {
+   "name": "Time Availability",
+   "folder": "Availability",
+   "format": "0.00%",
+   "expression": "VAR known = CALCULATE(COUNTROWS('Scada'), KEEPFILTERS('Scada'[AvailabilityCategory] <> \"Information unavailable\")) VAR down = CALCULATE(COUNTROWS('Scada'), KEEPFILTERS('Scada'[AvailabilityCategory] IN {\"Forced outage\", \"Scheduled maintenance\", \"Planned corrective action\"})) RETURN DIVIDE(known - down, known)",
+   "description": "Share of the time in which a turbine was not down for a fault or for maintenance."
+  },
+  {
+   "name": "Energy Availability",
+   "folder": "Availability",
+   "format": "0.00%",
+   "expression": "VAR energy = CALCULATE(SUM('Scada'[EnergyKwh]), KEEPFILTERS('Scada'[AvailabilityCategory] <> \"Information unavailable\")) VAR lost = CALCULATE(SUM('Scada'[LostEnergyKwh]), KEEPFILTERS('Scada'[AvailabilityCategory] <> \"Information unavailable\"), KEEPFILTERS('Scada'[LossCause] IN {\"Component fault\", \"Scheduled maintenance\", \"Corrective maintenance\", \"Technical derate\"})) RETURN DIVIDE(energy, energy + lost)",
+   "description": "Share of the energy that was not lost to the turbine itself."
+  },
+  {
+   "name": "Forced Outage Hours",
+   "folder": "Availability",
+   "format": "#,0.0",
+   "expression": "DIVIDE(CALCULATE(COUNTROWS('Scada'), KEEPFILTERS('Scada'[AvailabilityCategory] = \"Forced outage\")), 6)",
+   "description": "Hours stopped by a fault."
+  },
+  {
+   "name": "Performance Index",
+   "folder": "Performance",
+   "format": "0.000",
+   "expression": "CALCULATE(DIVIDE(SUM('Scada'[EnergyKwh]), SUM('Scada'[PossibleEnergyKwh])), KEEPFILTERS('Scada'[AvailabilityCategory] = \"Full performance\"))",
+   "description": "Energy as a share of possible energy while the turbine ran without any limit. Below 1: worse than the power curve."
+  },
+  {
+   "name": "Average Gearbox Bearing Temp",
+   "folder": "Performance",
+   "format": "0.0",
+   "expression": "AVERAGE('Scada'[GearboxBearingTemp])",
+   "description": "degC."
+  },
+  {
+   "name": "Average Gearbox Vibration",
+   "folder": "Performance",
+   "format": "0.00",
+   "expression": "AVERAGE('Scada'[GearboxVibration])",
+   "description": "mm/s RMS."
+  },
+  {
+   "name": "Curtailed Energy MWh",
+   "folder": "Curtailment",
+   "format": "#,0",
+   "expression": "CALCULATE([Lost Energy MWh], KEEPFILTERS('Scada'[LossCause] = \"Grid curtailment\"))",
+   "description": "Energy not produced because the grid operator or the buyer limited the site."
+  },
+  {
+   "name": "Curtailment Share",
+   "folder": "Curtailment",
+   "format": "0.0%",
+   "expression": "DIVIDE([Curtailed Energy MWh], [Energy MWh] + [Lost Energy MWh])",
+   "description": "Curtailed energy as a share of energy plus all lost energy."
+  },
+  {
+   "name": "Deemed Generation MWh",
+   "folder": "Curtailment",
+   "format": "#,0",
+   "expression": "CALCULATE(SUM('Curtailments'[LostEnergyMwh]), KEEPFILTERS('Curtailments'[Compensation] = \"Paid\"))",
+   "description": "Curtailed energy that the buyer pays for. A site figure: it does not split by turbine."
+  },
+  {
+   "name": "Unpaid Curtailment MWh",
+   "folder": "Curtailment",
+   "format": "#,0",
+   "expression": "CALCULATE(SUM('Curtailments'[LostEnergyMwh]), KEEPFILTERS('Curtailments'[Compensation] = \"Not paid\"))",
+   "description": "Curtailed energy that nobody pays for. A site figure."
+  },
+  {
+   "name": "Failures",
+   "folder": "Reliability",
+   "format": "#,0",
+   "expression": "CALCULATE(COUNTROWS('Events'), KEEPFILTERS('Events'[AvailabilityCategory] = \"Forced outage\"), KEEPFILTERS('Events'[Cause] = \"Component fault\"))",
+   "description": "Faults that needed a technician."
+  },
+  {
+   "name": "Failure Downtime Hours",
+   "folder": "Reliability",
+   "format": "#,0",
+   "expression": "CALCULATE(SUM('Events'[DurationHours]), KEEPFILTERS('Events'[AvailabilityCategory] = \"Forced outage\"), KEEPFILTERS('Events'[Cause] = \"Component fault\"))",
+   "description": "Hours from each fault to the return to service."
+  },
+  {
+   "name": "MTTR Hours",
+   "folder": "Reliability",
+   "format": "#,0.0",
+   "expression": "DIVIDE([Failure Downtime Hours], [Failures])",
+   "description": "Mean time to repair, including waiting for access, parts and people."
+  },
+  {
+   "name": "MTBF Hours",
+   "folder": "Reliability",
+   "format": "#,0",
+   "expression": "DIVIDE([Turbine Hours] - [Failure Downtime Hours], [Failures])",
+   "description": "Mean time between failures: running hours per failure."
+  },
+  {
+   "name": "Downtime Events",
+   "folder": "Reliability",
+   "format": "#,0",
+   "expression": "COUNTROWS('Events')",
+   "description": "Stops and outages of every kind."
+  },
+  {
+   "name": "Open Work Orders",
+   "folder": "Maintenance",
+   "format": "#,0",
+   "expression": "CALCULATE(COUNTROWS('Work Orders'), KEEPFILTERS('Work Orders'[Status] <> \"Closed\"))",
+   "description": "Jobs that are not closed: open, in progress or planned."
+  },
+  {
+   "name": "Repair Cost Paid by Owner USD",
+   "folder": "Maintenance",
+   "format": "#,0",
+   "expression": "CALCULATE(SUM('Work Orders'[TotalCostUsd]), KEEPFILTERS('Work Orders'[WorkType] = \"Corrective\"), KEEPFILTERS('Work Orders'[Status] = \"Closed\"), KEEPFILTERS('Work Orders'[CostBorneBy] = \"Owner\"))",
+   "description": "Closed corrective work invoiced to the owner, by the day the job was opened."
+  },
+  {
+   "name": "Repair Cost Covered by Warranty USD",
+   "folder": "Maintenance",
+   "format": "#,0",
+   "expression": "CALCULATE(SUM('Work Orders'[TotalCostUsd]), KEEPFILTERS('Work Orders'[WorkType] = \"Corrective\"), KEEPFILTERS('Work Orders'[Status] = \"Closed\"), KEEPFILTERS('Work Orders'[CostBorneBy] = \"Warranty\"))",
+   "description": "Closed corrective work that a warranty paid."
+  },
+  {
+   "name": "Repair Cost USD per MWh",
+   "folder": "Maintenance",
+   "format": "0.00",
+   "expression": "DIVIDE([Repair Cost Paid by Owner USD], [Energy MWh])",
+   "description": "Owner-paid repairs per MWh produced."
+  },
+  {
+   "name": "PM Compliance",
+   "folder": "Maintenance",
+   "format": "0.0%",
+   "expression": "VAR due = CALCULATE(COUNTROWS('Work Orders'), KEEPFILTERS(NOT ISBLANK('Work Orders'[PmResult])), USERELATIONSHIP('Work Orders'[ScheduledDate], 'Date'[Date])) VAR in_time = CALCULATE(COUNTROWS('Work Orders'), KEEPFILTERS('Work Orders'[PmResult] = \"Done within a week of the plan\"), USERELATIONSHIP('Work Orders'[ScheduledDate], 'Date'[Date])) RETURN DIVIDE(in_time, due)",
+   "description": "Share of the preventive work due in the period that was done within a week of its planned date."
+  },
+  {
+   "name": "Contract Price USD per MWh",
+   "folder": "Money",
+   "format": "0.00",
+   "expression": "MAX('Site'[PpaPriceUsdPerMwh])",
+   "description": "Price of the power purchase agreement."
+  },
+  {
+   "name": "Revenue USD",
+   "folder": "Money",
+   "format": "#,0",
+   "expression": "([Energy MWh] + [Deemed Generation MWh]) * [Contract Price USD per MWh]",
+   "description": "Energy at the contract price, plus curtailed energy that the buyer pays for. A site figure."
+  },
+  {
+   "name": "Lost Energy Value USD",
+   "folder": "Money",
+   "format": "#,0",
+   "expression": "[Lost Energy MWh] * [Contract Price USD per MWh]",
+   "description": "Lost energy at the contract price."
+  },
+  {
+   "name": "Budget P50 MWh",
+   "folder": "Budget",
+   "format": "#,0",
+   "expression": "SUM('Budget'[P50EnergyMwh])",
+   "description": "Budget energy, whole months."
+  },
+  {
+   "name": "Budget P90 MWh",
+   "folder": "Budget",
+   "format": "#,0",
+   "expression": "SUM('Budget'[P90EnergyMwh])",
+   "description": "The cautious case, whole months."
+  },
+  {
+   "name": "Budget Revenue USD",
+   "folder": "Budget",
+   "format": "#,0",
+   "expression": "SUM('Budget'[BudgetRevenueUsd])",
+   "description": "P50 energy at the contract price."
+  },
+  {
+   "name": "Budget Repair Cost USD",
+   "folder": "Budget",
+   "format": "#,0",
+   "expression": "SUM('Budget'[BudgetCorrectiveMaintenanceUsd])",
+   "description": "Budget for corrective maintenance."
+  },
+  {
+   "name": "Energy vs Budget",
+   "folder": "Budget",
+   "format": "0.0%",
+   "expression": "DIVIDE([Energy MWh], [Budget P50 MWh])",
+   "description": "Energy as a share of the P50 budget. Meaningful for whole months."
+  },
+  {
+   "name": "Captured Price USD per MWh",
+   "folder": "Market",
+   "format": "0.00",
+   "expression": "DIVIDE(SUMX('Market', 'Market'[SiteEnergyMwh] * 'Market'[RealTimePriceUsdPerMwh]), SUM('Market'[SiteEnergyMwh]))",
+   "description": "The real-time market price weighted by when the site produced."
+  },
+  {
+   "name": "Mean Real-Time Price USD per MWh",
+   "folder": "Market",
+   "format": "0.00",
+   "expression": "AVERAGE('Market'[RealTimePriceUsdPerMwh])",
+   "description": "Plain average of the hourly real-time price."
+  },
+  {
+   "name": "Forecast Error",
+   "folder": "Market",
+   "format": "0.0%",
+   "expression": "DIVIDE(AVERAGE('Forecast'[AbsErrorMw]), MAX('Site'[CapacityMw]))",
+   "description": "Mean absolute difference between the day-ahead forecast and possible power, as a share of the site's capacity."
+  },
+  {
+   "name": "Wind Index",
+   "folder": "Energy",
+   "format": "0.00",
+   "expression": "DIVIDE(AVERAGE('Met'[WindSpeed]), AVERAGE('Budget'[LongTermWindSpeed]))",
+   "description": "Mean wind speed at the met mast relative to the long-term mean of the same months. Meaningful for whole months."
+  }
+ ]
+}

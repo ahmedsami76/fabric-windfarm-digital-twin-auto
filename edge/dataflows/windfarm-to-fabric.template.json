@@ -1,0 +1,28 @@
+{
+  "mode": "Enabled",
+  "operations": [
+    {
+      "operationType": "Source",
+      "sourceSettings": {
+        "endpointRef": "default",
+        "serializationFormat": "Json",
+        "dataSources": [
+          "contoso/windfarm/+/+/telemetry",
+          "contoso/windfarm/+/+/weather",
+          "contoso/windfarm/+/+/alarm",
+          "contoso/windfarm/+/+/state",
+          "contoso/windfarm/+/+/asset",
+          "contoso/windfarm/+/+/heartbeat",
+          "contoso/windfarm/+/+/command"
+        ]
+      }
+    },
+    {
+      "operationType": "Destination",
+      "destinationSettings": {
+        "endpointRef": "__ENDPOINT_NAME__",
+        "dataDestination": "__EVENTSTREAM_TOPIC__"
+      }
+    }
+  ]
+}

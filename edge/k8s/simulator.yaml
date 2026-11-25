@@ -1,0 +1,145 @@
+# Wind farm simulator: publishes telemetry to the Azure IoT Operations MQTT broker.
+# Applied by edge/scripts/05-deploy-simulator.sh, which also creates the
+# "aio-ca-trust-bundle" ConfigMap in this namespace (a copy of the broker's CA).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: windfarm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: windfarm-simulator
+  namespace: windfarm
+---
+# The simulator may read one object outside its own namespace: the broker's CA trust
+# bundle. Azure IoT Operations rotates that CA; reading it at start keeps the simulator
+# connected after a rotation without anyone copying the certificate again.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: windfarm-read-broker-ca
+  namespace: azure-iot-operations
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["azure-iot-operations-aio-ca-trust-bundle"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: windfarm-read-broker-ca
+  namespace: azure-iot-operations
+subjects:
+  - kind: ServiceAccount
+    name: windfarm-simulator
+    namespace: windfarm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: windfarm-read-broker-ca
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: windfarm-simulator-config
+  namespace: windfarm
+data:
+  # MQTT broker of Azure IoT Operations: TLS on 18883, service account token auth.
+  MQTT_HOST: "aio-broker.azure-iot-operations.svc.cluster.local"
+  MQTT_PORT: "18883"
+  MQTT_AUTH: "k8s-sat"
+  MQTT_TLS: "true"
+  MQTT_PROTOCOL: "v5"
+  MQTT_CA_FILE: "/var/run/certs/ca.crt"
+  # Read at start and used instead of the mounted copy when it differs. Empty disables it.
+  MQTT_CA_CONFIGMAP: "azure-iot-operations/azure-iot-operations-aio-ca-trust-bundle/ca.crt"
+  MQTT_SAT_FILE: "/var/run/secrets/tokens/broker-sat"
+  TOPIC_ROOT: "contoso/windfarm"
+  # Publishing cadence in seconds.
+  TELEMETRY_INTERVAL_S: "5"
+  WEATHER_INTERVAL_S: "10"
+  # Randomisation. Leave SEED empty for a different run every time the pod starts.
+  SEED: ""
+  # climate: the wind follows the site's climate (season, time of day, weather systems),
+  #          the same signal as the history and the forecast in Fabric. It can be calm.
+  # regime:  a random mean between WIND_REGIME_MIN and WIND_REGIME_MAX; never calm.
+  # For a demo, set the wind you want with: simctl wind --mean 11 --duration 60m
+  WIND_MODEL: "climate"
+  WIND_MEAN: "9.0"
+  WIND_REGIME_MIN: "6.5"
+  WIND_REGIME_MAX: "12.5"
+  AMBIENT_MEAN_C: "18"
+  # Apply the standing conditions of the site definition (worn gearbox on WT-07, yaw offset
+  # on WT-05, eroded blades on WT-09), which the history in Fabric builds up to.
+  STANDING_CONDITIONS: "true"
+  # Small random events across the site per hour (short communication drops,
+  # cable untwists, minor yaw offsets, sensor freezes). 0 turns them off.
+  SPONTANEOUS_EVENTS_PER_HOUR: "1.0"
+  LOG_LEVEL: "INFO"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: windfarm-simulator
+  namespace: windfarm
+  labels:
+    app: windfarm-simulator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # one MQTT client id, so never two pods at once
+  selector:
+    matchLabels:
+      app: windfarm-simulator
+  template:
+    metadata:
+      labels:
+        app: windfarm-simulator
+    spec:
+      serviceAccountName: windfarm-simulator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: simulator
+          image: windfarm-simulator:1.2.0
+          imagePullPolicy: Never   # the image is imported into K3s, not pulled
+          envFrom:
+            - configMapRef:
+                name: windfarm-simulator-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /tmp/windfarm-sim-alive) )) -lt 60
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: broker-sat
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+            - name: trust-bundle
+              mountPath: /var/run/certs
+              readOnly: true
+      volumes:
+        - name: broker-sat
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: broker-sat
+                  audience: aio-internal    # must match the broker's BrokerAuthentication
+                  expirationSeconds: 86400
+        - name: trust-bundle
+          configMap:
+            name: aio-ca-trust-bundle

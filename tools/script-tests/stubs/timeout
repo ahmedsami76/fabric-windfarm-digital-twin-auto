@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stand-in for timeout. infra/vm.sh uses it to try port 22, which is answered from the file port_open.
+# Any other command is run as it is.
+if [[ "${2:-}" == bash && "$*" == *"/dev/tcp/"* ]]; then [[ -f "$STUB_DIR/port_open" ]]; exit; fi
+shift; exec "$@"

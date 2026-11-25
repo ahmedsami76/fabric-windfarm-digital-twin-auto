@@ -1,0 +1,170 @@
+// =============================================================================
+// 02-update-policies.kql : functions that shape raw messages into typed rows,
+// the update policies that run them at ingestion time, and three helper functions.
+// Run once, after 01-tables.kql, the same way (one block, no empty lines).
+// =============================================================================
+
+.execute database script <|
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: telemetry messages to TurbineTelemetry') Expand_TurbineTelemetry() {
+    RawEvents
+    | where messageType == 'telemetry'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        TurbineId = assetId,
+        Seq = seq,
+        State = tostring(data['state']),
+        WindSpeed = toreal(data['windSpeed']),
+        WindDirection = toreal(data['windDirection']),
+        AmbientTemp = toreal(data['ambientTemp']),
+        ActivePower = toreal(data['activePower']),
+        ReactivePower = toreal(data['reactivePower']),
+        PowerSetpoint = toreal(data['powerSetpoint']),
+        RotorSpeed = toreal(data['rotorSpeed']),
+        GeneratorSpeed = toreal(data['generatorSpeed']),
+        PitchAngle = toreal(data['pitchAngle']),
+        NacelleDirection = toreal(data['nacelleDirection']),
+        YawError = toreal(data['yawError']),
+        GearboxOilTemp = toreal(data['gearboxOilTemp']),
+        GearboxBearingTemp = toreal(data['gearboxBearingTemp']),
+        GearboxOilPressure = toreal(data['gearboxOilPressure']),
+        GearboxVibration = toreal(data['gearboxVibration']),
+        GeneratorWindingTemp = toreal(data['generatorWindingTemp']),
+        GeneratorBearingTemp = toreal(data['generatorBearingTemp']),
+        MainBearingTemp = toreal(data['mainBearingTemp']),
+        NacelleTemp = toreal(data['nacelleTemp']),
+        TransformerTemp = toreal(data['transformerTemp']),
+        TowerVibration = toreal(data['towerVibration']),
+        HydraulicPressure = toreal(data['hydraulicPressure']),
+        GridVoltage = toreal(data['gridVoltage']),
+        GridFrequency = toreal(data['gridFrequency']),
+        EnergyTotal = toreal(data['energyTotal']),
+        IngestedAt = ingestion_time()
+}
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: weather messages to WeatherObservations') Expand_WeatherObservations() {
+    RawEvents
+    | where messageType == 'weather'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        StationId = assetId,
+        Seq = seq,
+        WindSpeed = toreal(data['windSpeed']),
+        WindDirection = toreal(data['windDirection']),
+        WindGust = toreal(data['windGust']),
+        AmbientTemp = toreal(data['ambientTemp']),
+        Pressure = toreal(data['pressure']),
+        Humidity = toreal(data['humidity']),
+        AirDensity = toreal(data['airDensity']),
+        IngestedAt = ingestion_time()
+}
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: alarm messages to AlarmEvents') Expand_AlarmEvents() {
+    RawEvents
+    | where messageType == 'alarm'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        TurbineId = assetId,
+        Seq = seq,
+        AlarmId = tostring(data['alarmId']),
+        AlarmCode = tostring(data['alarmCode']),
+        Status = tostring(data['status']),
+        Severity = tostring(data['severity']),
+        Component = tostring(data['component']),
+        Description = tostring(data['description']),
+        Value = toreal(data['value']),
+        Threshold = toreal(data['threshold']),
+        Unit = tostring(data['unit']),
+        DurationSeconds = tolong(data['durationSeconds']),
+        SopId = tostring(data['sop']),
+        IngestedAt = ingestion_time()
+}
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: state messages to TurbineStateChanges') Expand_TurbineStateChanges() {
+    RawEvents
+    | where messageType == 'state'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        TurbineId = assetId,
+        Seq = seq,
+        PreviousState = tostring(data['previousState']),
+        State = tostring(data['state']),
+        Reason = tostring(data['reason']),
+        IngestedAt = ingestion_time()
+}
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: asset messages to AssetRegistry') Expand_AssetRegistry() {
+    RawEvents
+    | where messageType == 'asset'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        AssetId = assetId,
+        AssetType = tostring(data['assetType']),
+        Name = tostring(data['name']),
+        Model = tostring(data['model']),
+        Manufacturer = tostring(data['manufacturer']),
+        SerialNumber = tostring(data['serialNumber']),
+        RatedPowerKw = toreal(data['ratedPowerKw']),
+        RotorDiameterM = toreal(data['rotorDiameterM']),
+        HubHeightM = toreal(data['hubHeightM']),
+        Latitude = toreal(data['latitude']),
+        Longitude = toreal(data['longitude']),
+        ElevationM = toreal(data['elevationM']),
+        LocalX = toreal(data['localX']),
+        LocalY = toreal(data['localY']),
+        CollectorString = tostring(data['string']),
+        CommissionedDate = todatetime(data['commissionedDate']),
+        IngestedAt = ingestion_time()
+}
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: heartbeat messages to EdgeHeartbeats') Expand_EdgeHeartbeats() {
+    RawEvents
+    | where messageType == 'heartbeat'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        EdgeId = assetId,
+        Seq = seq,
+        SimulatorVersion = tostring(data['simulatorVersion']),
+        UptimeSeconds = tolong(data['uptimeSeconds']),
+        TurbinesReporting = tolong(data['turbinesReporting']),
+        TurbinesTotal = tolong(data['turbinesTotal']),
+        MessagesPublished = tolong(data['messagesPublished']),
+        IngestedAt = ingestion_time()
+}
+//
+// Update policies. IsTransactional is false so that a raw message always lands in
+// RawEvents even if shaping it fails; failures show in ".show ingestion failures".
+.alter table TurbineTelemetry policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_TurbineTelemetry()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+.alter table WeatherObservations policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_WeatherObservations()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+.alter table AlarmEvents policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_AlarmEvents()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+.alter table TurbineStateChanges policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_TurbineStateChanges()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+.alter table AssetRegistry policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_AssetRegistry()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+.alter table EdgeHeartbeats policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_EdgeHeartbeats()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+//
+// ---- Helper functions used by the validation queries and by later phases ----
+.create-or-alter function with (folder = 'Views', docstring = 'Latest telemetry row per turbine') TurbineLatest() {
+    TurbineTelemetry
+    | where Timestamp > ago(1h)
+    | summarize arg_max(Timestamp, *) by TurbineId
+}
+//
+.create-or-alter function with (folder = 'Views', docstring = 'Current attributes of every asset') CurrentAssets() {
+    AssetRegistry
+    | summarize arg_max(Timestamp, *) by AssetId
+}
+//
+.create-or-alter function with (folder = 'Views', docstring = 'Alarms that were raised and have not cleared. Alarms from before the latest start of the edge simulator are left out: the controller that raised them is gone and will never clear them.') ActiveAlarms() {
+    let lastStart = toscalar(EdgeHeartbeats | summarize arg_max(Timestamp, UptimeSeconds) | project Timestamp - UptimeSeconds * 1s);
+    AlarmEvents
+    | where AlarmCode != 'COMMS-RESTORED'
+    | summarize arg_max(Timestamp, *) by AlarmId
+    | where Status == 'raised'
+    | where isnull(lastStart) or Timestamp >= lastStart - 1m
+    | project RaisedAt = Timestamp, TurbineId, AlarmCode, Severity, Component, Description, Value, Threshold, Unit, SopId, AlarmId
+}

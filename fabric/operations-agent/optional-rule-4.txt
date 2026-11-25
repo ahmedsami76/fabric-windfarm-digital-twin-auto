@@ -1,0 +1,1 @@
+4. Alert me when the vibration of a turbine is more than 2 mm/s above the fleet. Information about this can be found in the 'GearboxVsFleetLive' table, each turbine identified by the 'TurbineId' column; the value is the column 'VibrationVsFleet'.

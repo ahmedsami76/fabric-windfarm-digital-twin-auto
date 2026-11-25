@@ -1,0 +1,29 @@
+{
+  "name": "windfarm-twin-workbench",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Builds the standalone preview of the wind farm twin and runs the tests of its code. The app itself is created by create-app.sh from the Rayfin template plus the files in overlay/.",
+  "type": "module",
+  "scripts": {
+    "preview": "node build-preview.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "screenshots": "node screenshots.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/mssql": "^12.3.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "0.187.0",
+    "esbuild": "^0.28.2",
+    "mssql": "^12.8.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "three": "0.187.0",
+    "typescript": "~6.0.2",
+    "vitest": "^4.1.8",
+    "zod": "^4.0.0"
+  }
+}

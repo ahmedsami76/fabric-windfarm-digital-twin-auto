@@ -1,0 +1,13 @@
+turbineId,siteId,name,model,manufacturer,serialNumber,ratedPowerKw,rotorDiameterM,hubHeightM,latitude,longitude,elevationM,localX,localY,string,commissionedDate
+WT-01,northwind-ridge,Turbine 01,CT-4.2-150,Contoso Turbines,CT42-126225,4200.0,150.0,105.0,32.221064,-100.502297,792.2,-2100.0,675.0,A,2021-03-29
+WT-02,northwind-ridge,Turbine 02,CT-4.2-150,Contoso Turbines,CT42-356787,4200.0,150.0,105.0,32.219716,-100.49513,795.1,-1425.0,525.0,A,2021-05-10
+WT-03,northwind-ridge,Turbine 03,CT-4.2-150,Contoso Turbines,CT42-246316,4200.0,150.0,105.0,32.218369,-100.487167,798.6,-675.0,375.0,A,2021-04-27
+WT-04,northwind-ridge,Turbine 04,CT-4.2-150,Contoso Turbines,CT42-809570,4200.0,150.0,105.0,32.212979,-100.483982,761.8,-375.0,-225.0,A,2021-03-27
+WT-05,northwind-ridge,Turbine 05,CT-4.2-150,Contoso Turbines,CT42-191161,4200.0,150.0,105.0,32.22039,-100.480796,777.5,-75.0,600.0,B,2021-07-18
+WT-06,northwind-ridge,Turbine 06,CT-4.2-150,Contoso Turbines,CT42-133326,4200.0,150.0,105.0,32.204894,-100.477611,767.3,225.0,-1125.0,B,2021-06-17
+WT-07,northwind-ridge,Turbine 07,CT-4.2-150,Contoso Turbines,CT42-198246,4200.0,150.0,105.0,32.210958,-100.477611,788.5,225.0,-450.0,B,2021-03-08
+WT-08,northwind-ridge,Turbine 08,CT-4.2-150,Contoso Turbines,CT42-343962,4200.0,150.0,105.0,32.216347,-100.475222,831.7,450.0,150.0,B,2021-04-25
+WT-09,northwind-ridge,Turbine 09,CT-4.2-150,Contoso Turbines,CT42-731262,4200.0,150.0,105.0,32.221737,-100.472833,762.8,675.0,750.0,C,2021-07-08
+WT-10,northwind-ridge,Turbine 10,CT-4.2-150,Contoso Turbines,CT42-688508,4200.0,150.0,105.0,32.216347,-100.468055,789.6,1125.0,150.0,C,2021-03-07
+WT-11,northwind-ridge,Turbine 11,CT-4.2-150,Contoso Turbines,CT42-850800,4200.0,150.0,105.0,32.212979,-100.462481,764.1,1650.0,-225.0,C,2021-04-20
+WT-12,northwind-ridge,Turbine 12,CT-4.2-150,Contoso Turbines,CT42-539898,4200.0,150.0,105.0,32.217021,-100.457703,787.0,2100.0,225.0,C,2021-07-18

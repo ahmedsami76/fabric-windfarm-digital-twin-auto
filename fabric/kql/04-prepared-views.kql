@@ -1,0 +1,101 @@
+// Phase 2: prepared views of the live data. Run once in the KQL database WindFarmEH, after
+// 01-tables.kql and 02-update-policies.kql. Run each command separately (select it, then Run).
+// The script can be run again: every command replaces what it created.
+//
+// Scada10Min gives the live telemetry in the shape of the Lakehouse table ops_scada_10min, with
+// the same definitions that notebook 05_build_model_tables uses for the semantic model. Use it
+// for questions about the last hours that must not wait for the Lakehouse, for example from a
+// data agent or a Real-Time Dashboard. The turbine model's values (cut-in 3 m/s, rated wind
+// 12 m/s, cut-out 25 m/s, rated power 4,200 kW) are those of data/reference/site.json.
+
+.create-or-alter function with (folder = 'Prepared', docstring = 'Live telemetry as 10-minute periods per turbine, with the columns and definitions of ops_scada_10min: state for most of the period, possible power from the power curve at the air density of the moment, availability category, loss cause, energy and lost energy. Complete periods only.') Scada10Min(lookback: timespan = 1d) {
+    let cutIn = 3.0;
+    let ratedWind = 12.0;
+    let cutOut = 25.0;
+    let ratedKw = 4200.0;
+    let standardDensity = 1.225;
+    let density = WeatherObservations
+        | where Timestamp > ago(lookback)
+        | summarize SiteDensity = avg(AirDensity) by Timestamp = bin(Timestamp, 10m);
+    let meanDensity = toscalar(density | summarize avg(SiteDensity));
+    let states = TurbineTelemetry
+        | where Timestamp > ago(lookback)
+        | summarize StateSamples = count() by TurbineId, Timestamp = bin(Timestamp, 10m), State
+        | summarize arg_max(StateSamples, State) by TurbineId, Timestamp
+        | project TurbineId, Timestamp, State;
+    let periods = TurbineTelemetry
+        | where Timestamp > ago(lookback)
+        | summarize Samples = count(), WindSpeed = avg(WindSpeed), AmbientTemp = avg(AmbientTemp), ActivePower = avg(ActivePower),
+                    PowerSetpoint = avg(PowerSetpoint), GearboxOilTemp = avg(GearboxOilTemp), GearboxBearingTemp = avg(GearboxBearingTemp),
+                    GearboxVibration = avg(GearboxVibration), GeneratorWindingTemp = avg(GeneratorWindingTemp), MainBearingTemp = avg(MainBearingTemp)
+                by TurbineId, Timestamp = bin(Timestamp, 10m);
+    let fullSamples = toscalar(periods | summarize max(Samples));
+    periods
+    | where Timestamp < bin(now(), 10m)
+    | join kind=inner states on TurbineId, Timestamp
+    | join kind=leftouter density on Timestamp
+    | extend AirDensity = coalesce(SiteDensity, meanDensity, standardDensity), Coverage = min_of(1.0, todouble(Samples) / fullSamples)
+    | extend EqWind = WindSpeed * pow(AirDensity / standardDensity, 1.0 / 3.0)
+    | extend PossiblePower = iff(EqWind < cutIn or EqWind > cutOut, 0.0,
+                                 ratedKw * (pow(min_of(max_of(EqWind, cutIn), ratedWind), 3) - pow(cutIn, 3)) / (pow(ratedWind, 3) - pow(cutIn, 3)))
+    | extend AvailabilityCategory = case(
+        Coverage < 0.5, 'Information unavailable',
+        State == 'RUNNING', 'Full performance',
+        State == 'DERATED', 'Partial performance',
+        State == 'CURTAILED' and ActivePower <= 0.01 * ratedKw, 'Requested shutdown',
+        State == 'CURTAILED', 'Partial performance',
+        State in ('IDLE', 'STOPPED_HIGH_WIND'), 'Out of environmental specification',
+        State == 'PAUSED', 'Technical standby',
+        State == 'STOPPED', 'Requested shutdown',
+        State == 'MAINTENANCE', 'Scheduled maintenance',
+        State == 'FAULT', 'Forced outage',
+        'Information unavailable')
+    | extend LossCause = case(
+        Coverage < 0.5 or State == 'RUNNING', '',
+        State == 'DERATED', 'Technical derate',
+        State == 'CURTAILED', 'Grid curtailment',
+        State == 'IDLE', 'Low wind',
+        State == 'STOPPED_HIGH_WIND', 'High wind',
+        State == 'PAUSED', 'Cable untwist',
+        State == 'STOPPED', 'Operator stop',
+        State == 'MAINTENANCE', 'Scheduled maintenance',
+        State == 'FAULT', 'Component fault',
+        '')
+    | extend EnergyKwh = max_of(ActivePower, 0.0) / 6 * Coverage, PossibleEnergyKwh = PossiblePower / 6 * Coverage
+    | extend LostEnergyKwh = iff(isempty(LossCause) or LossCause == 'Low wind', 0.0,
+                                 max_of(PossiblePower - max_of(ActivePower, 0.0), 0.0) / 6 * Coverage)
+    | project Timestamp, TurbineId, State, AvailabilityCategory, LossCause, WindSpeed = round(WindSpeed, 2), AmbientTemp = round(AmbientTemp, 2),
+              AirDensity = round(AirDensity, 4), ActivePower = round(ActivePower, 2), PowerSetpoint = round(PowerSetpoint, 2),
+              PossiblePower = round(PossiblePower, 1), GearboxOilTemp = round(GearboxOilTemp, 2), GearboxBearingTemp = round(GearboxBearingTemp, 2),
+              GearboxVibration = round(GearboxVibration, 2), GeneratorWindingTemp = round(GeneratorWindingTemp, 2),
+              MainBearingTemp = round(MainBearingTemp, 2), EnergyKwh = round(EnergyKwh, 3), PossibleEnergyKwh = round(PossibleEnergyKwh, 3),
+              LostEnergyKwh = round(LostEnergyKwh, 3)
+}
+
+.create-or-alter function with (folder = 'Prepared', docstring = 'One row per alarm: when it was raised, when it cleared, how long it lasted. Active is true while it has not cleared.') AlarmIntervals(lookback: timespan = 7d) {
+    AlarmEvents
+    | where Timestamp > ago(lookback) and AlarmCode != 'COMMS-RESTORED'
+    | summarize RaisedAt = minif(Timestamp, Status == 'raised'), ClearedAt = maxif(Timestamp, Status != 'raised'),
+                take_any(AlarmCode, Severity, Component, Description, SopId) by TurbineId, AlarmId
+    | where isnotnull(RaisedAt)
+    | extend ClearedAt = iff(ClearedAt > RaisedAt, ClearedAt, datetime(null))
+    | extend Active = isnull(ClearedAt), DurationMinutes = round((coalesce(ClearedAt, now()) - RaisedAt) / 1m, 1)
+    | project TurbineId, AlarmCode, Severity, Component, Description, RaisedAt, ClearedAt, DurationMinutes, Active, SopId, AlarmId
+}
+
+.create-or-alter function with (folder = 'Prepared', docstring = 'Gearbox bearing temperature, oil temperature and vibration of each running turbine against the median of the fleet over the window. A turbine that stands out here and in the history has a standing condition; one that stands out only here has a new problem.') GearboxVsFleet(window: timespan = 15m) {
+    let recent = TurbineTelemetry
+        | where Timestamp > ago(window) and State in ('RUNNING', 'DERATED')
+        | summarize BearingTemp = avg(GearboxBearingTemp), OilTemp = avg(GearboxOilTemp), Vibration = avg(GearboxVibration), PowerKw = avg(ActivePower) by TurbineId;
+    let fleetBearingTemp = toscalar(recent | summarize percentile(BearingTemp, 50));
+    let fleetVibration = toscalar(recent | summarize percentile(Vibration, 50));
+    recent
+    | project TurbineId, PowerKw = round(PowerKw, 0), BearingTemp = round(BearingTemp, 1), BearingTempVsFleet = round(BearingTemp - fleetBearingTemp, 1),
+              OilTemp = round(OilTemp, 1), Vibration = round(Vibration, 2), VibrationVsFleet = round(Vibration - fleetVibration, 2)
+    | order by VibrationVsFleet desc
+}
+
+// Check: the last complete periods, one row per availability category.
+Scada10Min(3h)
+| summarize Periods = count(), EnergyMwh = round(sum(EnergyKwh) / 1000, 2), LostEnergyMwh = round(sum(LostEnergyKwh) / 1000, 2) by AvailabilityCategory, LossCause
+| order by Periods desc

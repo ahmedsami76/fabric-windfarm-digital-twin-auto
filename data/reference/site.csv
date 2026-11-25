@@ -1,0 +1,2 @@
+siteId,siteName,operator,latitude,longitude,timezone,capacityMw,turbineCount,ppaPriceUsdPerMwh,prevailingWindDirectionDeg,gridEmissionFactorKgCo2PerMwh
+northwind-ridge,Northwind Ridge Wind Farm,Contoso Energy,32.215,-100.48,America/Chicago,50.4,12,38.5,195.0,370.0

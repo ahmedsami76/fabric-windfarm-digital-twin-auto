@@ -1,0 +1,1 @@
+Live data of the wind farm from the edge, a few seconds old: telemetry of every turbine, weather at the met mast, alarms as they are raised and cleared, and state changes. Only for right now and the last 24 hours. Not for periods of days or months, not for what an alarm code means, not for forecasts.

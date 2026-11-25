@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Stand-in for the Azure CLI in the scenario tests of infra/08-create-command-path.sh and of
+# infra/06-connect-edge-to-fabric.sh: the Fabric API for one workspace and one eventstream, and
+# the data flow commands of Azure IoT Operations, for the command path and for the telemetry. It answers
+# from files in $STUB_DIR and logs every call. The shapes of the Fabric answers are those of the REST
+# reference on Microsoft Learn; that the service answers like this is not shown by these tests.
+S="$STUB_DIR"; echo "az $*" >> "$S/calls.log"
+args="$*"
+WS=638251b5-0826-4632-b8f1-642e05d39629; ES=eeeeeeee-1111-2222-3333-444444444444
+SRC=aaaaaaaa-0000-0000-0000-00000000000a; DST=dddddddd-0000-0000-0000-00000000000d
+url="$(sed -E 's/.*--url ([^ ]+).*/\1/' <<< "$args")"
+case "$args" in
+  "account show"*) echo user ;;
+  "account set"*) ;;
+  "extension show"*) if [[ -f "$S/no_cli_extension" ]]; then echo "ERROR: The extension azure-iot-ops is not installed." >&2; exit 1; fi ;;
+  # Neither script may look for a newer extension: that search has no time limit (Phase 5 log, obstacle D).
+  "extension add --upgrade"*) echo "STUB: a search for a newer extension" >&2; exit 9 ;;
+  "extension add"*) if [[ -f "$S/no_network" ]]; then echo "ERROR: Connection error while attempting to download the extension index." >&2; exit 1; fi; rm -f "$S/no_cli_extension" ;;
+  # The telemetry's data flow and endpoint (infra/06): what is deployed is kept in two files.
+  "iot ops dataflow show"*"--name windfarm-to-fabric"*dataDestination*) cat "$S/telemetry_topic" 2>/dev/null || { echo "ERROR: (ResourceNotFound)" >&2; exit 3; } ;;
+  "iot ops dataflow show"*"--name windfarm-to-fabric"*) echo "windfarm-to-fabric  Enabled  Succeeded" ;;
+  "iot ops dataflow endpoint show"*"--name fabric-eventstream"*) cat "$S/telemetry_host" 2>/dev/null || { echo "ERROR: (ResourceNotFound)" >&2; exit 3; } ;;
+  "iot ops dataflow endpoint create fabric-realtime"*"--name fabric-eventstream"*) sed -E 's/.*--host ([^ ]+).*/\1/' <<< "$args" > "$S/telemetry_host" ;;
+  "iot ops dataflow apply"*"--name windfarm-to-fabric"*)
+    config="$(sed -E 's/.*--config-file ([^ ]+).*/\1/' <<< "$args")"; cp "$config" "$S/applied.json"
+    sed -n 's/.*"dataDestination": "\([^"]*\)".*/\1/p' "$config" > "$S/telemetry_topic" ;;
+  "rest --resource https://api.fabric.microsoft.com --method get"*)
+    case "$url" in
+      */v1/workspaces)
+        if [[ -f "$S/no_workspace" ]]; then echo '{"value": [{"id": "x", "displayName": "Sales"}]}'
+        else echo '{"value": [{"id": "x", "displayName": "Sales"}, {"id": "'$WS'", "displayName": "WindFarmDigitalTwin"}]}'; fi ;;
+      */workspaces/$WS/eventstreams)
+        if [[ -f "$S/eventstream" ]]; then echo '{"value": [{"id": "other", "displayName": "es-windfarm-edge"}, {"id": "'$ES'", "displayName": "WindFarmCommands"}]}'
+        else echo '{"value": [{"id": "other", "displayName": "es-windfarm-edge"}]}'; fi ;;
+      */eventstreams/$ES/topology)
+        destinations='[{"id": "kql", "name": "ToEventhouse", "type": "Eventhouse"}, {"id": "'$DST'", "name": "CommandOut", "type": "CustomEndpoint", "inputNodes": [{"name": "WindFarmCommands-stream"}]}]'
+        [[ -f "$S/no_destination" ]] && destinations='[]'
+        echo '{"sources": [{"id": "'$SRC'", "name": "CommandIn", "type": "CustomEndpoint"}], "destinations": '"$destinations"', "streams": [{"name": "WindFarmCommands-stream", "type": "DefaultStream"}], "operators": []}' ;;
+      */destinations/$DST/connection)
+        left="$(cat "$S/connection_not_ready" 2>/dev/null || echo 0)"
+        if [[ "$left" -gt 0 ]]; then echo $((left - 1)) > "$S/connection_not_ready"; echo "ERROR: (EventstreamNotRunning) The destination is not ready." >&2; exit 1; fi
+        echo '{"type": "CustomEndpoint", "fullyQualifiedNamespace": "esehns-abc123.servicebus.windows.net", "eventHubName": "es_0f0f0f0f", "consumerGroupName": "CommandOut-cg", "accessKeys": {"primaryKey": "K3y~never.shown", "primaryConnectionString": "Endpoint=sb://esehns-abc123.servicebus.windows.net/;SharedAccessKey=K3y~never.shown"}}' ;;
+      *) echo "STUB: unexpected Fabric GET $url" >&2; exit 9 ;;
+    esac ;;
+  "rest --resource https://api.fabric.microsoft.com --method post"*)
+    if [[ -f "$S/create_refused" ]]; then echo 'ERROR: Bad Request({"errorCode": "InvalidDefinition", "message": "The eventstream definition is not valid."})' >&2; exit 1; fi
+    sed -E 's/.*--body (.*) --output none.*/\1/' <<< "$args" > "$S/posted.json"
+    touch "$S/eventstream" ;;
+  "rest --resource https://api.fabric.microsoft.com --method delete"*) rm -f "$S/eventstream" ;;
+  "iot ops dataflow endpoint create fabric-realtime"*) touch "$S/endpoint" ;;
+  "iot ops dataflow apply"*) cp "$(sed -E 's/.*--config-file ([^ ]+).*/\1/' <<< "$args")" "$S/applied.json"; touch "$S/dataflow" ;;
+  "iot ops dataflow endpoint show"*) [[ -f "$S/endpoint" ]] && echo "fabric-commands  esehns-abc123.servicebus.windows.net:9093  CommandOut-cg  Succeeded" || { echo "ERROR: (ResourceNotFound)" >&2; exit 3; } ;;
+  "iot ops dataflow show"*) [[ -f "$S/dataflow" ]] && echo "fabric-to-windfarm-control  Enabled  Succeeded" || { echo "ERROR: (ResourceNotFound)" >&2; exit 3; } ;;
+  "iot ops dataflow endpoint delete"*) rm -f "$S/endpoint" ;;
+  "iot ops dataflow delete"*) rm -f "$S/dataflow" ;;
+  *) echo "STUB: unexpected az $args" >&2; exit 9 ;;
+esac

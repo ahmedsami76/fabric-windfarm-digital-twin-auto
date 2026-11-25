@@ -1,0 +1,18 @@
+// =============================================================================
+// 91-repair-wizard-columns.kql : remove the columns that the Get data wizard adds
+// to RawEvents when it is finished with a mapping of its own (step 6.7).
+// Run only after the Eventhouse destination has been recreated with the existing
+// mapping RawEvents_mapping; see "RawEvents has the columns schemaVersion_1 and
+// seq_1" in docs/troubleshooting.md. Each command is its own block.
+// =============================================================================
+
+.drop column RawEvents.schemaVersion_1 ifexists
+
+.drop column RawEvents.seq_1 ifexists
+
+.drop table RawEvents ingestion json mapping 'RawEvents_mapping_1'
+
+// Check: seven columns, in this order: messageType, schemaVersion, siteId, assetId, timestamp, seq, data.
+RawEvents
+| getschema
+| project ColumnOrdinal, ColumnName, ColumnType

@@ -1,0 +1,12 @@
+technicianId,name,role,discipline,certifications,crew,onCallRoleId
+TECH-01,Maria Alvarez,Lead wind technician,Maintenance,GWO BST;GWO ART;HV switching;Crane signaller,A,TECH-01
+TECH-02,Daniel Okafor,Wind technician,Maintenance,GWO BST;GWO ART;Hydraulics level 2,A,TECH-02
+TECH-03,Priya Nair,Wind technician,Maintenance,GWO BST;Blade repair level 2;Rope access,B,TECH-03
+TECH-04,Lucas Meyer,Wind technician,Maintenance,GWO BST;GWO ART;Converter level 2,B,
+TECH-05,Hannah Kim,Wind technician,Maintenance,GWO BST;Drone pilot;Blade inspection,A,
+TECH-06,Omar Haddad,Apprentice wind technician,Maintenance,GWO BST,B,
+ENG-01,Elena Petrova,"Reliability engineer, drivetrain",Engineering,Vibration analyst category II;Oil analysis,,ENG-01
+ENG-02,Samuel Wright,Electrical engineer,Engineering,HV authorised person;Protection relays,,ENG-02
+OPS-01,Grace Lindqvist,Control room operator,Operations,NERC system operator,,OPS-01
+OPS-02,Tomás Ferreira,Control room operator,Operations,NERC system operator,,OPS-02
+MGR-01,Rebecca Stone,Site manager,Management,,,MGR-01

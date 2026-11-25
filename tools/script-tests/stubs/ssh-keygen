@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+echo "ssh-keygen $*" >> "$STUB_DIR/calls.log"
+while [[ $# -gt 0 ]]; do [[ "$1" == "-f" ]] && f="$2"; shift; done
+echo "PRIVATE" > "$f"; echo "ssh-rsa AAAATESTKEY test" > "$f.pub"

@@ -1,0 +1,18 @@
+// =============================================================================
+// 99-reset-demo-data.kql : empty all tables, for example after the sample-data
+// smoke test or before a customer demo. The schema and policies are kept.
+//
+// A table with OneLake availability turned on cannot be cleared. Turn OneLake
+// availability off for the table first (database explorer, table details pane),
+// run this script, then run 03-onelake-availability.kql again.
+// =============================================================================
+
+.execute database script <|
+//
+.clear table RawEvents data
+.clear table TurbineTelemetry data
+.clear table WeatherObservations data
+.clear table AlarmEvents data
+.clear table TurbineStateChanges data
+.clear table AssetRegistry data
+.clear table EdgeHeartbeats data

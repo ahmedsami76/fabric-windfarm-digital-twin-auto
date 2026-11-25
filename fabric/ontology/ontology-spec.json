@@ -1,0 +1,934 @@
+{
+ "name": "WindFarmOntology",
+ "lakehouse": "WindFarmLH",
+ "kqlDatabase": "WindFarmEH",
+ "entities": [
+  {
+   "id": "328788837786272497",
+   "name": "Site",
+   "meaning": "The wind farm.",
+   "table": "ref_site",
+   "bindingId": "c8647661-5871-5fa2-971f-1c8acb06136d",
+   "keyPropertyId": "285097723867864556",
+   "displayPropertyId": "150110022933877538",
+   "properties": [
+    {
+     "id": "285097723867864556",
+     "name": "SiteId",
+     "valueType": "String",
+     "column": "siteId"
+    },
+    {
+     "id": "150110022933877538",
+     "name": "SiteName",
+     "valueType": "String",
+     "column": "siteName"
+    },
+    {
+     "id": "708121630136269067",
+     "name": "Operator",
+     "valueType": "String",
+     "column": "operator"
+    },
+    {
+     "id": "314174304715809150",
+     "name": "Timezone",
+     "valueType": "String",
+     "column": "timezone"
+    },
+    {
+     "id": "201713345412739441",
+     "name": "CapacityMw",
+     "valueType": "Double",
+     "column": "capacityMw"
+    },
+    {
+     "id": "197879635710334359",
+     "name": "TurbineCount",
+     "valueType": "BigInt",
+     "column": "turbineCount"
+    },
+    {
+     "id": "392250346353171243",
+     "name": "PpaPriceUsdPerMwh",
+     "valueType": "Double",
+     "column": "ppaPriceUsdPerMwh"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "365991975341669054",
+   "name": "Turbine",
+   "meaning": "One wind turbine, WT-01 to WT-12.",
+   "table": "ref_turbines",
+   "bindingId": "ad3e384b-d140-5a27-832e-3cf73380e805",
+   "keyPropertyId": "231246605485309759",
+   "displayPropertyId": "142384816541435201",
+   "properties": [
+    {
+     "id": "231246605485309759",
+     "name": "TurbineId",
+     "valueType": "String",
+     "column": "turbineId"
+    },
+    {
+     "id": "142384816541435201",
+     "name": "TurbineName",
+     "valueType": "String",
+     "column": "name"
+    },
+    {
+     "id": "544445656644947574",
+     "name": "SiteId",
+     "valueType": "String",
+     "column": "siteId"
+    },
+    {
+     "id": "668567938802287479",
+     "name": "TurbineModel",
+     "valueType": "String",
+     "column": "model"
+    },
+    {
+     "id": "196499946331186195",
+     "name": "TurbineManufacturer",
+     "valueType": "String",
+     "column": "manufacturer"
+    },
+    {
+     "id": "984355446693876678",
+     "name": "TurbineSerialNumber",
+     "valueType": "String",
+     "column": "serialNumber"
+    },
+    {
+     "id": "249782129951064695",
+     "name": "RatedPowerKw",
+     "valueType": "Double",
+     "column": "ratedPowerKw"
+    },
+    {
+     "id": "976228439372616669",
+     "name": "HubHeightM",
+     "valueType": "Double",
+     "column": "hubHeightM"
+    },
+    {
+     "id": "419838895727906687",
+     "name": "RotorDiameterM",
+     "valueType": "Double",
+     "column": "rotorDiameterM"
+    },
+    {
+     "id": "190470378360753784",
+     "name": "Latitude",
+     "valueType": "Double",
+     "column": "latitude"
+    },
+    {
+     "id": "334262020924349773",
+     "name": "Longitude",
+     "valueType": "Double",
+     "column": "longitude"
+    },
+    {
+     "id": "145701256241144314",
+     "name": "CollectorString",
+     "valueType": "String",
+     "column": "string"
+    },
+    {
+     "id": "490550201023564580",
+     "name": "CommissionedDate",
+     "valueType": "DateTime",
+     "column": "commissionedDate"
+    }
+   ],
+   "timeseries": {
+    "table": "TurbineTelemetry",
+    "timestampColumn": "Timestamp",
+    "keyColumn": "TurbineId",
+    "bindingId": "58f42311-bb5c-5117-8f95-a53cdd10241a",
+    "properties": [
+     {
+      "id": "354984649223060621",
+      "name": "TelemetryTime",
+      "valueType": "DateTime",
+      "column": "Timestamp"
+     },
+     {
+      "id": "718802587348058718",
+      "name": "OperatingState",
+      "valueType": "String",
+      "column": "State"
+     },
+     {
+      "id": "806088968590871745",
+      "name": "ActivePowerKw",
+      "valueType": "Double",
+      "column": "ActivePower"
+     },
+     {
+      "id": "214230918362973031",
+      "name": "PowerSetpointKw",
+      "valueType": "Double",
+      "column": "PowerSetpoint"
+     },
+     {
+      "id": "672174850416649339",
+      "name": "WindSpeedMs",
+      "valueType": "Double",
+      "column": "WindSpeed"
+     },
+     {
+      "id": "206776658059949770",
+      "name": "GearboxOilTempC",
+      "valueType": "Double",
+      "column": "GearboxOilTemp"
+     },
+     {
+      "id": "874548148441892316",
+      "name": "GearboxBearingTempC",
+      "valueType": "Double",
+      "column": "GearboxBearingTemp"
+     },
+     {
+      "id": "713596077784127300",
+      "name": "GearboxVibrationMmS",
+      "valueType": "Double",
+      "column": "GearboxVibration"
+     },
+     {
+      "id": "220990761170755877",
+      "name": "GeneratorWindingTempC",
+      "valueType": "Double",
+      "column": "GeneratorWindingTemp"
+     },
+     {
+      "id": "800516484371220687",
+      "name": "MainBearingTempC",
+      "valueType": "Double",
+      "column": "MainBearingTemp"
+     }
+    ]
+   }
+  },
+  {
+   "id": "140339734320651565",
+   "name": "Component",
+   "meaning": "A major component of a turbine: gearbox, generator, main bearing, blades and so on.",
+   "table": "ref_components",
+   "bindingId": "a1eedb9b-0452-5f7c-b8a2-2f7fd0ae549b",
+   "keyPropertyId": "228457926324626333",
+   "displayPropertyId": "412204572995121931",
+   "properties": [
+    {
+     "id": "228457926324626333",
+     "name": "ComponentId",
+     "valueType": "String",
+     "column": "componentId"
+    },
+    {
+     "id": "229607870449926088",
+     "name": "TurbineId",
+     "valueType": "String",
+     "column": "turbineId"
+    },
+    {
+     "id": "226052848837644707",
+     "name": "ComponentCode",
+     "valueType": "String",
+     "column": "componentCode"
+    },
+    {
+     "id": "412204572995121931",
+     "name": "ComponentType",
+     "valueType": "String",
+     "column": "componentType"
+    },
+    {
+     "id": "209114448170121716",
+     "name": "ComponentManufacturer",
+     "valueType": "String",
+     "column": "manufacturer"
+    },
+    {
+     "id": "605099534333738873",
+     "name": "ComponentModel",
+     "valueType": "String",
+     "column": "model"
+    },
+    {
+     "id": "620882090375231884",
+     "name": "ComponentSerialNumber",
+     "valueType": "String",
+     "column": "serialNumber"
+    },
+    {
+     "id": "942529893884296163",
+     "name": "InstallDate",
+     "valueType": "DateTime",
+     "column": "installDate"
+    },
+    {
+     "id": "291460282724474481",
+     "name": "DesignLifeYears",
+     "valueType": "BigInt",
+     "column": "designLifeYears"
+    },
+    {
+     "id": "183318274364392578",
+     "name": "WarrantyEndDate",
+     "valueType": "DateTime",
+     "column": "warrantyEndDate"
+    },
+    {
+     "id": "864708251285421890",
+     "name": "ContractId",
+     "valueType": "String",
+     "column": "warrantyContractId"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "436605689350138174",
+   "name": "WorkOrder",
+   "meaning": "A maintenance job on a turbine.",
+   "table": "ops_work_orders",
+   "bindingId": "27be3db3-5359-5f06-85c1-7a8ac645f05a",
+   "keyPropertyId": "204337889027440825",
+   "displayPropertyId": "162014246941994536",
+   "properties": [
+    {
+     "id": "204337889027440825",
+     "name": "WorkOrderId",
+     "valueType": "String",
+     "column": "WorkOrderId"
+    },
+    {
+     "id": "397065612236179558",
+     "name": "TurbineId",
+     "valueType": "String",
+     "column": "TurbineId"
+    },
+    {
+     "id": "868561361721587356",
+     "name": "ComponentId",
+     "valueType": "String",
+     "column": "ComponentId"
+    },
+    {
+     "id": "220049152658091022",
+     "name": "WorkType",
+     "valueType": "String",
+     "column": "WorkType"
+    },
+    {
+     "id": "265133538970421858",
+     "name": "Priority",
+     "valueType": "String",
+     "column": "Priority"
+    },
+    {
+     "id": "935511639911633334",
+     "name": "WorkOrderStatus",
+     "valueType": "String",
+     "column": "Status"
+    },
+    {
+     "id": "234276574010138306",
+     "name": "OpenedDate",
+     "valueType": "DateTime",
+     "column": "OpenedDate"
+    },
+    {
+     "id": "144024097601570542",
+     "name": "ScheduledDate",
+     "valueType": "DateTime",
+     "column": "ScheduledDate"
+    },
+    {
+     "id": "287449713955980046",
+     "name": "ClosedDate",
+     "valueType": "DateTime",
+     "column": "ClosedDate"
+    },
+    {
+     "id": "162014246941994536",
+     "name": "Summary",
+     "valueType": "String",
+     "column": "Summary"
+    },
+    {
+     "id": "292530284440010442",
+     "name": "FailureMode",
+     "valueType": "String",
+     "column": "FailureMode"
+    },
+    {
+     "id": "345238893366652886",
+     "name": "LaborHours",
+     "valueType": "Double",
+     "column": "LaborHours"
+    },
+    {
+     "id": "567414404459952977",
+     "name": "TotalCostUsd",
+     "valueType": "Double",
+     "column": "TotalCostUsd"
+    },
+    {
+     "id": "156135184090971713",
+     "name": "DowntimeHours",
+     "valueType": "Double",
+     "column": "DowntimeHours"
+    },
+    {
+     "id": "371465256956247550",
+     "name": "WaitingForPartsHours",
+     "valueType": "Double",
+     "column": "WaitingForPartsHours"
+    },
+    {
+     "id": "443432541692842403",
+     "name": "CostBorneBy",
+     "valueType": "String",
+     "column": "CostBorneBy"
+    },
+    {
+     "id": "635341279873175312",
+     "name": "CoveredByWarranty",
+     "valueType": "Boolean",
+     "column": "CoveredByWarranty"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "617994539223603935",
+   "name": "DowntimeEvent",
+   "meaning": "One stop or derate of a turbine, with its cause and the energy it cost.",
+   "table": "ops_turbine_events",
+   "bindingId": "50af5680-ac2a-50b0-b2f2-6c43ab0cd389",
+   "keyPropertyId": "440042061030620316",
+   "displayPropertyId": "119846394942504935",
+   "properties": [
+    {
+     "id": "440042061030620316",
+     "name": "EventId",
+     "valueType": "String",
+     "column": "EventId"
+    },
+    {
+     "id": "650233331537656633",
+     "name": "TurbineId",
+     "valueType": "String",
+     "column": "TurbineId"
+    },
+    {
+     "id": "486329524760104832",
+     "name": "StartTime",
+     "valueType": "DateTime",
+     "column": "StartTime"
+    },
+    {
+     "id": "267788384904360552",
+     "name": "EndTime",
+     "valueType": "DateTime",
+     "column": "EndTime"
+    },
+    {
+     "id": "274192796993523908",
+     "name": "DurationHours",
+     "valueType": "Double",
+     "column": "DurationHours"
+    },
+    {
+     "id": "943911007831338497",
+     "name": "AvailabilityCategory",
+     "valueType": "String",
+     "column": "AvailabilityCategory"
+    },
+    {
+     "id": "110427364336065275",
+     "name": "Cause",
+     "valueType": "String",
+     "column": "Cause"
+    },
+    {
+     "id": "723518369920931759",
+     "name": "ComponentName",
+     "valueType": "String",
+     "column": "Component"
+    },
+    {
+     "id": "699586331588400494",
+     "name": "AlarmCode",
+     "valueType": "String",
+     "column": "AlarmCode"
+    },
+    {
+     "id": "334298769094902230",
+     "name": "FailureMode",
+     "valueType": "String",
+     "column": "FailureMode"
+    },
+    {
+     "id": "306399307713120764",
+     "name": "ResponsibleParty",
+     "valueType": "String",
+     "column": "ResponsibleParty"
+    },
+    {
+     "id": "119846394942504935",
+     "name": "EventDescription",
+     "valueType": "String",
+     "column": "Description"
+    },
+    {
+     "id": "793692106323309655",
+     "name": "LostEnergyMwh",
+     "valueType": "Double",
+     "column": "LostEnergyMwh"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "670434604317341992",
+   "name": "AlarmType",
+   "meaning": "A kind of controller alarm: its threshold, what the controller does, and the procedure.",
+   "table": "ref_alarm_codes",
+   "bindingId": "5bdcf3aa-e5c2-57e2-ad97-9719073b4346",
+   "keyPropertyId": "490071974893751621",
+   "displayPropertyId": "384314778376361992",
+   "properties": [
+    {
+     "id": "490071974893751621",
+     "name": "AlarmCode",
+     "valueType": "String",
+     "column": "alarmCode"
+    },
+    {
+     "id": "775102751879661024",
+     "name": "AlarmComponent",
+     "valueType": "String",
+     "column": "component"
+    },
+    {
+     "id": "103727947481738584",
+     "name": "Severity",
+     "valueType": "String",
+     "column": "severity"
+    },
+    {
+     "id": "384314778376361992",
+     "name": "AlarmDescription",
+     "valueType": "String",
+     "column": "description"
+    },
+    {
+     "id": "589714995536006292",
+     "name": "Signal",
+     "valueType": "String",
+     "column": "signal"
+    },
+    {
+     "id": "604872149891277532",
+     "name": "Threshold",
+     "valueType": "Double",
+     "column": "threshold"
+    },
+    {
+     "id": "140673365489153259",
+     "name": "Unit",
+     "valueType": "String",
+     "column": "unit"
+    },
+    {
+     "id": "387655507207693482",
+     "name": "ControllerAction",
+     "valueType": "String",
+     "column": "controllerAction"
+    },
+    {
+     "id": "694555490416224142",
+     "name": "SopId",
+     "valueType": "String",
+     "column": "sopId"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "878713980870005837",
+   "name": "SparePart",
+   "meaning": "A spare part held in stock.",
+   "table": "ref_spare_parts",
+   "bindingId": "8dff018b-8b28-501e-afdd-63c1cdfbaea2",
+   "keyPropertyId": "228690374135456468",
+   "displayPropertyId": "990925332730603153",
+   "properties": [
+    {
+     "id": "228690374135456468",
+     "name": "PartId",
+     "valueType": "String",
+     "column": "partId"
+    },
+    {
+     "id": "990925332730603153",
+     "name": "PartDescription",
+     "valueType": "String",
+     "column": "description"
+    },
+    {
+     "id": "311830335515565268",
+     "name": "ComponentCode",
+     "valueType": "String",
+     "column": "componentCode"
+    },
+    {
+     "id": "970452008502985282",
+     "name": "QuantityOnHand",
+     "valueType": "BigInt",
+     "column": "quantityOnHand"
+    },
+    {
+     "id": "444616023296266941",
+     "name": "ReorderPoint",
+     "valueType": "BigInt",
+     "column": "reorderPoint"
+    },
+    {
+     "id": "314254934187792292",
+     "name": "LeadTimeDays",
+     "valueType": "BigInt",
+     "column": "leadTimeDays"
+    },
+    {
+     "id": "288000882623194668",
+     "name": "UnitCostUsd",
+     "valueType": "BigInt",
+     "column": "unitCostUsd"
+    },
+    {
+     "id": "818082069230761347",
+     "name": "StockLocation",
+     "valueType": "String",
+     "column": "location"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "140150707107257132",
+   "name": "Technician",
+   "meaning": "A member of the maintenance crew.",
+   "table": "ref_technicians",
+   "bindingId": "311105f5-13ba-5ea1-ab53-f43a60480976",
+   "keyPropertyId": "183469544574293932",
+   "displayPropertyId": "201080554836862714",
+   "properties": [
+    {
+     "id": "183469544574293932",
+     "name": "TechnicianId",
+     "valueType": "String",
+     "column": "technicianId"
+    },
+    {
+     "id": "201080554836862714",
+     "name": "TechnicianName",
+     "valueType": "String",
+     "column": "name"
+    },
+    {
+     "id": "254262612261144021",
+     "name": "TechnicianRole",
+     "valueType": "String",
+     "column": "role"
+    },
+    {
+     "id": "287105458941074240",
+     "name": "Discipline",
+     "valueType": "String",
+     "column": "discipline"
+    },
+    {
+     "id": "239087549058821210",
+     "name": "Certifications",
+     "valueType": "String",
+     "column": "certifications"
+    },
+    {
+     "id": "876194102282716117",
+     "name": "Crew",
+     "valueType": "String",
+     "column": "crew"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "662177792116015942",
+   "name": "Procedure",
+   "meaning": "A standard operating procedure.",
+   "table": "ref_sop_index",
+   "bindingId": "576d1d85-f156-5169-9c3d-47d7a2129d9b",
+   "keyPropertyId": "252402481548699261",
+   "displayPropertyId": "131049245857834563",
+   "properties": [
+    {
+     "id": "252402481548699261",
+     "name": "SopId",
+     "valueType": "String",
+     "column": "sopId"
+    },
+    {
+     "id": "131049245857834563",
+     "name": "ProcedureTitle",
+     "valueType": "String",
+     "column": "title"
+    },
+    {
+     "id": "147958145453798503",
+     "name": "ProcedureFile",
+     "valueType": "String",
+     "column": "file"
+    }
+   ],
+   "timeseries": null
+  },
+  {
+   "id": "463242683401902337",
+   "name": "Contract",
+   "meaning": "A commercial contract: power purchase, service or warranty.",
+   "table": "ref_contracts",
+   "bindingId": "6d668b2b-366c-5b33-b9b6-3dcde00fe5c7",
+   "keyPropertyId": "144485195465769255",
+   "displayPropertyId": "887724991931977954",
+   "properties": [
+    {
+     "id": "144485195465769255",
+     "name": "ContractId",
+     "valueType": "String",
+     "column": "contractId"
+    },
+    {
+     "id": "972494328194116394",
+     "name": "ContractType",
+     "valueType": "String",
+     "column": "contractType"
+    },
+    {
+     "id": "887724991931977954",
+     "name": "Counterparty",
+     "valueType": "String",
+     "column": "counterparty"
+    },
+    {
+     "id": "128381063653900267",
+     "name": "ContractStartDate",
+     "valueType": "DateTime",
+     "column": "startDate"
+    },
+    {
+     "id": "723703562598995626",
+     "name": "ContractEndDate",
+     "valueType": "DateTime",
+     "column": "endDate"
+    },
+    {
+     "id": "681575337562499478",
+     "name": "PriceUsdPerMwh",
+     "valueType": "Double",
+     "column": "priceUsdPerMwh"
+    },
+    {
+     "id": "165978818170763597",
+     "name": "GuaranteedAvailabilityPct",
+     "valueType": "Double",
+     "column": "guaranteedAvailabilityPct"
+    },
+    {
+     "id": "328584081786798358",
+     "name": "AnnualFeeUsd",
+     "valueType": "BigInt",
+     "column": "annualFeeUsd"
+    }
+   ],
+   "timeseries": null
+  }
+ ],
+ "relationships": [
+  {
+   "id": "404715748816572390",
+   "name": "SiteHasTurbine",
+   "source": "Site",
+   "target": "Turbine",
+   "sourceEntityId": "328788837786272497",
+   "targetEntityId": "365991975341669054",
+   "table": "ref_turbines",
+   "sourceColumn": "siteId",
+   "targetColumn": "turbineId",
+   "sourceKeyPropertyId": "285097723867864556",
+   "targetKeyPropertyId": "231246605485309759",
+   "contextualizationId": "5f063ab1-9704-5805-bca5-31020f0a52f0"
+  },
+  {
+   "id": "141465301573282234",
+   "name": "TurbineHasComponent",
+   "source": "Turbine",
+   "target": "Component",
+   "sourceEntityId": "365991975341669054",
+   "targetEntityId": "140339734320651565",
+   "table": "ref_components",
+   "sourceColumn": "turbineId",
+   "targetColumn": "componentId",
+   "sourceKeyPropertyId": "231246605485309759",
+   "targetKeyPropertyId": "228457926324626333",
+   "contextualizationId": "ede93ff0-9b69-579c-b65b-49b98f16f9d7"
+  },
+  {
+   "id": "183986826210894278",
+   "name": "WorkOrderOnTurbine",
+   "source": "WorkOrder",
+   "target": "Turbine",
+   "sourceEntityId": "436605689350138174",
+   "targetEntityId": "365991975341669054",
+   "table": "ops_work_orders",
+   "sourceColumn": "WorkOrderId",
+   "targetColumn": "TurbineId",
+   "sourceKeyPropertyId": "204337889027440825",
+   "targetKeyPropertyId": "231246605485309759",
+   "contextualizationId": "1c0849d0-9391-5096-9896-f2b6070cc00a"
+  },
+  {
+   "id": "582801288625822399",
+   "name": "WorkOrderOnComponent",
+   "source": "WorkOrder",
+   "target": "Component",
+   "sourceEntityId": "436605689350138174",
+   "targetEntityId": "140339734320651565",
+   "table": "ops_work_orders",
+   "sourceColumn": "WorkOrderId",
+   "targetColumn": "ComponentId",
+   "sourceKeyPropertyId": "204337889027440825",
+   "targetKeyPropertyId": "228457926324626333",
+   "contextualizationId": "434ccb51-5dd8-5159-bd25-cf6d70a9abd6"
+  },
+  {
+   "id": "734572784626830803",
+   "name": "WorkOrderUsesPart",
+   "source": "WorkOrder",
+   "target": "SparePart",
+   "sourceEntityId": "436605689350138174",
+   "targetEntityId": "878713980870005837",
+   "table": "ops_work_order_parts",
+   "sourceColumn": "WorkOrderId",
+   "targetColumn": "PartId",
+   "sourceKeyPropertyId": "204337889027440825",
+   "targetKeyPropertyId": "228690374135456468",
+   "contextualizationId": "d6d046b8-be7a-5d63-a72e-3be06f48572f"
+  },
+  {
+   "id": "679891026519976372",
+   "name": "WorkOrderLedBy",
+   "source": "WorkOrder",
+   "target": "Technician",
+   "sourceEntityId": "436605689350138174",
+   "targetEntityId": "140150707107257132",
+   "table": "ops_work_orders",
+   "sourceColumn": "WorkOrderId",
+   "targetColumn": "LeadTechnicianId",
+   "sourceKeyPropertyId": "204337889027440825",
+   "targetKeyPropertyId": "183469544574293932",
+   "contextualizationId": "6f6c3cce-fdd8-53e2-b8ec-098d15dd9be9"
+  },
+  {
+   "id": "138554763526549367",
+   "name": "WorkOrderFollows",
+   "source": "WorkOrder",
+   "target": "Procedure",
+   "sourceEntityId": "436605689350138174",
+   "targetEntityId": "662177792116015942",
+   "table": "ops_work_orders",
+   "sourceColumn": "WorkOrderId",
+   "targetColumn": "SopId",
+   "sourceKeyPropertyId": "204337889027440825",
+   "targetKeyPropertyId": "252402481548699261",
+   "contextualizationId": "f939595d-cf50-5064-807b-8086b184fcb3"
+  },
+  {
+   "id": "579242341674765698",
+   "name": "EventOnTurbine",
+   "source": "DowntimeEvent",
+   "target": "Turbine",
+   "sourceEntityId": "617994539223603935",
+   "targetEntityId": "365991975341669054",
+   "table": "ops_turbine_events",
+   "sourceColumn": "EventId",
+   "targetColumn": "TurbineId",
+   "sourceKeyPropertyId": "440042061030620316",
+   "targetKeyPropertyId": "231246605485309759",
+   "contextualizationId": "668ca1c2-1061-56d3-b3f4-43c314deb9b1"
+  },
+  {
+   "id": "451773615480204468",
+   "name": "EventHasAlarmType",
+   "source": "DowntimeEvent",
+   "target": "AlarmType",
+   "sourceEntityId": "617994539223603935",
+   "targetEntityId": "670434604317341992",
+   "table": "ops_turbine_events",
+   "sourceColumn": "EventId",
+   "targetColumn": "AlarmCode",
+   "sourceKeyPropertyId": "440042061030620316",
+   "targetKeyPropertyId": "490071974893751621",
+   "contextualizationId": "c3040023-3195-5346-9b01-86322d0c25ee"
+  },
+  {
+   "id": "218878226034142133",
+   "name": "EventRepairedBy",
+   "source": "DowntimeEvent",
+   "target": "WorkOrder",
+   "sourceEntityId": "617994539223603935",
+   "targetEntityId": "436605689350138174",
+   "table": "ops_turbine_events",
+   "sourceColumn": "EventId",
+   "targetColumn": "WorkOrderId",
+   "sourceKeyPropertyId": "440042061030620316",
+   "targetKeyPropertyId": "204337889027440825",
+   "contextualizationId": "b6678ea7-7796-59a8-829c-af8076e7c0eb"
+  },
+  {
+   "id": "556983880052909840",
+   "name": "AlarmHandledBy",
+   "source": "AlarmType",
+   "target": "Procedure",
+   "sourceEntityId": "670434604317341992",
+   "targetEntityId": "662177792116015942",
+   "table": "ref_alarm_codes",
+   "sourceColumn": "alarmCode",
+   "targetColumn": "sopId",
+   "sourceKeyPropertyId": "490071974893751621",
+   "targetKeyPropertyId": "252402481548699261",
+   "contextualizationId": "6059741f-b49e-5354-86c5-6d384027ea0f"
+  },
+  {
+   "id": "780214867861709692",
+   "name": "ComponentCoveredBy",
+   "source": "Component",
+   "target": "Contract",
+   "sourceEntityId": "140339734320651565",
+   "targetEntityId": "463242683401902337",
+   "table": "ref_components",
+   "sourceColumn": "componentId",
+   "targetColumn": "warrantyContractId",
+   "sourceKeyPropertyId": "228457926324626333",
+   "targetKeyPropertyId": "144485195465769255",
+   "contextualizationId": "a7d95aca-da41-5ea5-9c19-b8bf4b5c6390"
+  }
+ ]
+}

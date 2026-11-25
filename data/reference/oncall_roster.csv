@@ -1,0 +1,9 @@
+roleId,role,discipline,shift,onCall,escalationOrder,contactChannel
+OPS-01,Control room operator,Operations,Day,true,1,Teams: Wind Ops Control Room
+OPS-02,Control room operator,Operations,Night,true,1,Teams: Wind Ops Control Room
+ENG-01,"Reliability engineer, drivetrain",Engineering,Day,true,2,Teams: Reliability On-Call
+ENG-02,Electrical engineer,Engineering,Day,false,2,Teams: Reliability On-Call
+TECH-01,Lead wind technician,Maintenance,Day,true,3,Teams: Site Maintenance
+TECH-02,Wind technician,Maintenance,Day,false,3,Teams: Site Maintenance
+TECH-03,Wind technician,Maintenance,Day,false,3,Teams: Site Maintenance
+MGR-01,Site manager,Management,Day,true,4,Teams: Site Leadership

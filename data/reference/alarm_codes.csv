@@ -1,0 +1,41 @@
+alarmCode,component,severity,description,signal,threshold,direction,unit,controllerAction,sopId,liveSimulated
+GBX-OIL-TEMP-HIGH,gearbox,warning,Gearbox oil temperature high,gearboxOilTemp,78.0,high,degC,,SOP-GBX-001,true
+GBX-OIL-TEMP-CRIT,gearbox,critical,"Gearbox oil temperature critical, power derated to 50%",gearboxOilTemp,88.0,high,degC,derate to 50%,SOP-GBX-001,true
+GBX-OIL-TEMP-TRIP,gearbox,critical,"Gearbox oil temperature trip, turbine stopped",gearboxOilTemp,96.0,high,degC,stop turbine,SOP-GBX-001,true
+GBX-VIB-HIGH,gearbox,warning,Gearbox vibration high,gearboxVibration,5.5,high,mm/s,,SOP-GBX-001,true
+GBX-VIB-CRIT,gearbox,critical,"Gearbox vibration critical, power derated to 30%",gearboxVibration,8.0,high,mm/s,derate to 30%,SOP-GBX-001,true
+GEN-WIND-TEMP-HIGH,generator,warning,Generator winding temperature high,generatorWindingTemp,125.0,high,degC,,SOP-GEN-002,true
+GEN-WIND-TEMP-CRIT,generator,critical,"Generator winding temperature critical, power derated to 50%",generatorWindingTemp,140.0,high,degC,derate to 50%,SOP-GEN-002,true
+GEN-WIND-TEMP-TRIP,generator,critical,"Generator winding temperature trip, turbine stopped",generatorWindingTemp,155.0,high,degC,stop turbine,SOP-GEN-002,true
+HYD-PRESS-LOW,hydraulic system,warning,Hydraulic pressure low,hydraulicPressure,160.0,low,bar,,SOP-PIT-003,true
+PITCH-ASYM,pitch system,warning,Blade pitch asymmetry detected,,5.0,high,deg,,SOP-PIT-003,true
+PITCH-ASYM-CRIT,pitch system,critical,"Blade pitch asymmetry critical, power derated to 40%",,11.0,high,deg,derate to 40%,SOP-PIT-003,true
+TWR-VIB-HIGH,tower,warning,Tower vibration high,towerVibration,2.5,high,mm/s,,SOP-PIT-003,true
+YAW-UNTWIST,yaw system,info,"Cable untwist in progress, turbine paused",,,,,,SOP-OPS-000,true
+HIGH-WIND-STOP,controller,info,"Turbine stopped, wind above cut-out",,,,,,SOP-OPS-000,true
+MANUAL-STOP,controller,info,Turbine stopped by operator command,,,,,,SOP-CUR-006,true
+POWER-CURTAILED,controller,info,Power limited by remote setpoint,,,,,,SOP-CUR-006,true
+COMMS-RESTORED,scada,info,Communication with turbine controller restored,,,,,,SOP-COM-005,true
+CNV-OVERCURRENT,converter,critical,Converter overcurrent trip,,,,,stop turbine,SOP-OPS-000,false
+CNV-IGBT-FAULT,converter,critical,Converter IGBT module fault,,,,,stop turbine,SOP-OPS-000,false
+CNV-COOL-FLOW,converter,critical,Converter coolant flow low,,,,,stop turbine,SOP-OPS-000,false
+GRID-VOLT-DIP,grid,critical,"Grid voltage dip, turbine tripped offline",,,,,stop turbine,SOP-CUR-006,false
+GRID-LOSS,grid,critical,"Grid lost, turbine stopped",,,,,stop turbine,SOP-CUR-006,false
+PIT-FOLLOW-ERR,pitch system,critical,Pitch following error,,,,,stop turbine,SOP-PIT-003,false
+PIT-ACC-PRESS,pitch system,critical,Pitch accumulator pre-charge low,,,,,stop turbine,SOP-PIT-003,false
+YAW-POS-ERR,yaw system,critical,Yaw position sensor error,,,,,stop turbine,SOP-YAW-004,false
+YAW-VANE-FAULT,yaw system,critical,Wind vane signal fault,,,,,stop turbine,SOP-YAW-004,false
+YAW-DRV-OVERLOAD,yaw system,critical,Yaw drive motor overload,,,,,stop turbine,SOP-YAW-004,false
+YAW-BRAKE-WEAR,yaw system,warning,Yaw brake pad wear limit reached,,,,,,SOP-YAW-004,false
+GEN-OVERSPEED,generator,critical,Generator overspeed,,,,,stop turbine,SOP-OPS-000,false
+GEN-BRG-TEMP-HIGH,generator,critical,Generator bearing temperature high,,,,,stop turbine,SOP-GEN-002,false
+GEN-FAN-FAULT,generator,critical,Generator cooling fan failure,,,,,stop turbine,SOP-GEN-002,false
+GBX-FLT-DP-HIGH,gearbox,warning,Gearbox oil filter differential pressure high,,,,,,SOP-GBX-001,false
+GBX-CLR-FAN-FAULT,gearbox,critical,Gearbox oil cooler fan failure,,,,,stop turbine,SOP-GBX-001,false
+HYD-OIL-LEVEL-LOW,hydraulic system,critical,Hydraulic oil level low,,,,,stop turbine,SOP-PIT-003,false
+HYD-PUMP-FAULT,hydraulic system,critical,Hydraulic pump failure,,,,,stop turbine,SOP-PIT-003,false
+SNS-TEMP-FAULT,controller,warning,Temperature sensor signal out of range,,,,,,SOP-OPS-000,false
+CTL-WATCHDOG,controller,critical,Controller watchdog restart,,,,,stop turbine,SOP-OPS-000,false
+ENV-ICE-DETECTED,environment,info,"Ice detected on blades, turbine stopped",,,,,,SOP-OPS-000,false
+ENV-LIGHTNING-STRIKE,blades,critical,Lightning strike registered on blade,,,,,stop turbine,SOP-OPS-000,false
+COMMS-LOST,scada,warning,Communication with turbine controller lost,,,,,,SOP-COM-005,false

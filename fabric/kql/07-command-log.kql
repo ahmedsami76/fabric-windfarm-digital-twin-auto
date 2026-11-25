@@ -1,0 +1,149 @@
+// =============================================================================
+// 07-command-log.kql : Phase 5c, the command log
+//
+// Since simulator 1.2.0 the edge reports every operating command it is given
+// (curtail, release, stop, start, reset): what was asked, by whom, from the cloud
+// or at the edge, and whether it took it. The report travels with the telemetry,
+// as a message of type "command" per turbine, and lands in RawEvents like every
+// other message. This file gives it a table, and adds a function that says for
+// each command what the telemetry showed afterwards.
+//
+// Run the blocks one at a time in a query window on the KQL database WindFarmEH.
+// Block 1 is one database script and has no empty lines on purpose.
+// Before any of it shows a row: the simulator must be 1.2.0 and the data flow must
+// forward the topic .../command (guide: docs/14-deployment-guide-phase5c.md, steps 1 and 2).
+// =============================================================================
+
+// Block 1. The table, its descriptions, the update policy that fills it, and the function.
+// Expect one result row per command, each with Result = Completed.
+.execute database script <|
+.create-merge table EdgeCommands (Timestamp: datetime, SiteId: string, TurbineId: string, Seq: long, RequestId: string, Command: string, Source: string, RequestedBy: string, IssuedAt: datetime, Ok: bool, Error: string, Percent: real, LimitKw: real, DurationSeconds: long, EndsAt: datetime, Reason: string, TurbinesInCommand: int, IngestedAt: datetime)
+//
+.alter table EdgeCommands docstring 'The command log of the edge: one row for each turbine an operating command acted on (curtail, release, stop, start, reset), with who asked for it and whether the edge took it. A refused command has one row, under the edge itself unless it named a turbine.'
+//
+.alter-merge table EdgeCommands column-docstrings (
+    Timestamp: "When the edge handled the command, UTC",
+    SiteId: "Site",
+    TurbineId: "Turbine the command acted on, WT-01 to WT-12. EDGE-01 for a refused command that named no turbine",
+    Seq: "Running number of the messages of this asset",
+    RequestId: "Identifier the sender gave the command. The same for every turbine of one command",
+    Command: "curtail, release, stop, start or reset",
+    Source: "cloud: the command came from Fabric over the control topic. edge: it was given at the edge",
+    RequestedBy: "Who asked for it, as the sender wrote it. For the operations agent: its name and 'approved in Teams'",
+    IssuedAt: "When the sender wrote the command, by the sender's clock, UTC. Empty for commands given at the edge",
+    Ok: "true: the edge took the command. false: it refused it, see Error",
+    Error: "Why the edge refused the command",
+    Percent: "curtail: the share of rated power the turbine may still produce, percent",
+    LimitKw: "curtail: that share in kW",
+    DurationSeconds: "curtail and stop: how long it lasts before it ends by itself. Empty: until released or started",
+    EndsAt: "curtail and stop: when it ends by itself, UTC",
+    Reason: "stop: operator or maintenance. Otherwise a note that came with the command",
+    TurbinesInCommand: "How many turbines this command acted on. 12 for a command to all",
+    IngestedAt: "When the row arrived in this database, UTC"
+)
+//
+.alter-merge table EdgeCommands policy retention softdelete = 365d
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: command messages to EdgeCommands') Expand_EdgeCommands() {
+    RawEvents
+    | where messageType == 'command'
+    | project
+        Timestamp = timestamp,
+        SiteId = siteId,
+        TurbineId = assetId,
+        Seq = seq,
+        RequestId = tostring(data['requestId']),
+        Command = tostring(data['command']),
+        Source = tostring(data['source']),
+        RequestedBy = tostring(data['requestedBy']),
+        IssuedAt = todatetime(data['issuedAt']),
+        Ok = tobool(data['ok']),
+        Error = tostring(data['error']),
+        Percent = toreal(data['percent']),
+        LimitKw = toreal(data['limitKw']),
+        DurationSeconds = tolong(data['durationSeconds']),
+        EndsAt = todatetime(data['endsAt']),
+        Reason = tostring(data['reason']),
+        TurbinesInCommand = toint(data['turbinesInCommand']),
+        IngestedAt = ingestion_time()
+}
+//
+.alter table EdgeCommands policy update @'[{"IsEnabled": true, "Source": "RawEvents", "Query": "Expand_EdgeCommands()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+//
+.create-or-alter function with (folder = 'Views', docstring = 'The commands of the last hours, each with what the telemetry showed afterwards: when the turbine followed (ConfirmedAt), when a limit ended (EndedAt), and a Status in words. FabricToEdgeSeconds is the way from the sender to the edge, EdgeToTelemetrySeconds the way from the edge back into this database as a reading.') CommandLog(lookback: timespan = 24h) {
+    let wait = 5m;
+    let commands = EdgeCommands
+        | where Timestamp > ago(lookback)
+        | summarize arg_max(IngestedAt, *) by TurbineId, RequestId, Command, Timestamp;
+    let firstCommandAt = toscalar(commands | summarize min(Timestamp));
+    let readings = TurbineTelemetry
+        | where Timestamp > ago(lookback) and Timestamp >= firstCommandAt
+        | where TurbineId in ((commands | distinct TurbineId))
+        | project TurbineId, ReadingAt = Timestamp, State, PowerSetpoint;
+    let confirmed = commands
+        | where Ok
+        | join kind=inner readings on TurbineId
+        | where ReadingAt >= Timestamp and ReadingAt <= Timestamp + wait
+        | where case(Command == 'curtail', PowerSetpoint <= LimitKw + 1.0,
+                     Command == 'release', State != 'CURTAILED',
+                     Command == 'stop', State in ('STOPPED', 'MAINTENANCE'),
+                     Command == 'start', State !in ('STOPPED', 'MAINTENANCE'),
+                     State != 'FAULT')
+        | summarize ConfirmedAt = min(ReadingAt) by TurbineId, RequestId, Timestamp;
+    let lifted = commands
+        | where Ok and Command == 'curtail'
+        | join kind=inner confirmed on TurbineId, RequestId, Timestamp
+        | join kind=inner readings on TurbineId
+        | where ReadingAt > ConfirmedAt and PowerSetpoint > LimitKw + 1.0
+        | summarize LiftedAt = min(ReadingAt) by TurbineId, RequestId, Timestamp;
+    let replaced = commands
+        | where Ok and Command == 'curtail'
+        | join kind=inner (commands | where Ok and Command in ('curtail', 'release') | project TurbineId, NextAt = Timestamp, NextRequestId = RequestId) on TurbineId
+        | where NextAt > Timestamp or (NextAt == Timestamp and NextRequestId != RequestId)
+        | summarize ReplacedAt = min(NextAt) by TurbineId, RequestId, Timestamp;
+    commands
+    | join kind=leftouter confirmed on TurbineId, RequestId, Timestamp
+    | join kind=leftouter lifted on TurbineId, RequestId, Timestamp
+    | join kind=leftouter replaced on TurbineId, RequestId, Timestamp
+    | extend TimeOver = iff(isnotnull(EndsAt) and EndsAt <= now(), EndsAt, datetime(null))
+    | extend EndedAt = iff(Ok and Command == 'curtail', min_of(coalesce(LiftedAt, ReplacedAt, TimeOver), coalesce(ReplacedAt, LiftedAt, TimeOver), coalesce(TimeOver, LiftedAt, ReplacedAt)), datetime(null))
+    | extend FabricToEdgeSeconds = iff(isnull(IssuedAt), long(null), datetime_diff('second', Timestamp, IssuedAt)),
+             EdgeToTelemetrySeconds = iff(isnull(ConfirmedAt), long(null), datetime_diff('second', ConfirmedAt, Timestamp))
+    | extend Status = case(not(Ok), 'refused',
+                           Command == 'curtail' and isnotnull(EndedAt), 'ended',
+                           isnull(ConfirmedAt) and Timestamp > ago(wait), 'taken by the edge, not yet seen in telemetry',
+                           isnull(ConfirmedAt), 'taken by the edge, never seen in telemetry',
+                           Command == 'curtail', 'in force',
+                           'confirmed')
+    | project Timestamp, TurbineId, Command, Status, Percent, LimitKw, RequestedBy, Source, IssuedAt, ConfirmedAt, EndedAt, EndsAt, FabricToEdgeSeconds, EdgeToTelemetrySeconds, DurationSeconds, Reason, Error, RequestId
+}
+
+// Block 2. Check, after a command has been sent (guide, step 4): the newest commands as the edge logged them.
+// Expect a row per turbine and command, Ok = true, RequestedBy as the sender wrote it, and a
+// Timestamp a few seconds after IssuedAt.
+EdgeCommands
+| where Timestamp > ago(1h)
+| project Timestamp, TurbineId, Command, Ok, Percent, LimitKw, EndsAt, RequestedBy, Source, IssuedAt, Error
+| order by Timestamp desc
+
+// Block 3. The same commands with what became of them. A curtailment reads 'in force' once the
+// turbine reports the limit, and 'ended' when the limit is lifted, by its time or by a release.
+CommandLog(1h)
+| order by Timestamp desc
+
+// Block 4. The limits that are in force now, for a look at the whole site.
+CommandLog(6h)
+| where Command == 'curtail' and Status == 'in force'
+| project TurbineId, LimitKw, Percent, Since = ConfirmedAt, EndsAt, RequestedBy, Source
+| order by TurbineId asc
+
+// Block 5. How long a command takes: from the sender to the edge, and from the edge back as a reading.
+// The first includes the difference between the sender's clock and the edge's, a second or two.
+CommandLog(24h)
+| where Source == 'cloud' and Status != 'refused'
+| summarize Commands = count(), FabricToEdgeMedian = percentile(FabricToEdgeSeconds, 50), FabricToEdgeHighest = max(FabricToEdgeSeconds), EdgeToTelemetryMedian = percentile(EdgeToTelemetrySeconds, 50), EdgeToTelemetryHighest = max(EdgeToTelemetrySeconds)
+
+// To remove the command log from the database:
+// .drop function CommandLog ifexists
+// .drop table EdgeCommands ifexists
+// .drop function Expand_EdgeCommands ifexists

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stand-in for the Azure CLI in the scenario tests of infra/09-remediation-agent.sh: who is signed in,
+# and the token for the Fabric API. It answers from files in $STUB_DIR and logs every call.
+S="$STUB_DIR"; echo "az $*" >> "$S/calls.log"
+case "$*" in
+  "account show"*) cat "$S/signed_in_as" 2>/dev/null || true ;;
+  "account get-access-token --resource https://api.fabric.microsoft.com --query accessToken --output tsv")
+    if [[ -f "$S/token_refused" ]]; then echo "ERROR: AADSTS50076: Due to a configuration change made by your administrator, you must use multi-factor authentication." >&2; exit 1; fi
+    echo "S3cret.token.of.the.scenario" ;;
+  *) echo "STUB: unexpected az $*" >&2; exit 9 ;;
+esac

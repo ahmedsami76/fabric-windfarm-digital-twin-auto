@@ -1,0 +1,22 @@
+partId,description,componentCode,quantityOnHand,reorderPoint,leadTimeDays,unitCostUsd,location
+SP-GBX-HSS-BRG,Gearbox high-speed shaft bearing kit,GBX,1,1,21,18500,OM-01
+SP-GBX-OIL-320,"Gearbox synthetic oil ISO VG 320, 1000 L",GBX,2,1,5,7200,OM-01
+SP-GBX-FLT-10,Gearbox oil filter element 10 micron,GBX,14,6,3,310,OM-01
+SP-GBX-CLR-FAN,Gearbox oil cooler fan motor,GBX,2,1,10,2400,OM-01
+SP-GBX-UNIT,"Gearbox, complete exchange unit",GBX,0,0,140,385000,Regional depot
+SP-GEN-FAN,Generator cooling fan assembly,GEN,2,1,12,4100,OM-01
+SP-GEN-BRG-DE,Generator drive-end bearing,GEN,3,1,14,5600,OM-01
+SP-PIT-VLV,Pitch proportional valve,PIT,4,2,9,2950,OM-01
+SP-PIT-ACC,Pitch accumulator 20 L,PIT,6,3,7,1250,OM-01
+SP-HYD-PMP,Hydraulic pump unit,HYD,1,1,18,8800,OM-01
+SP-HYD-OIL-46,"Hydraulic oil ISO VG 46, 200 L",HYD,3,1,4,980,OM-01
+SP-YAW-VANE,Wind vane and anemometer set,YAW,5,2,4,1900,OM-01
+SP-YAW-DRV,Yaw drive motor with brake,YAW,0,1,25,9700,Regional depot
+SP-YAW-PAD,Yaw brake pad set,YAW,8,4,6,720,OM-01
+SP-CNV-IGBT,Converter IGBT module,CNV,6,2,15,3300,OM-01
+SP-CNV-COOL,Converter coolant pump,CNV,1,1,11,2150,OM-01
+SP-SNS-PT100,PT100 temperature sensor,GBX,30,10,2,85,OM-01
+SP-SNS-ACC,Drivetrain accelerometer,GBX,8,3,6,640,OM-01
+SP-BLD-LEP,"Blade leading-edge protection kit, one blade",BLD,4,3,20,3900,OM-01
+SP-BLD-RCP,Blade lightning receptor,BLD,6,3,12,450,OM-01
+SP-BLD-LAM,Blade laminate repair kit,BLD,2,1,10,2600,OM-01

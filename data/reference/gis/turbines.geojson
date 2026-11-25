@@ -1,0 +1,221 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.502297,
+          32.221064,
+          792.2
+        ]
+      },
+      "properties": {
+        "id": "WT-01",
+        "name": "Turbine 01",
+        "assetType": "WindTurbine",
+        "string": "A",
+        "elevationM": 792.2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.49513,
+          32.219716,
+          795.1
+        ]
+      },
+      "properties": {
+        "id": "WT-02",
+        "name": "Turbine 02",
+        "assetType": "WindTurbine",
+        "string": "A",
+        "elevationM": 795.1
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.487167,
+          32.218369,
+          798.6
+        ]
+      },
+      "properties": {
+        "id": "WT-03",
+        "name": "Turbine 03",
+        "assetType": "WindTurbine",
+        "string": "A",
+        "elevationM": 798.6
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.483982,
+          32.212979,
+          761.8
+        ]
+      },
+      "properties": {
+        "id": "WT-04",
+        "name": "Turbine 04",
+        "assetType": "WindTurbine",
+        "string": "A",
+        "elevationM": 761.8
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.480796,
+          32.22039,
+          777.5
+        ]
+      },
+      "properties": {
+        "id": "WT-05",
+        "name": "Turbine 05",
+        "assetType": "WindTurbine",
+        "string": "B",
+        "elevationM": 777.5
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.477611,
+          32.204894,
+          767.3
+        ]
+      },
+      "properties": {
+        "id": "WT-06",
+        "name": "Turbine 06",
+        "assetType": "WindTurbine",
+        "string": "B",
+        "elevationM": 767.3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.477611,
+          32.210958,
+          788.5
+        ]
+      },
+      "properties": {
+        "id": "WT-07",
+        "name": "Turbine 07",
+        "assetType": "WindTurbine",
+        "string": "B",
+        "elevationM": 788.5
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.475222,
+          32.216347,
+          831.7
+        ]
+      },
+      "properties": {
+        "id": "WT-08",
+        "name": "Turbine 08",
+        "assetType": "WindTurbine",
+        "string": "B",
+        "elevationM": 831.7
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.472833,
+          32.221737,
+          762.8
+        ]
+      },
+      "properties": {
+        "id": "WT-09",
+        "name": "Turbine 09",
+        "assetType": "WindTurbine",
+        "string": "C",
+        "elevationM": 762.8
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.468055,
+          32.216347,
+          789.6
+        ]
+      },
+      "properties": {
+        "id": "WT-10",
+        "name": "Turbine 10",
+        "assetType": "WindTurbine",
+        "string": "C",
+        "elevationM": 789.6
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.462481,
+          32.212979,
+          764.1
+        ]
+      },
+      "properties": {
+        "id": "WT-11",
+        "name": "Turbine 11",
+        "assetType": "WindTurbine",
+        "string": "C",
+        "elevationM": 764.1
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.457703,
+          32.217021,
+          787.0
+        ]
+      },
+      "properties": {
+        "id": "WT-12",
+        "name": "Turbine 12",
+        "assetType": "WindTurbine",
+        "string": "C",
+        "elevationM": 787.0
+      }
+    }
+  ]
+}

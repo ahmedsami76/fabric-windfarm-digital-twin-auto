@@ -1,0 +1,4 @@
+# The workbench (preview and tests). The app in windfarm-twin/ brings its own .gitignore.
+/node_modules/
+/screenshots/
+/out/

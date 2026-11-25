@@ -1,0 +1,75 @@
+// ============================================================================
+// 05-agent-readiness.kql : prepare the KQL database for the operations agent (Phase 3).
+// Run in a query window on the KQL database WindFarmEH. The file has four blocks, separated
+// by an empty line. Put the cursor in a block and select Run; run them in order.
+//
+//   Block 1  needed    ingestion time and column descriptions for the agent
+//   Block 2  check     the newest row per turbine
+//   Block 3  optional  the table behind rule 4, "a turbine drifts away from the fleet"
+//   Block 4  check     the latest comparison with the fleet
+// ============================================================================
+
+// Block 1. The operations agent asks for the rows that arrived since its last look and uses the
+// ingestion time of the table for that. It also reads the column descriptions when it builds its rules.
+.execute database script <|
+.alter table TurbineTelemetry policy ingestiontime true
+//
+.alter table AlarmEvents policy ingestiontime true
+//
+.alter-merge table TurbineTelemetry column-docstrings (
+    Timestamp: "Time of the measurement, UTC",
+    TurbineId: "Turbine, WT-01 to WT-12. Identifies the monitored object",
+    State: "Operating state: RUNNING, DERATED, CURTAILED, IDLE, PAUSED, STOPPED, STOPPED_HIGH_WIND, MAINTENANCE, FAULT",
+    WindSpeed: "Wind speed at the nacelle, m/s",
+    ActivePower: "Power delivered by the turbine, kW",
+    PowerSetpoint: "Power limit set by the controller or the grid operator, kW",
+    GearboxOilTemp: "Gearbox oil temperature, degrees Celsius. Controller warning at 78",
+    GearboxBearingTemp: "Gearbox high-speed bearing temperature, degrees Celsius",
+    GearboxOilPressure: "Gearbox oil pressure, bar",
+    GearboxVibration: "Gearbox vibration, mm/s. Controller warning at 5.5, derate at 8",
+    GeneratorWindingTemp: "Generator winding temperature, degrees Celsius",
+    MainBearingTemp: "Main bearing temperature, degrees Celsius")
+
+// Block 2. Check: the newest row per turbine with its ingestion time. Expect 12 rows, a few seconds old.
+TurbineTelemetry
+| where Timestamp > ago(10m)
+| extend ArrivedAt = ingestion_time()
+| summarize arg_max(Timestamp, State, ActivePower, GearboxVibration, GearboxOilTemp, ArrivedAt) by TurbineId
+| order by TurbineId asc
+
+// Block 3 (optional). The operations agent reads tables, not functions, so the comparison with the fleet
+// that GearboxVsFleet() makes on request is written to a table as the data arrives: one row per running
+// turbine for each batch of telemetry, about every 20 seconds. Inside an update policy, TurbineTelemetry
+// means the rows that just arrived. A batch with fewer than 6 running turbines is skipped: a median of a
+// few turbines says little.
+.execute database script <|
+.create-merge table GearboxVsFleetLive (Timestamp: datetime, TurbineId: string, GearboxVibration: real, FleetMedianVibration: real, VibrationVsFleet: real, GearboxBearingTemp: real, FleetMedianBearingTemp: real, BearingTempVsFleet: real, TurbinesCompared: long)
+//
+.alter table GearboxVsFleetLive docstring 'Gearbox vibration and bearing temperature of each running turbine against the median of the running turbines in the same batch of telemetry. VibrationVsFleet above 2 mm/s means the turbine stands out.'
+//
+.alter-merge table GearboxVsFleetLive policy retention softdelete = 30d
+//
+.create-or-alter function with (folder = 'Ingestion', docstring = 'Update policy: each running turbine against the fleet median of the same batch') Expand_GearboxVsFleetLive() {
+    let batch = TurbineTelemetry
+        | where State in ('RUNNING', 'DERATED')
+        | summarize Timestamp = max(Timestamp), Vibration = avg(GearboxVibration), BearingTemp = avg(GearboxBearingTemp) by TurbineId
+        | extend Batch = 1;
+    let fleet = batch
+        | summarize FleetMedianVibration = percentile(Vibration, 50), FleetMedianBearingTemp = percentile(BearingTemp, 50), TurbinesCompared = count() by Batch;
+    batch
+    | join kind=inner fleet on Batch
+    | where TurbinesCompared >= 6
+    | project Timestamp, TurbineId,
+              GearboxVibration = round(Vibration, 2), FleetMedianVibration = round(FleetMedianVibration, 2),
+              VibrationVsFleet = round(Vibration - FleetMedianVibration, 2),
+              GearboxBearingTemp = round(BearingTemp, 1), FleetMedianBearingTemp = round(FleetMedianBearingTemp, 1),
+              BearingTempVsFleet = round(BearingTemp - FleetMedianBearingTemp, 1), TurbinesCompared
+}
+//
+.alter table GearboxVsFleetLive policy update @'[{"IsEnabled": true, "Source": "TurbineTelemetry", "Query": "Expand_GearboxVsFleetLive()", "IsTransactional": false, "PropagateIngestionProperties": false}]'
+
+// Block 4. Check, after a minute: the latest comparison. WT-07 should lead with about 1.3 mm/s.
+GearboxVsFleetLive
+| where Timestamp > ago(10m)
+| summarize arg_max(Timestamp, GearboxVibration, FleetMedianVibration, VibrationVsFleet, BearingTempVsFleet, TurbinesCompared) by TurbineId
+| order by VibrationVsFleet desc

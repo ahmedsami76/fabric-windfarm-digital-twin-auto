@@ -1,0 +1,304 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.465666,
+            32.196135
+          ],
+          [
+            -100.477611,
+            32.204894
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-01",
+        "from": "SUB-01",
+        "to": "WT-06",
+        "roadType": "access",
+        "lengthM": 1489
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.477611,
+            32.204894
+          ],
+          [
+            -100.477611,
+            32.210958
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-02",
+        "from": "WT-06",
+        "to": "WT-07",
+        "roadType": "access",
+        "lengthM": 675
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.477611,
+            32.210958
+          ],
+          [
+            -100.483982,
+            32.212979
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-03",
+        "from": "WT-07",
+        "to": "WT-04",
+        "roadType": "access",
+        "lengthM": 641
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.477611,
+            32.210958
+          ],
+          [
+            -100.475222,
+            32.216347
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-04",
+        "from": "WT-07",
+        "to": "WT-08",
+        "roadType": "access",
+        "lengthM": 641
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.475222,
+            32.216347
+          ],
+          [
+            -100.472833,
+            32.221737
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-05",
+        "from": "WT-08",
+        "to": "WT-09",
+        "roadType": "access",
+        "lengthM": 641
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.483982,
+            32.212979
+          ],
+          [
+            -100.487167,
+            32.218369
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-06",
+        "from": "WT-04",
+        "to": "WT-03",
+        "roadType": "access",
+        "lengthM": 671
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.487167,
+            32.218369
+          ],
+          [
+            -100.480796,
+            32.22039
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-07",
+        "from": "WT-03",
+        "to": "WT-05",
+        "roadType": "access",
+        "lengthM": 641
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.475222,
+            32.216347
+          ],
+          [
+            -100.468055,
+            32.216347
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-08",
+        "from": "WT-08",
+        "to": "WT-10",
+        "roadType": "access",
+        "lengthM": 675
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.468055,
+            32.216347
+          ],
+          [
+            -100.462481,
+            32.212979
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-09",
+        "from": "WT-10",
+        "to": "WT-11",
+        "roadType": "access",
+        "lengthM": 645
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.462481,
+            32.212979
+          ],
+          [
+            -100.457703,
+            32.217021
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-10",
+        "from": "WT-11",
+        "to": "WT-12",
+        "roadType": "access",
+        "lengthM": 636
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.487167,
+            32.218369
+          ],
+          [
+            -100.49513,
+            32.219716
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-11",
+        "from": "WT-03",
+        "to": "WT-02",
+        "roadType": "access",
+        "lengthM": 765
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.49513,
+            32.219716
+          ],
+          [
+            -100.502297,
+            32.221064
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-12",
+        "from": "WT-02",
+        "to": "WT-01",
+        "roadType": "access",
+        "lengthM": 691
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -100.465666,
+            32.188949
+          ],
+          [
+            -100.465666,
+            32.196135
+          ]
+        ]
+      },
+      "properties": {
+        "id": "RD-00",
+        "from": "GATE",
+        "to": "SUB-01",
+        "roadType": "entrance",
+        "lengthM": 800
+      }
+    }
+  ]
+}

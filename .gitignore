@@ -1,0 +1,20 @@
+# local configuration with your subscription and workspace details
+config/demo.env
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+# rendered files and secrets
+edge/dataflows/rendered/
+# definitions of the operations agent saved before a change (infra/09-remediation-agent.sh)
+fabric/operations-agent/saved/
+*.pem
+ca.crt
+.DS_Store
+node_modules/
+package-lock.json
+# checkpoints, plans and the lock of tools/deploy.py: the record of your deployments, without secrets
+.deploy/

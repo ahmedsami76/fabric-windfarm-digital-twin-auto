@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+echo "scp $*" >> "$STUB_DIR/calls.log"

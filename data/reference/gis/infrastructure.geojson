@@ -1,0 +1,53 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.481975,
+          32.204786,
+          746.7
+        ]
+      },
+      "properties": {
+        "id": "MET-01",
+        "name": "Met mast 01",
+        "assetType": "MetMast"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.465666,
+          32.196135,
+          707.4
+        ]
+      },
+      "properties": {
+        "id": "SUB-01",
+        "name": "Collector substation",
+        "assetType": "Substation"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -100.464392,
+          32.195596,
+          708.3
+        ]
+      },
+      "properties": {
+        "id": "OM-01",
+        "name": "Operations and maintenance building",
+        "assetType": "Building"
+      }
+    }
+  ]
+}

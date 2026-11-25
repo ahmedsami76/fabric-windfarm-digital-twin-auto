@@ -1,0 +1,48 @@
+Names are case sensitive. Tables that start with ops_ use PascalCase columns (TurbineId, Timestamp, EnergyKwh).
+Tables that start with ref_ use camelCase columns (turbineId, ratedPowerKw, sopId). Write names exactly as in the schema.
+Put [Timestamp], [file], [role], [Year] and [Month] in square brackets.
+
+"Now" is (SELECT MAX([Timestamp]) FROM ops_scada_10min). Never use GETDATE() or SYSUTCDATETIME().
+
+ops_scada_10min: one row per turbine per 10 minutes. EnergyKwh, PossibleEnergyKwh and LostEnergyKwh are for that
+period. AvailabilityCategory is one of 'Full performance', 'Partial performance', 'Technical standby',
+'Out of environmental specification', 'Requested shutdown', 'Out of electrical specification', 'Forced outage',
+'Scheduled maintenance', 'Information unavailable'. LossCause says what the lost energy was lost to: 'Component fault',
+'Technical derate', 'Scheduled maintenance', 'Grid curtailment', 'Grid outage', 'Icing', 'High wind', 'Low wind',
+'Cable untwist'.
+ops_turbine_events: one row per stop or derate, with Cause, Component, ComponentCode ('GBX', 'GEN', 'PIT', 'YAW',
+'CNV', 'HYD', 'BLD', 'TRF', 'TWR', 'CTL', 'GRID'), AlarmCode, DurationHours, LostEnergyMwh, ResponsibleParty
+('Service provider', 'Operator', 'Grid operator', 'Environment') and the WorkOrderId that fixed it. FaultClass is
+'A' for a trip that was reset without a repair, 'B' for a minor repair, 'C' for a major repair.
+ops_work_orders: one row per work order. Status is 'Open', 'Scheduled' or 'Closed'. WorkType is 'Corrective',
+'Preventive', 'Inspection' or 'OilAnalysis'. OpenedDate, ScheduledDate and ClosedDate are date-times; ScheduledDate
+is the date the work is due. CostBorneBy is 'Owner', 'Warranty' or 'Service agreement'. WaitingForPartsHours is the
+part of the downtime spent waiting. CoveredByWarranty is a bit (1 = yes).
+ops_power_forecast: one row per hour (TargetTime, UTC). ForecastType 'Latest' is the newest forecast for the next
+seven days: use it for anything about the coming days. ForecastType 'Day-ahead' is the forecast made the day before,
+kept for every past hour: use it to measure forecast accuracy. WindSpeedP90 is the wind speed that is unlikely to be
+exceeded. Site time is UTC converted with AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'.
+ops_oil_analysis: gearbox oil samples per turbine with SampleDate, IronPpm, CopperPpm, WaterPpm, Condition, LabComment.
+ops_market_prices: one row per hour ([Timestamp] is the start of the hour) with day-ahead and real-time price.
+ops_met_10min: the met mast, one row per 10 minutes. Join to ops_scada_10min on [Timestamp].
+ops_work_order_parts: the parts each work order used. Join to ref_spare_parts on PartId = partId.
+ops_alarm_log: one row per alarm with RaisedAt and ClearedAt. Join to ref_alarm_codes on AlarmCode = alarmCode.
+ops_monthly_budget: one row per month. Join on [Year] and [Month], or on YearMonth ('yyyy-MM').
+ops_curtailments: Compensated is a bit (1 = paid for).
+ref_site has one row. CROSS JOIN it to get ppaPriceUsdPerMwh and capacityMw.
+ref_turbines: 12 turbines, WT-01 to WT-12, ratedPowerKw each.
+ref_alarm_codes and ref_sop_index: what an alarm means, what the controller does, and the procedure (sopId).
+ref_oncall_roster and ref_technicians: who is on call. onCall is a bit. Join on onCallRoleId = roleId.
+ref_components and ref_contracts: warranty per component. Join on warrantyContractId = contractId.
+
+T-SQL only. No LIMIT (use TOP with ORDER BY), no DATE_TRUNC, no ADD_MONTHS, no LEAST or GREATEST (use CASE).
+The % operator does not accept float columns: for an angle write x - 360 * FLOOR(x / 360).
+The first day of a month is DATEFROMPARTS(YEAR(d), MONTH(d), 1). A month as a number is YEAR(d) * 100 + MONTH(d).
+The Monday of a week is DATEADD(day, -(DATEDIFF(day, CAST('1900-01-01' AS date), CAST(d AS date)) % 7), CAST(d AS date)).
+Text is compared exactly, upper and lower case included. ref_alarm_codes.component is lower case: 'gearbox',
+'pitch system', 'yaw system', 'generator', 'converter', 'hydraulic system', 'blades', 'tower', 'controller', 'grid',
+'environment', 'scada'. ops_turbine_events.Component starts with a capital: 'Gearbox', 'Pitch system', 'Yaw system',
+'Generator', 'Converter', 'Hydraulic unit', 'Blade set', 'Tower', 'Transformer', 'Controller', 'Grid connection'.
+ref_components.componentType starts with a capital too: 'Gearbox', 'Generator', 'Main bearing', 'Pitch system'.
+When you are not sure how a text value is spelled, compare in lower case: LOWER(c.componentType) LIKE '%gearbox%'.
+Divide with a decimal: 1.0 * a / b, never integer by integer. Return at most 25 rows.

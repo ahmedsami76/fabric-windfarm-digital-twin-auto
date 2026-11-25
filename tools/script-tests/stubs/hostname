@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+cat "$STUB_DIR/hostname" 2>/dev/null || echo workstation

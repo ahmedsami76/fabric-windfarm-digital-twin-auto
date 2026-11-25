@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stand-in for npm in the scenario tests of app/create-app.sh. It logs the call with the folder it was
+# made in, and does what the script relies on: the functions pack creates packages/functions.
+echo "npm $* (in $(basename "$PWD"))" >> "$STUB_DIR/calls.log"
+case "$*" in
+  "--version") cat "$STUB_DIR/npm_version" 2>/dev/null || echo "11.6.2" ;;
+  "run pack:add -- functions") [[ -e "$STUB_DIR/pack_fails" ]] || { mkdir -p packages/functions/src; echo "// hello world of the template" > packages/functions/src/function_app.ts; printf '{\n  "name": "@rayfin-app/functions",\n  "dependencies": { "@microsoft/fabric-user-data-functions": "^2.0.1" }\n}\n' > packages/functions/package.json; } ;;
+  "run typecheck") [[ ! -e "$STUB_DIR/typecheck_fails" ]] || { echo "src/twin/TwinApp.tsx(3,1): error TS2307"; exit 2; } ;;
+  install*" mssql@"*) sed -i.bak 's|"dependencies": {|"dependencies": { "mssql": "12.8.1",|' packages/functions/package.json; rm -f packages/functions/package.json.bak ;;
+  install*three@*) sed -i.bak 's|"dependencies": {|"dependencies": { "three": "0.187.0",|' packages/frontend/package.json; rm -f packages/frontend/package.json.bak ;;
+esac
+exit 0

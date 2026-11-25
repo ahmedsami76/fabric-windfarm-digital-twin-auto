@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Stand-in for ssh: logs the call and runs the remote command locally with a scratch home folder.
+S="$STUB_DIR"; echo "ssh $*" >> "$S/calls.log"
+while [[ "$1" == -* ]]; do if [[ "$1" == "-o" ]]; then shift 2; else shift; fi; done
+target="$1"; shift
+if [[ $# -eq 0 ]]; then echo "[interactive shell on $target]"; exit 0; fi
+mkdir -p "$S/home"; HOME="$S/home" bash -c "cd \"$S/home\" && $*"

@@ -1,0 +1,25 @@
+// =============================================================================
+// 03-onelake-availability.kql : expose the typed tables in OneLake as Delta
+// tables, so the Lakehouse (through shortcuts), notebooks and Direct Lake
+// semantic models can read them.
+//
+// Run after data is flowing. Run AFTER the optional sample-data smoke test:
+// while OneLake availability is on, a table cannot be cleared or truncated.
+//
+// TargetLatencyInMinutes = 5 writes to OneLake at most 5 minutes behind the
+// Eventhouse. The default (up to 3 hours) produces fewer, larger files; 5 minutes
+// suits a demo. RawEvents is deliberately left out.
+//
+// Afterwards, select each table in the database explorer and confirm that the
+// OneLake section of the details pane shows Availability = Enabled. If it does
+// not, set it there by hand and run this script again to apply the latency.
+// =============================================================================
+
+.execute database script <|
+//
+.alter-merge table TurbineTelemetry policy mirroring dataformat=parquet with (IsEnabled=true, TargetLatencyInMinutes=5)
+.alter-merge table WeatherObservations policy mirroring dataformat=parquet with (IsEnabled=true, TargetLatencyInMinutes=5)
+.alter-merge table AlarmEvents policy mirroring dataformat=parquet with (IsEnabled=true, TargetLatencyInMinutes=5)
+.alter-merge table TurbineStateChanges policy mirroring dataformat=parquet with (IsEnabled=true, TargetLatencyInMinutes=5)
+.alter-merge table AssetRegistry policy mirroring dataformat=parquet with (IsEnabled=true, TargetLatencyInMinutes=5)
+.alter-merge table EdgeHeartbeats policy mirroring dataformat=parquet with (IsEnabled=true, TargetLatencyInMinutes=5)

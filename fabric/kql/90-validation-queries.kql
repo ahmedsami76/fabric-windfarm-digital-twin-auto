@@ -1,0 +1,121 @@
+// =============================================================================
+// 90-validation-queries.kql : checks for Phase 1.
+// Each query is its own block (separated by an empty line). Place the cursor in
+// a block and select Run.
+// =============================================================================
+
+// 1. Is data arriving? Messages per type over the last 15 minutes.
+RawEvents
+| where ingestion_time() > ago(15m)
+| summarize Messages = count(), Latest = max(timestamp) by messageType
+| order by Messages desc
+
+// 2. Edge-to-cloud latency per turbine over the last 10 minutes.
+//    Expect 12 turbines, about 120 rows each, and latency of a few seconds to about 30 seconds.
+TurbineTelemetry
+| where Timestamp > ago(10m)
+| extend LatencySeconds = datetime_diff('second', IngestedAt, Timestamp)
+| summarize Rows = count(), Latest = max(Timestamp), AvgLatencySeconds = round(avg(LatencySeconds), 1), MaxLatencySeconds = max(LatencySeconds) by TurbineId
+| order by TurbineId asc
+
+// 3. Current state of every turbine.
+TurbineLatest()
+| project TurbineId, Timestamp, State, WindSpeed, ActivePower, RotorSpeed, GearboxOilTemp, GearboxVibration, GeneratorWindingTemp
+| order by TurbineId asc
+
+// 4. Site production over the last hour, in MW.
+TurbineTelemetry
+| where Timestamp > ago(1h)
+| summarize PowerKw = avg(ActivePower) by TurbineId, bin(Timestamp, 1m)
+| summarize SitePowerMW = round(sum(PowerKw) / 1000, 2) by Timestamp
+| render timechart with (title = 'Site power (MW)')
+
+// 5. Wind at the met mast over the last hour.
+WeatherObservations
+| where Timestamp > ago(1h)
+| summarize WindSpeed = avg(WindSpeed), WindGust = max(WindGust) by bin(Timestamp, 1m)
+| render timechart with (title = 'Wind speed at hub height (m/s)')
+
+// 6. Asset registry: 12 turbines and the met mast, with coordinates.
+CurrentAssets()
+| project AssetId, AssetType, Name, Model, RatedPowerKw, Latitude, Longitude, ElevationM, CollectorString
+| order by AssetId asc
+
+// 7. The injected anomaly: gearbox vibration of WT-07 against its neighbours.
+TurbineTelemetry
+| where Timestamp > ago(45m) and TurbineId in ('WT-06', 'WT-07', 'WT-08')
+| summarize GearboxVibration = avg(GearboxVibration) by TurbineId, bin(Timestamp, 30s)
+| render timechart with (title = 'Gearbox vibration (mm/s)')
+
+// 8. Same window: gearbox oil temperature.
+TurbineTelemetry
+| where Timestamp > ago(45m) and TurbineId in ('WT-06', 'WT-07', 'WT-08')
+| summarize GearboxOilTemp = avg(GearboxOilTemp) by TurbineId, bin(Timestamp, 30s)
+| render timechart with (title = 'Gearbox oil temperature (degC)')
+
+// 9. Same window: power, showing the production gap while WT-07 is derated.
+TurbineTelemetry
+| where Timestamp > ago(45m) and TurbineId in ('WT-06', 'WT-07', 'WT-08')
+| summarize ActivePower = avg(ActivePower) by TurbineId, bin(Timestamp, 30s)
+| render timechart with (title = 'Active power (kW)')
+
+// 10. Which turbine stands out from the fleet right now? Vibration against the fleet median.
+//     A ratio well above 1 is the kind of signal the operations agent will watch in Phase 3.
+let recent = TurbineTelemetry
+    | where Timestamp > ago(10m) and State !in ('IDLE', 'STOPPED', 'MAINTENANCE', 'FAULT')
+    | summarize Vibration = avg(GearboxVibration), OilTemp = avg(GearboxOilTemp), PowerKw = avg(ActivePower) by TurbineId;
+let fleetVibration = toscalar(recent | summarize percentile(Vibration, 50));
+let fleetOilTemp = toscalar(recent | summarize percentile(OilTemp, 50));
+recent
+| extend VibrationVsFleet = round(Vibration / fleetVibration, 2), OilTempAboveFleet = round(OilTemp - fleetOilTemp, 1)
+| project TurbineId, Vibration = round(Vibration, 2), VibrationVsFleet, OilTemp = round(OilTemp, 1), OilTempAboveFleet, PowerKw = round(PowerKw)
+| order by VibrationVsFleet desc
+
+// 11. Alarms and state changes over the last 2 hours, as one timeline.
+union
+    (AlarmEvents | where Timestamp > ago(2h) | project Timestamp, TurbineId, Kind = 'alarm', Event = strcat(AlarmCode, ' ', Status), Severity, Detail = strcat(Description, iff(isnotnull(Value), strcat(' (', Value, ' ', Unit, ')'), ''))),
+    (TurbineStateChanges | where Timestamp > ago(2h) | project Timestamp, TurbineId, Kind = 'state', Event = strcat(PreviousState, ' -> ', State), Severity = '', Detail = Reason)
+| order by Timestamp asc
+
+// 12. Alarms that are active now.
+ActiveAlarms()
+| order by RaisedAt desc
+
+// 13. Gaps in telemetry longer than 20 seconds in the last hour (communication losses).
+TurbineTelemetry
+| where Timestamp > ago(1h)
+| sort by TurbineId asc, Timestamp asc
+| extend Gap = iff(TurbineId == prev(TurbineId), Timestamp - prev(Timestamp), 0s)
+| where Gap > 20s
+| project TurbineId, GapStart = Timestamp - Gap, GapEnd = Timestamp, Gap
+
+// 14. Is the edge alive? One heartbeat per minute is expected.
+EdgeHeartbeats
+| where Timestamp > ago(15m)
+| project Timestamp, EdgeId, TurbinesReporting, TurbinesTotal, UptimeSeconds, MessagesPublished
+| order by Timestamp desc
+
+// 15. Ingestion problems in the last day (expect no rows).
+.show ingestion failures
+| where FailedOn > ago(1d)
+| project FailedOn, Table, FailureKind, Details
+| order by FailedOn desc
+
+// 16. Update policies in place (expect six rows, one per typed table).
+.show table * policy update
+| where isnotempty(Policy) and Policy != 'null'
+| project EntityName, Policy
+
+// 17. After 03-onelake-availability.kql: how far OneLake is behind the Eventhouse.
+//     If your Eventhouse does not recognise this command, see "Turn on OneLake
+//     availability for an eventhouse" on Microsoft Learn for the current syntax.
+.show table TurbineTelemetry operations mirroring-status
+
+// 18. Are the envelope columns filled? Run this right after step 6.7 of the deployment guide.
+//     Expect EmptySeq = 0, EmptySchemaVersion = 0 and ExtraColumns empty. Anything else means the
+//     Get data wizard used a mapping of its own instead of RawEvents_mapping; see "RawEvents has
+//     the columns schemaVersion_1 and seq_1" in docs/troubleshooting.md.
+RawEvents
+| where ingestion_time() > ago(15m)
+| summarize Messages = count(), EmptySeq = countif(isnull(seq)), EmptySchemaVersion = countif(isempty(schemaVersion))
+| extend ExtraColumns = toscalar(RawEvents | getschema | where ColumnName !in ('messageType', 'schemaVersion', 'siteId', 'assetId', 'timestamp', 'seq', 'data') | summarize strcat_array(make_list(ColumnName), ', '))

@@ -1,0 +1,51 @@
+// =============================================================================
+// 01-tables.kql : tables, ingestion mapping and policies
+// Run once in the KQL database (open the database, select "Query with code" or a
+// KQL queryset, paste the whole file, place the cursor in the block below, Run).
+// The block is one database script: it has no empty lines on purpose, because an
+// empty line would split it into separate queries.
+// Expect one result row per command, each with Result = Completed.
+// =============================================================================
+
+.execute database script <|
+//
+// ---- Raw landing table: one row per message, exactly as sent by the edge ----
+.create-merge table RawEvents (messageType: string, schemaVersion: string, siteId: string, assetId: string, timestamp: datetime, seq: long, data: dynamic)
+//
+.create-or-alter table RawEvents ingestion json mapping 'RawEvents_mapping' '[{"column":"messageType","Properties":{"Path":"$.messageType"}},{"column":"schemaVersion","Properties":{"Path":"$.schemaVersion"}},{"column":"siteId","Properties":{"Path":"$.siteId"}},{"column":"assetId","Properties":{"Path":"$.assetId"}},{"column":"timestamp","Properties":{"Path":"$.timestamp"}},{"column":"seq","Properties":{"Path":"$.seq"}},{"column":"data","Properties":{"Path":"$.data"}}]'
+//
+// Record when each row arrived, so that edge-to-cloud latency can be measured.
+.alter table RawEvents policy ingestiontime true
+//
+// Raw messages are kept for two weeks; the typed tables below are the long-term store.
+.alter-merge table RawEvents policy retention softdelete = 14d recoverability = disabled
+//
+// Small batches so that new data is queryable within seconds, not minutes.
+.alter table RawEvents policy ingestionbatching '{"MaximumBatchingTimeSpan":"00:00:20","MaximumNumberOfItems":500,"MaximumRawDataSizeMB":256}'
+//
+// ---- Typed tables, filled from RawEvents by update policies (02-update-policies.kql) ----
+.create-merge table TurbineTelemetry (Timestamp: datetime, SiteId: string, TurbineId: string, Seq: long, State: string, WindSpeed: real, WindDirection: real, AmbientTemp: real, ActivePower: real, ReactivePower: real, PowerSetpoint: real, RotorSpeed: real, GeneratorSpeed: real, PitchAngle: real, NacelleDirection: real, YawError: real, GearboxOilTemp: real, GearboxBearingTemp: real, GearboxOilPressure: real, GearboxVibration: real, GeneratorWindingTemp: real, GeneratorBearingTemp: real, MainBearingTemp: real, NacelleTemp: real, TransformerTemp: real, TowerVibration: real, HydraulicPressure: real, GridVoltage: real, GridFrequency: real, EnergyTotal: real, IngestedAt: datetime)
+//
+.create-merge table WeatherObservations (Timestamp: datetime, SiteId: string, StationId: string, Seq: long, WindSpeed: real, WindDirection: real, WindGust: real, AmbientTemp: real, Pressure: real, Humidity: real, AirDensity: real, IngestedAt: datetime)
+//
+.create-merge table AlarmEvents (Timestamp: datetime, SiteId: string, TurbineId: string, Seq: long, AlarmId: string, AlarmCode: string, Status: string, Severity: string, Component: string, Description: string, Value: real, Threshold: real, Unit: string, DurationSeconds: long, SopId: string, IngestedAt: datetime)
+//
+.create-merge table TurbineStateChanges (Timestamp: datetime, SiteId: string, TurbineId: string, Seq: long, PreviousState: string, State: string, Reason: string, IngestedAt: datetime)
+//
+.create-merge table AssetRegistry (Timestamp: datetime, SiteId: string, AssetId: string, AssetType: string, Name: string, Model: string, Manufacturer: string, SerialNumber: string, RatedPowerKw: real, RotorDiameterM: real, HubHeightM: real, Latitude: real, Longitude: real, ElevationM: real, LocalX: real, LocalY: real, CollectorString: string, CommissionedDate: datetime, IngestedAt: datetime)
+//
+.create-merge table EdgeHeartbeats (Timestamp: datetime, SiteId: string, EdgeId: string, Seq: long, SimulatorVersion: string, UptimeSeconds: long, TurbinesReporting: long, TurbinesTotal: long, MessagesPublished: long, IngestedAt: datetime)
+//
+.alter-merge table TurbineTelemetry policy retention softdelete = 365d
+.alter-merge table WeatherObservations policy retention softdelete = 365d
+.alter-merge table AlarmEvents policy retention softdelete = 1825d
+.alter-merge table TurbineStateChanges policy retention softdelete = 1825d
+.alter-merge table AssetRegistry policy retention softdelete = 365d
+.alter-merge table EdgeHeartbeats policy retention softdelete = 90d
+//
+.alter table TurbineTelemetry docstring 'One row per turbine every few seconds: SCADA signals as reported by the turbine controller.'
+.alter table WeatherObservations docstring 'Met mast observations at hub height.'
+.alter table AlarmEvents docstring 'Controller alarms: one row when an alarm is raised and one when it clears, linked by AlarmId.'
+.alter table TurbineStateChanges docstring 'One row each time a turbine changes operating state.'
+.alter table AssetRegistry docstring 'Static asset attributes, re-sent by the edge every few minutes. Use arg_max(Timestamp, *) by AssetId for the current view.'
+.alter table EdgeHeartbeats docstring 'One row per minute from the edge server; a gap means the edge or its cloud link is down.'

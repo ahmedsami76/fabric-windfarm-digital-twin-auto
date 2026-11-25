@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "windfarm-sim"
+version = "1.2.0"
+description = "Wind farm telemetry simulator for the Fabric digital twin demo"
+requires-python = ">=3.10"
+dependencies = ["paho-mqtt>=2.1,<3", "numpy>=1.26"]
+
+[project.optional-dependencies]
+# Needed only to generate the operating history outside Fabric (python -m windfarm_sim.history).
+history = ["pandas>=2.1", "scipy>=1.11"]
+
+[project.scripts]
+windfarm-sim = "windfarm_sim.__main__:main"
+simctl = "windfarm_sim.ctl:main"
+
+[tool.setuptools]
+packages = ["windfarm_sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

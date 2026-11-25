@@ -1,0 +1,586 @@
+{
+ "agent": {
+  "name": "WindFarmDataAgent",
+  "description": "Answers questions about the Northwind Ridge wind farm: production, availability, losses, faults, maintenance, spare parts, contracts and the live state of the turbines.",
+  "instructions": "You answer questions from the people who run one wind farm: the site manager, performance and reliability\nengineers, the maintenance planner, the asset manager and the control room operator.\n\nWhich source to use\n- The KQL database WindFarmEH holds the live data. Use it only when the question is about right now or the\n  last 24 hours: what a turbine is doing, which alarms are active, current power, live temperature or vibration.\n- The lakehouse WindFarmLH holds everything else. Use it for any period longer than 24 hours (\"last week\",\n  \"last 90 days\", \"this year\", \"by month\"), for budgets, events, work orders, parts, contracts and people.\n- Three kinds of question always go to the lakehouse, even when they sound like \"now\":\n  what an alarm code means, what the controller does and which procedure applies (ref_alarm_codes, ref_sop_index);\n  the forecast for the coming hours and days (ops_power_forecast);\n  whether a turbine is misaligned, underperforming or drifting away from the fleet, which needs weeks of data.\n- If a question needs both, answer the history from the lakehouse first, then the live part from the KQL\n  database, and say which part came from where.\n\nTime\n- All times are UTC.\n- In the lakehouse, \"now\" is the newest Timestamp in ops_scada_10min, not the clock. \"Last 90 days\" and\n  \"last 12 months\" count back from that moment.\n- \"Last month\" is the last complete calendar month. \"Last 6 months\" and \"last 12 months\" count back from\n  \"now\" to the day, like \"last 90 days\"; they are not calendar months unless the question says \"by month\".\n- \"Year to date\" runs from 1 January of the year of \"now\" to \"now\". A budget for the year to date counts the\n  running month pro rata by days.\n- Say which period the answer covers.\n\nDefinitions that must not change\n- Energy is the sum of EnergyKwh. Report it in MWh (divide by 1000).\n- Lost energy is the sum of LostEnergyKwh, by LossCause. Its value is lost MWh x ppaPriceUsdPerMwh for every\n  cause, curtailment included, whether or not the offtaker paid for it.\n- Time availability = 1 - (10-minute periods with AvailabilityCategory 'Forced outage', 'Scheduled maintenance'\n  or 'Planned corrective action') / (all periods except 'Information unavailable').\n- Energy availability = energy / (energy + lost energy with LossCause 'Component fault', 'Scheduled maintenance',\n  'Corrective maintenance' or 'Technical derate'). Curtailment, icing, high wind and grid causes do not count\n  against the turbine.\n- Capacity factor = energy / (rated power x hours). One 10-minute period at rated power is ratedPowerKw / 6 kWh.\n- A failure is an event with Cause 'Component fault'. Faults the controller reset by itself are\n  Cause 'Auto-reset fault' and are counted separately.\n- Revenue = (energy in MWh + compensated curtailment in MWh) x ppaPriceUsdPerMwh of ref_site. Compensated\n  curtailment is the LostEnergyMwh of ops_curtailments where Compensated = 1: the offtaker pays for it as if\n  it had been produced. Use market prices only when the question asks for them.\n- Performance index = energy / possible energy over the periods with AvailabilityCategory 'Full performance'\n  only. It is close to 1; a turbine at 0.95 underperforms. Never compute it over all periods.\n- Forecast accuracy compares the day-ahead forecast (ForecastType 'Day-ahead') with possible power, hour by\n  hour, as a percentage of site capacity, so that outages and curtailment do not count as forecast error.\n- Repair cost is the TotalCostUsd of closed corrective work orders. CostBorneBy says who pays: 'Owner',\n  'Warranty' or 'Service agreement'. Compare the owner's part with the corrective maintenance budget.\n- A major failure is an event with FaultClass 'C'.\n- A repeat offender is a turbine and component with many forced outages in the last 12 months. Count every\n  forced outage for this, including the trips that reset by themselves, and show how many needed a technician.\n- \"At the same load\" means: only periods with State 'RUNNING' and high ActivePower, as in the example queries,\n  so that a turbine is not compared with others that ran harder or lighter.\n- Alarms are counted from ops_alarm_log, one row per alarm, grouped through ref_alarm_codes. Stops and derates\n  are counted from ops_turbine_events. They are different things: never add the two together.\n- The contractual availability of the service agreement has its own rules (contract CT-SMA-001). Follow the\n  example query for it exactly; do not use time availability in its place.\n\nHow to answer\n- When an example query fits the question, keep its tables, its filters and its period, and change only what the\n  question changes: the turbine, the component or the number of days.\n- Give the number first, with its unit and period. Then one or two sentences on what stands out.\n- Name the turbine (WT-01 to WT-12), the component or the work order. Do not answer in general terms.\n- The data covers one site, Northwind Ridge, and nothing outside it: no other wind farms, no wildlife or\n  environmental records, no remaining-life estimates, no staff records beyond the technician list.\n- If no table has a column for the thing asked, say that the data does not record it and say what is missing.\n  Do not answer 0, do not estimate, and do not put another figure in its place.\n- If a query fails or returns no rows, look at the example queries again and try once more before you say that\n  there is no data. A table that is in the schema has data.\n- Do not give advice on electrical or mechanical safety. Point to the procedure (sopId) instead.\n"
+ },
+ "lakehouse": {
+  "name": "WindFarmLH",
+  "description": "Everything except the last 24 hours. History of the wind farm: 10-minute SCADA periods with energy, lost energy and availability category, downtime events, work orders and parts, alarms, oil samples, blade inspections, budget, market prices, the power forecast for the coming week, contracts, spare parts, technicians, and the catalogue of alarm codes with the procedure for each.",
+  "instructions": "Names are case sensitive. Tables that start with ops_ use PascalCase columns (TurbineId, Timestamp, EnergyKwh).\nTables that start with ref_ use camelCase columns (turbineId, ratedPowerKw, sopId). Write names exactly as in the schema.\nPut [Timestamp], [file], [role], [Year] and [Month] in square brackets.\n\n\"Now\" is (SELECT MAX([Timestamp]) FROM ops_scada_10min). Never use GETDATE() or SYSUTCDATETIME().\n\nops_scada_10min: one row per turbine per 10 minutes. EnergyKwh, PossibleEnergyKwh and LostEnergyKwh are for that\nperiod. AvailabilityCategory is one of 'Full performance', 'Partial performance', 'Technical standby',\n'Out of environmental specification', 'Requested shutdown', 'Out of electrical specification', 'Forced outage',\n'Scheduled maintenance', 'Information unavailable'. LossCause says what the lost energy was lost to: 'Component fault',\n'Technical derate', 'Scheduled maintenance', 'Grid curtailment', 'Grid outage', 'Icing', 'High wind', 'Low wind',\n'Cable untwist'.\nops_turbine_events: one row per stop or derate, with Cause, Component, ComponentCode ('GBX', 'GEN', 'PIT', 'YAW',\n'CNV', 'HYD', 'BLD', 'TRF', 'TWR', 'CTL', 'GRID'), AlarmCode, DurationHours, LostEnergyMwh, ResponsibleParty\n('Service provider', 'Operator', 'Grid operator', 'Environment') and the WorkOrderId that fixed it. FaultClass is\n'A' for a trip that was reset without a repair, 'B' for a minor repair, 'C' for a major repair.\nops_work_orders: one row per work order. Status is 'Open', 'Scheduled' or 'Closed'. WorkType is 'Corrective',\n'Preventive', 'Inspection' or 'OilAnalysis'. OpenedDate, ScheduledDate and ClosedDate are date-times; ScheduledDate\nis the date the work is due. CostBorneBy is 'Owner', 'Warranty' or 'Service agreement'. WaitingForPartsHours is the\npart of the downtime spent waiting. CoveredByWarranty is a bit (1 = yes).\nops_power_forecast: one row per hour (TargetTime, UTC). ForecastType 'Latest' is the newest forecast for the next\nseven days: use it for anything about the coming days. ForecastType 'Day-ahead' is the forecast made the day before,\nkept for every past hour: use it to measure forecast accuracy. WindSpeedP90 is the wind speed that is unlikely to be\nexceeded. Site time is UTC converted with AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'.\nops_oil_analysis: gearbox oil samples per turbine with SampleDate, IronPpm, CopperPpm, WaterPpm, Condition, LabComment.\nops_market_prices: one row per hour ([Timestamp] is the start of the hour) with day-ahead and real-time price.\nops_met_10min: the met mast, one row per 10 minutes. Join to ops_scada_10min on [Timestamp].\nops_work_order_parts: the parts each work order used. Join to ref_spare_parts on PartId = partId.\nops_alarm_log: one row per alarm with RaisedAt and ClearedAt. Join to ref_alarm_codes on AlarmCode = alarmCode.\nops_monthly_budget: one row per month. Join on [Year] and [Month], or on YearMonth ('yyyy-MM').\nops_curtailments: Compensated is a bit (1 = paid for).\nref_site has one row. CROSS JOIN it to get ppaPriceUsdPerMwh and capacityMw.\nref_turbines: 12 turbines, WT-01 to WT-12, ratedPowerKw each.\nref_alarm_codes and ref_sop_index: what an alarm means, what the controller does, and the procedure (sopId).\nref_oncall_roster and ref_technicians: who is on call. onCall is a bit. Join on onCallRoleId = roleId.\nref_components and ref_contracts: warranty per component. Join on warrantyContractId = contractId.\n\nT-SQL only. No LIMIT (use TOP with ORDER BY), no DATE_TRUNC, no ADD_MONTHS, no LEAST or GREATEST (use CASE).\nThe % operator does not accept float columns: for an angle write x - 360 * FLOOR(x / 360).\nThe first day of a month is DATEFROMPARTS(YEAR(d), MONTH(d), 1). A month as a number is YEAR(d) * 100 + MONTH(d).\nThe Monday of a week is DATEADD(day, -(DATEDIFF(day, CAST('1900-01-01' AS date), CAST(d AS date)) % 7), CAST(d AS date)).\nText is compared exactly, upper and lower case included. ref_alarm_codes.component is lower case: 'gearbox',\n'pitch system', 'yaw system', 'generator', 'converter', 'hydraulic system', 'blades', 'tower', 'controller', 'grid',\n'environment', 'scada'. ops_turbine_events.Component starts with a capital: 'Gearbox', 'Pitch system', 'Yaw system',\n'Generator', 'Converter', 'Hydraulic unit', 'Blade set', 'Tower', 'Transformer', 'Controller', 'Grid connection'.\nref_components.componentType starts with a capital too: 'Gearbox', 'Generator', 'Main bearing', 'Pitch system'.\nWhen you are not sure how a text value is spelled, compare in lower case: LOWER(c.componentType) LIKE '%gearbox%'.\nDivide with a decimal: 1.0 * a / b, never integer by integer. Return at most 25 rows.\n",
+  "tables": [
+   "ops_scada_10min",
+   "ops_turbine_events",
+   "ops_work_orders",
+   "ops_work_order_parts",
+   "ops_alarm_log",
+   "ops_oil_analysis",
+   "ops_blade_inspections",
+   "ops_monthly_budget",
+   "ops_curtailments",
+   "ops_market_prices",
+   "ops_power_forecast",
+   "ops_met_10min",
+   "ref_site",
+   "ref_turbines",
+   "ref_components",
+   "ref_contracts",
+   "ref_alarm_codes",
+   "ref_sop_index",
+   "ref_spare_parts",
+   "ref_technicians",
+   "ref_oncall_roster",
+   "ref_power_curve"
+  ],
+  "examples": [
+   {
+    "id": "SM-01",
+    "question": "How much energy did we produce last month, and how does that compare with the budget?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nm AS (SELECT DATEADD(month, -1, DATEFROMPARTS(YEAR(AsOf), MONTH(AsOf), 1)) AS MonthStart,\n             DATEFROMPARTS(YEAR(AsOf), MONTH(AsOf), 1) AS MonthEnd FROM asof)\nSELECT MAX(b.YearMonth) AS YearMonth,\n       ROUND(SUM(s.EnergyKwh) / 1000, 0) AS EnergyMwh,\n       MAX(b.P50EnergyMwh) AS BudgetP50Mwh,\n       MAX(b.P90EnergyMwh) AS BudgetP90Mwh,\n       ROUND(100 * SUM(s.EnergyKwh) / 1000 / MAX(b.P50EnergyMwh), 1) AS PctOfBudget\nFROM ops_scada_10min AS s\nCROSS JOIN m\nJOIN ops_monthly_budget AS b ON b.[Year] = YEAR(m.MonthStart) AND b.[Month] = MONTH(m.MonthStart)\nWHERE s.[Timestamp] >= m.MonthStart AND s.[Timestamp] < m.MonthEnd"
+   },
+   {
+    "id": "SM-03",
+    "question": "What was the availability of each turbine over the last 90 days? Which turbines are below 97 percent?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT s.TurbineId,\n       ROUND(100 * (1 - 1.0 * SUM(CASE WHEN s.AvailabilityCategory IN ('Forced outage', 'Scheduled maintenance', 'Planned corrective action') THEN 1 ELSE 0 END) / COUNT(*)), 2) AS TimeAvailabilityPct,\n       ROUND(100 * SUM(s.EnergyKwh) / (SUM(s.EnergyKwh)\n             + SUM(CASE WHEN s.LossCause IN ('Component fault', 'Scheduled maintenance', 'Corrective maintenance', 'Technical derate') THEN s.LostEnergyKwh ELSE 0 END)), 2) AS EnergyAvailabilityPct,\n       ROUND(SUM(CASE WHEN s.AvailabilityCategory = 'Forced outage' THEN 1 ELSE 0 END) / 6.0, 1) AS ForcedOutageHours,\n       ROUND(SUM(s.EnergyKwh) / 1000, 0) AS EnergyMwh\nFROM ops_scada_10min AS s\nCROSS JOIN asof AS a\nWHERE s.[Timestamp] >= DATEADD(day, -90, a.AsOf) AND s.AvailabilityCategory <> 'Information unavailable'\nGROUP BY s.TurbineId\nORDER BY TimeAvailabilityPct"
+   },
+   {
+    "id": "SM-04",
+    "question": "What did we lose energy to in the last 12 months, and what was it worth?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT s.LossCause,\n       ROUND(SUM(s.LostEnergyKwh) / 1000, 0) AS LostEnergyMwh,\n       ROUND(SUM(s.LostEnergyKwh) / 1000 * MAX(st.ppaPriceUsdPerMwh), 0) AS ValueAtContractPriceUsd,\n       ROUND(100 * SUM(s.LostEnergyKwh) / SUM(SUM(s.LostEnergyKwh)) OVER (), 1) AS SharePct\nFROM ops_scada_10min AS s\nCROSS JOIN asof AS a\nCROSS JOIN ref_site AS st\nWHERE s.[Timestamp] >= DATEADD(month, -12, a.AsOf) AND s.LostEnergyKwh > 0\nGROUP BY s.LossCause\nORDER BY LostEnergyMwh DESC"
+   },
+   {
+    "id": "SM-05",
+    "question": "Which work orders are open, overdue or planned for the next 30 days?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT w.WorkOrderId, w.TurbineId, w.WorkType, w.Priority, w.Status,\n       CAST(w.ScheduledDate AS date) AS ScheduledDay,\n       DATEDIFF(day, a.AsOf, w.ScheduledDate) AS DaysFromNow,\n       CASE WHEN w.ScheduledDate < a.AsOf THEN 'Overdue'\n            WHEN w.ScheduledDate < DATEADD(day, 30, a.AsOf) THEN 'Next 30 days'\n            ELSE 'Later' END AS Timing,\n       w.Summary, t.name AS LeadTechnician\nFROM ops_work_orders AS w\nCROSS JOIN asof AS a\nLEFT JOIN ref_technicians AS t ON t.technicianId = w.LeadTechnicianId\nWHERE w.Status <> 'Closed'\nORDER BY w.ScheduledDate"
+   },
+   {
+    "id": "SM-06",
+    "question": "Which spare parts are at or below their reorder point, and how long would a new one take to arrive?",
+    "query": "SELECT partId, description, componentCode, quantityOnHand, reorderPoint, leadTimeDays, unitCostUsd\nFROM ref_spare_parts\nWHERE quantityOnHand <= reorderPoint\nORDER BY leadTimeDays DESC"
+   },
+   {
+    "id": "RE-01",
+    "question": "Which components cost us the most downtime and energy in the last 12 months?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT e.Component,\n       COUNT(*) AS Failures,\n       ROUND(SUM(e.DurationHours), 0) AS DowntimeHours,\n       ROUND(AVG(e.DurationHours), 1) AS MeanTimeToRepairHours,\n       ROUND(SUM(e.LostEnergyMwh), 0) AS LostEnergyMwh,\n       ROUND(SUM(w.TotalCostUsd), 0) AS RepairCostUsd\nFROM ops_turbine_events AS e\nLEFT JOIN ops_work_orders AS w ON w.WorkOrderId = e.WorkOrderId\nCROSS JOIN asof AS a\nWHERE e.Cause = 'Component fault' AND e.StartTime >= DATEADD(month, -12, a.AsOf)\nGROUP BY e.Component\nORDER BY LostEnergyMwh DESC"
+   },
+   {
+    "id": "RE-02",
+    "question": "What are the mean time between failures and the mean time to repair of each turbine over the last 12 months?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT t.turbineId AS TurbineId,\n       COUNT(CASE WHEN e.Cause = 'Component fault' THEN 1 END) AS Failures,\n       COUNT(CASE WHEN e.Cause = 'Auto-reset fault' THEN 1 END) AS AutoResets,\n       ROUND(COALESCE(SUM(CASE WHEN e.Cause = 'Component fault' THEN e.DurationHours END), 0), 0) AS DowntimeHours,\n       ROUND(AVG(CASE WHEN e.Cause = 'Component fault' THEN e.DurationHours END), 1) AS MeanTimeToRepairHours,\n       ROUND((8760 - COALESCE(SUM(CASE WHEN e.Cause = 'Component fault' THEN e.DurationHours END), 0))\n             / NULLIF(COUNT(CASE WHEN e.Cause = 'Component fault' THEN 1 END), 0), 0) AS MeanTimeBetweenFailuresHours\nFROM ref_turbines AS t\nCROSS JOIN asof AS a\nLEFT JOIN ops_turbine_events AS e\n       ON e.TurbineId = t.turbineId AND e.AvailabilityCategory = 'Forced outage'\n      AND e.StartTime >= DATEADD(month, -12, a.AsOf)\nGROUP BY t.turbineId\nORDER BY Failures DESC, TurbineId"
+   },
+   {
+    "id": "RE-09",
+    "question": "Which components are still under warranty, until when, and under which contract?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT c.componentType, COUNT(*) AS Components, c.warrantyEndDate,\n       DATEDIFF(day, a.AsOf, c.warrantyEndDate) AS DaysLeft,\n       c.warrantyContractId, k.counterparty, k.terms\nFROM ref_components AS c\nCROSS JOIN asof AS a\nLEFT JOIN ref_contracts AS k ON k.contractId = c.warrantyContractId\nWHERE c.warrantyEndDate >= CAST(a.AsOf AS date)\nGROUP BY c.componentType, c.warrantyEndDate, a.AsOf, c.warrantyContractId, k.counterparty, k.terms\nORDER BY c.warrantyEndDate, c.componentType"
+   },
+   {
+    "id": "MP-04",
+    "question": "Which spare parts did we use most in the last 12 months, and how many months of stock do we hold?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nused AS (\n    SELECT p.PartId, SUM(p.Quantity) AS Quantity\n    FROM ops_work_order_parts AS p\n    JOIN ops_work_orders AS w ON w.WorkOrderId = p.WorkOrderId\n    CROSS JOIN asof AS a\n    WHERE w.OpenedDate >= DATEADD(month, -12, a.AsOf) AND w.Status = 'Closed'\n    GROUP BY p.PartId)\nSELECT TOP 12 sp.partId, sp.description,\n       COALESCE(u.Quantity, 0) AS UsedInLast12Months,\n       sp.quantityOnHand, sp.reorderPoint, sp.leadTimeDays,\n       ROUND(sp.quantityOnHand / (u.Quantity / 12.0), 1) AS MonthsOfStock\nFROM ref_spare_parts AS sp\nLEFT JOIN used AS u ON u.PartId = sp.partId\nORDER BY UsedInLast12Months DESC, sp.partId"
+   },
+   {
+    "id": "AM-02",
+    "question": "How much were we curtailed in the last 12 months, why, and how much of it were we paid for?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT c.Reason, c.InstructedBy, c.Compensated,\n       COUNT(*) AS Events,\n       ROUND(SUM(c.DurationHours), 0) AS Hours,\n       ROUND(SUM(c.LostEnergyMwh), 0) AS CurtailedMwh,\n       ROUND(SUM(CASE WHEN c.Compensated = 1 THEN 0 ELSE c.LostEnergyMwh END) * MAX(st.ppaPriceUsdPerMwh), 0) AS RevenueLostUsd,\n       ROUND(AVG(c.AvgRealTimePriceUsdPerMwh), 1) AS MeanRealTimePrice\nFROM ops_curtailments AS c\nCROSS JOIN asof AS a\nCROSS JOIN ref_site AS st\nWHERE c.StartTime >= DATEADD(month, -12, a.AsOf)\nGROUP BY c.Reason, c.InstructedBy, c.Compensated\nORDER BY CurtailedMwh DESC"
+   },
+   {
+    "id": "OP-01",
+    "question": "A gearbox vibration alarm came in. What does it mean, what will the controller do, and which procedure applies?",
+    "query": "SELECT c.alarmCode, c.severity, c.description, c.threshold, c.unit, c.controllerAction, c.sopId,\n       s.title AS ProcedureTitle, s.[file]\nFROM ref_alarm_codes AS c\nLEFT JOIN ref_sop_index AS s ON s.sopId = c.sopId\nWHERE c.alarmCode LIKE 'GBX-VIB%' OR c.alarmCode LIKE 'GBX-OIL-TEMP%'\nORDER BY c.threshold"
+   },
+   {
+    "id": "OP-02",
+    "question": "Who is on call, and in which order do I escalate?",
+    "query": "SELECT r.escalationOrder, r.[role], r.shift, r.contactChannel, STRING_AGG(t.name, ', ') AS People\nFROM ref_oncall_roster AS r\nLEFT JOIN ref_technicians AS t ON t.onCallRoleId = r.roleId\nWHERE r.onCall = 1\nGROUP BY r.escalationOrder, r.[role], r.shift, r.contactChannel\nORDER BY r.escalationOrder, r.shift"
+   },
+   {
+    "id": "OP-03",
+    "question": "How often did gearbox alarms come up on each turbine in the last 12 months? Is WT-07 different?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT l.TurbineId,\n       COUNT(*) AS GearboxAlarms,\n       COUNT(CASE WHEN c.severity = 'critical' THEN 1 END) AS OfWhichCritical,\n       CAST(MAX(l.RaisedAt) AS date) AS LastRaised\nFROM ops_alarm_log AS l\nJOIN ref_alarm_codes AS c ON c.alarmCode = l.AlarmCode\nCROSS JOIN asof AS a\nWHERE c.component = 'gearbox' AND l.RaisedAt >= DATEADD(month, -12, a.AsOf)\nGROUP BY l.TurbineId\nORDER BY GearboxAlarms DESC"
+   },
+   {
+    "id": "SM-02",
+    "question": "Show production, budget and capacity factor by month for the last 12 months.",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\ne AS (SELECT YEAR(s.[Timestamp]) * 100 + MONTH(s.[Timestamp]) AS MonthKey,\n             SUM(s.EnergyKwh) AS EnergyKwh, SUM(t.ratedPowerKw / 6e0) AS RatedKwh\n      FROM ops_scada_10min AS s\n      JOIN ref_turbines AS t ON t.turbineId = s.TurbineId\n      CROSS JOIN asof AS a\n      WHERE s.[Timestamp] >= DATEADD(month, -12, DATEFROMPARTS(YEAR(a.AsOf), MONTH(a.AsOf), 1)) AND s.[Timestamp] < DATEFROMPARTS(YEAR(a.AsOf), MONTH(a.AsOf), 1)\n      GROUP BY YEAR(s.[Timestamp]) * 100 + MONTH(s.[Timestamp]))\nSELECT b.YearMonth,\n       ROUND(e.EnergyKwh / 1000, 0) AS EnergyMwh,\n       b.P50EnergyMwh AS BudgetP50Mwh,\n       ROUND(100 * e.EnergyKwh / 1000 / b.P50EnergyMwh, 1) AS PctOfBudget,\n       ROUND(100 * e.EnergyKwh / e.RatedKwh, 1) AS CapacityFactorPct\nFROM e\nJOIN ops_monthly_budget AS b ON b.[Year] * 100 + b.[Month] = e.MonthKey\nORDER BY b.YearMonth"
+   },
+   {
+    "id": "PE-01",
+    "question": "Which turbines produce less than they should for the wind they get? Rank them by performance index for the last 90 days.",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT s.TurbineId,\n       ROUND(SUM(s.EnergyKwh) / SUM(s.PossibleEnergyKwh), 4) AS PerformanceIndex,\n       ROUND((SUM(s.PossibleEnergyKwh) - SUM(s.EnergyKwh)) / 1000, 0) AS ShortfallMwh,\n       ROUND(COUNT(*) / 6e0, 0) AS HoursInFullPerformance\nFROM ops_scada_10min AS s\nCROSS JOIN asof AS a\nWHERE s.[Timestamp] >= DATEADD(day, -90, a.AsOf) AND s.AvailabilityCategory = 'Full performance'\nGROUP BY s.TurbineId\nORDER BY PerformanceIndex"
+   },
+   {
+    "id": "PE-02",
+    "question": "Compare the measured power curve of WT-09 with the rest of the fleet and with the manufacturer's curve.",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nbinned AS (\n    SELECT s.TurbineId, s.ActivePower,\n           ROUND(s.WindSpeed * POWER(s.AirDensity / 1.225, 1e0 / 3), 0) AS WindBin\n    FROM ops_scada_10min AS s\n    CROSS JOIN asof AS a\n    WHERE s.[Timestamp] >= DATEADD(day, -180, a.AsOf) AND s.AvailabilityCategory = 'Full performance')\nSELECT b.WindBin AS WindSpeedBin,\n       MAX(r.powerKw) AS ManufacturerKw,\n       ROUND(AVG(CASE WHEN b.TurbineId <> 'WT-09' THEN b.ActivePower END), 0) AS RestOfFleetKw,\n       ROUND(AVG(CASE WHEN b.TurbineId = 'WT-09' THEN b.ActivePower END), 0) AS Wt09Kw,\n       ROUND(100 * (AVG(CASE WHEN b.TurbineId = 'WT-09' THEN b.ActivePower END)\n                    / AVG(CASE WHEN b.TurbineId <> 'WT-09' THEN b.ActivePower END) - 1), 1) AS Wt09VsFleetPct\nFROM binned AS b\nJOIN ref_power_curve AS r ON r.windSpeed = b.WindBin\nWHERE b.WindBin BETWEEN 4 AND 13\nGROUP BY b.WindBin\nORDER BY b.WindBin"
+   },
+   {
+    "id": "PE-03",
+    "question": "Is any turbine misaligned with the wind? Compare each nacelle direction with the wind direction at the met mast.",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nd AS (\n    SELECT s.TurbineId,\n           (s.NacelleDirection - m.WindDirection + 540)\n           - 360 * FLOOR((s.NacelleDirection - m.WindDirection + 540) / 360) - 180 AS OffsetDeg\n    FROM ops_scada_10min AS s\n    JOIN ops_met_10min AS m ON m.[Timestamp] = s.[Timestamp]\n    CROSS JOIN asof AS a\n    WHERE s.[Timestamp] >= DATEADD(day, -60, a.AsOf) AND s.State = 'RUNNING' AND m.WindSpeed BETWEEN 6 AND 12)\nSELECT TurbineId, ROUND(AVG(OffsetDeg), 1) AS MeanOffsetDeg, COUNT(*) AS Records\nFROM d\nGROUP BY TurbineId\nORDER BY ABS(AVG(OffsetDeg)) DESC"
+   },
+   {
+    "id": "PE-04",
+    "question": "When did WT-05 and WT-09 start to underperform? Show their performance index by month against the rest of the fleet.",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT CONCAT(YEAR(s.[Timestamp]), '-', RIGHT(CONCAT('0', MONTH(s.[Timestamp])), 2)) AS YearMonth,\n       ROUND(SUM(CASE WHEN s.TurbineId = 'WT-05' THEN s.EnergyKwh END)\n             / SUM(CASE WHEN s.TurbineId = 'WT-05' THEN s.PossibleEnergyKwh END), 3) AS Wt05,\n       ROUND(SUM(CASE WHEN s.TurbineId = 'WT-09' THEN s.EnergyKwh END)\n             / SUM(CASE WHEN s.TurbineId = 'WT-09' THEN s.PossibleEnergyKwh END), 3) AS Wt09,\n       ROUND(SUM(CASE WHEN s.TurbineId NOT IN ('WT-05', 'WT-09') THEN s.EnergyKwh END)\n             / SUM(CASE WHEN s.TurbineId NOT IN ('WT-05', 'WT-09') THEN s.PossibleEnergyKwh END), 3) AS RestOfFleet\nFROM ops_scada_10min AS s\nCROSS JOIN asof AS a\nWHERE s.[Timestamp] >= DATEADD(month, -11, DATEFROMPARTS(YEAR(a.AsOf), MONTH(a.AsOf), 1)) AND s.AvailabilityCategory = 'Full performance'\nGROUP BY YEAR(s.[Timestamp]), MONTH(s.[Timestamp])\nORDER BY YEAR(s.[Timestamp]), MONTH(s.[Timestamp])"
+   },
+   {
+    "id": "PE-05",
+    "question": "From which wind directions do the turbines get the least wind compared with the met mast, and which turbine is affected most?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nj AS (\n    SELECT FLOOR(((m.WindDirection + 15) - 360 * FLOOR((m.WindDirection + 15) / 360)) / 30) * 30 AS SectorDeg,\n           s.TurbineId, s.WindSpeed AS TurbineWind, m.WindSpeed AS MastWind\n    FROM ops_scada_10min AS s\n    JOIN ops_met_10min AS m ON m.[Timestamp] = s.[Timestamp]\n    CROSS JOIN asof AS a\n    WHERE s.[Timestamp] >= DATEADD(month, -12, a.AsOf) AND s.AvailabilityCategory = 'Full performance'\n      AND m.WindSpeed BETWEEN 5 AND 12),\nr AS (\n    SELECT SectorDeg, TurbineId, AVG(TurbineWind) / AVG(MastWind) AS Ratio, COUNT(*) AS Records\n    FROM j\n    GROUP BY SectorDeg, TurbineId),\nk AS (\n    SELECT SectorDeg, TurbineId, Ratio, Records,\n           ROW_NUMBER() OVER (PARTITION BY SectorDeg ORDER BY Ratio) AS Position\n    FROM r)\nSELECT CAST(SectorDeg AS int) AS SectorDeg,\n       ROUND(100.0 * SUM(Records) / SUM(SUM(Records)) OVER (), 1) AS ShareOfTimePct,\n       ROUND(AVG(Ratio), 3) AS FarmToMastWindRatio,\n       MAX(CASE WHEN Position = 1 THEN TurbineId END) AS MostAffectedTurbine,\n       ROUND(MIN(Ratio), 3) AS ItsRatio\nFROM k\nGROUP BY SectorDeg\nORDER BY SectorDeg"
+   },
+   {
+    "id": "PE-07",
+    "question": "Why were we above or below budget in each of the last six months: the wind, the turbines, or curtailment?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\ne AS (\n    SELECT YEAR([Timestamp]) * 100 + MONTH([Timestamp]) AS MonthKey,\n           SUM(EnergyKwh) / 1000 AS EnergyMwh,\n           SUM(CASE WHEN LossCause IN ('Component fault', 'Scheduled maintenance', 'Corrective maintenance', 'Technical derate') THEN LostEnergyKwh ELSE 0 END) / 1000 AS TurbineLossMwh,\n           SUM(CASE WHEN LossCause = 'Grid curtailment' THEN LostEnergyKwh ELSE 0 END) / 1000 AS CurtailmentMwh,\n           SUM(CASE WHEN LossCause IN ('Icing', 'High wind', 'Grid outage') THEN LostEnergyKwh ELSE 0 END) / 1000 AS WeatherAndGridLossMwh\n    FROM ops_scada_10min\n    GROUP BY YEAR([Timestamp]) * 100 + MONTH([Timestamp])),\nw AS (\n    SELECT YEAR([Timestamp]) * 100 + MONTH([Timestamp]) AS MonthKey, AVG(WindSpeed) AS MeanWindSpeed\n    FROM ops_met_10min\n    GROUP BY YEAR([Timestamp]) * 100 + MONTH([Timestamp]))\nSELECT b.YearMonth,\n       ROUND(e.EnergyMwh, 0) AS EnergyMwh,\n       b.P50EnergyMwh AS BudgetP50Mwh,\n       ROUND(e.EnergyMwh - b.P50EnergyMwh, 0) AS VarianceMwh,\n       ROUND(w.MeanWindSpeed, 2) AS MeanWindSpeed,\n       b.LongTermWindSpeed,\n       ROUND(100 * w.MeanWindSpeed / b.LongTermWindSpeed, 1) AS WindIndexPct,\n       ROUND(e.TurbineLossMwh, 0) AS TurbineLossMwh,\n       ROUND(e.CurtailmentMwh, 0) AS CurtailmentMwh,\n       ROUND(e.WeatherAndGridLossMwh, 0) AS WeatherAndGridLossMwh\nFROM e\nJOIN w ON w.MonthKey = e.MonthKey\nJOIN ops_monthly_budget AS b ON b.[Year] * 100 + b.[Month] = e.MonthKey\nCROSS JOIN asof AS a\nWHERE e.MonthKey < YEAR(a.AsOf) * 100 + MONTH(a.AsOf)\n  AND e.MonthKey >= YEAR(DATEADD(month, -6, a.AsOf)) * 100 + MONTH(DATEADD(month, -6, a.AsOf))\nORDER BY e.MonthKey"
+   },
+   {
+    "id": "RE-03",
+    "question": "Do we have repeat offenders: the same component failing again and again on the same turbine?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nf AS (\n    SELECT e.TurbineId, e.Component, e.Cause, e.DurationHours, e.LostEnergyMwh, e.FailureMode,\n           ROW_NUMBER() OVER (PARTITION BY e.TurbineId, e.Component ORDER BY e.StartTime DESC) AS Recency\n    FROM ops_turbine_events AS e\n    CROSS JOIN asof AS a\n    WHERE e.AvailabilityCategory = 'Forced outage' AND e.Component IS NOT NULL\n      AND e.StartTime >= DATEADD(month, -12, a.AsOf))\nSELECT TOP 8 TurbineId, Component,\n       COUNT(*) AS Faults,\n       COUNT(CASE WHEN Cause = 'Component fault' THEN 1 END) AS NeededATechnician,\n       ROUND(SUM(DurationHours), 0) AS DowntimeHours,\n       ROUND(SUM(LostEnergyMwh), 0) AS LostEnergyMwh,\n       MAX(CASE WHEN Recency = 1 THEN FailureMode END) AS LatestFailureMode\nFROM f\nGROUP BY TurbineId, Component\nORDER BY Faults DESC, DowntimeHours DESC"
+   },
+   {
+    "id": "RE-04",
+    "question": "What are the ten most frequent alarms of the last 90 days, and on which turbine does each one occur most?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nn AS (\n    SELECT l.AlarmCode, l.TurbineId, COUNT(*) AS Times\n    FROM ops_alarm_log AS l\n    CROSS JOIN asof AS a\n    WHERE l.RaisedAt >= DATEADD(day, -90, a.AsOf)\n    GROUP BY l.AlarmCode, l.TurbineId),\nk AS (\n    SELECT AlarmCode, TurbineId, Times,\n           ROW_NUMBER() OVER (PARTITION BY AlarmCode ORDER BY Times DESC, TurbineId) AS Position\n    FROM n)\nSELECT TOP 10 k.AlarmCode, c.description AS Description, c.severity AS Severity,\n       SUM(k.Times) AS Times,\n       COUNT(*) AS TurbinesAffected,\n       MAX(CASE WHEN k.Position = 1 THEN k.TurbineId END) AS MostAffectedTurbine,\n       MAX(k.Times) AS TimesOnThatTurbine\nFROM k\nJOIN ref_alarm_codes AS c ON c.alarmCode = k.AlarmCode\nGROUP BY k.AlarmCode, c.description, c.severity\nORDER BY Times DESC"
+   },
+   {
+    "id": "RE-05",
+    "question": "Is any gearbox running hotter or rougher than the rest of the fleet at the same load?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nx AS (\n    SELECT s.TurbineId,\n           AVG(s.GearboxBearingTemp) AS BearingTemp, AVG(s.GearboxOilTemp) AS OilTemp, AVG(s.GearboxVibration) AS Vibration\n    FROM ops_scada_10min AS s\n    CROSS JOIN asof AS a\n    WHERE s.[Timestamp] >= DATEADD(day, -30, a.AsOf) AND s.State = 'RUNNING' AND s.ActivePower > 3000\n    GROUP BY s.TurbineId)\nSELECT TurbineId,\n       ROUND(BearingTemp, 1) AS GearboxBearingTemp,\n       ROUND(BearingTemp - AVG(BearingTemp) OVER (), 1) AS BearingTempVsFleet,\n       ROUND(OilTemp, 1) AS GearboxOilTemp,\n       ROUND(OilTemp - AVG(OilTemp) OVER (), 1) AS OilTempVsFleet,\n       ROUND(Vibration, 2) AS GearboxVibration,\n       ROUND(Vibration - AVG(Vibration) OVER (), 2) AS VibrationVsFleet\nFROM x\nORDER BY BearingTempVsFleet DESC"
+   },
+   {
+    "id": "RE-06",
+    "question": "Since when has the WT-07 gearbox been drifting away from the fleet? Show the trend by week.",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nw AS (\n    SELECT DATEADD(day, -(DATEDIFF(day, CAST('1900-01-01' AS date), CAST(s.[Timestamp] AS date)) % 7),\n                   CAST(s.[Timestamp] AS date)) AS WeekStarting,\n           s.TurbineId, s.GearboxBearingTemp, s.GearboxVibration\n    FROM ops_scada_10min AS s\n    CROSS JOIN asof AS a\n    WHERE s.[Timestamp] >= DATEADD(day, -182, a.AsOf) AND s.State = 'RUNNING' AND s.ActivePower > 2000)\nSELECT WeekStarting,\n       ROUND(AVG(CASE WHEN TurbineId = 'WT-07' THEN GearboxBearingTemp END), 1) AS Wt07BearingTemp,\n       ROUND(AVG(CASE WHEN TurbineId <> 'WT-07' THEN GearboxBearingTemp END), 1) AS FleetBearingTemp,\n       ROUND(AVG(CASE WHEN TurbineId = 'WT-07' THEN GearboxVibration END), 2) AS Wt07Vibration,\n       ROUND(AVG(CASE WHEN TurbineId <> 'WT-07' THEN GearboxVibration END), 2) AS FleetVibration\nFROM w\nGROUP BY WeekStarting\nORDER BY WeekStarting"
+   },
+   {
+    "id": "RE-07",
+    "question": "What do the gearbox oil samples of WT-07 show, and how do they compare with WT-02 before its bearing failed?",
+    "query": "SELECT TurbineId, SampleDate, IronPpm, CopperPpm, WaterPpm, ParticleCountIso4406, Condition, LabComment\nFROM ops_oil_analysis\nWHERE TurbineId IN ('WT-02', 'WT-07')\nORDER BY TurbineId, SampleDate"
+   },
+   {
+    "id": "RE-08",
+    "question": "Have we had a major gearbox failure before? What happened, how long was the turbine down and what did it cost?",
+    "query": "SELECT TOP 5 e.TurbineId, CAST(e.StartTime AS date) AS FailureDate, e.FailureMode,\n       ROUND(e.DurationHours, 0) AS DowntimeHours,\n       ROUND(e.LostEnergyMwh, 0) AS LostEnergyMwh,\n       w.WorkOrderId, w.Summary,\n       ROUND(w.TotalCostUsd, 0) AS TotalCostUsd,\n       w.CostBorneBy,\n       ROUND(w.WaitingForPartsHours / 24, 1) AS DaysWaitingForPartsOrCrane,\n       w.Findings\nFROM ops_turbine_events AS e\nJOIN ops_work_orders AS w ON w.WorkOrderId = e.WorkOrderId\nWHERE e.ComponentCode = 'GBX' AND e.FaultClass = 'C'\nORDER BY w.TotalCostUsd DESC"
+   },
+   {
+    "id": "MP-01",
+    "question": "On which working day of the coming week would stopping one turbine for maintenance cost the least production, and is the wind low enough to work?",
+    "query": "WITH f AS (\n    SELECT CAST(p.TargetTime AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2) AS LocalTime,\n           p.WindSpeed, p.WindSpeedP90, p.PowerMw, p.IcingRisk, st.turbineCount, st.ppaPriceUsdPerMwh\n    FROM ops_power_forecast AS p\n    CROSS JOIN ref_site AS st\n    WHERE p.ForecastType = 'Latest')\nSELECT CAST(LocalTime AS date) AS WorkDay,\n       DATENAME(weekday, LocalTime) AS DayOfWeek,\n       ROUND(AVG(WindSpeed), 1) AS MeanWindSpeed,\n       ROUND(MAX(WindSpeedP90), 1) AS HighestLikelyWindSpeed,\n       SUM(CASE WHEN WindSpeedP90 < 10 THEN 1 ELSE 0 END) AS HoursCalmEnoughForBladeWork,\n       ROUND(SUM(PowerMw) / MAX(turbineCount), 1) AS MwhLostIfOneTurbineIsStopped,\n       ROUND(SUM(PowerMw) / MAX(turbineCount) * MAX(ppaPriceUsdPerMwh), 0) AS RevenueLostUsd,\n       MAX(CAST(IcingRisk AS int)) AS IcingRisk\nFROM f\nWHERE DATEPART(hour, LocalTime) BETWEEN 7 AND 16 AND DATENAME(weekday, LocalTime) <> 'Sunday'\nGROUP BY CAST(LocalTime AS date), DATENAME(weekday, LocalTime)\nHAVING COUNT(*) = 10\nORDER BY MwhLostIfOneTurbineIsStopped"
+   },
+   {
+    "id": "MP-02",
+    "question": "How good is our preventive maintenance compliance? Of the preventive work due in the last 12 months, how much was done on time?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nr AS (\n    SELECT CASE WHEN w.Status = 'Closed' AND w.ClosedDate <= DATEADD(day, 7, w.ScheduledDate) THEN '1 Done within a week of the plan'\n                WHEN w.Status = 'Closed' THEN '2 Done late'\n                ELSE '3 Not done, overdue' END AS Result\n    FROM ops_work_orders AS w\n    CROSS JOIN asof AS a\n    WHERE w.WorkType = 'Preventive' AND w.ScheduledDate >= DATEADD(month, -12, a.AsOf) AND w.ScheduledDate < a.AsOf)\nSELECT Result, COUNT(*) AS WorkOrders, ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS SharePct\nFROM r\nGROUP BY Result\nORDER BY Result"
+   },
+   {
+    "id": "MP-03",
+    "question": "Which repairs were held up by waiting for parts, and what did the waiting cost in lost energy?",
+    "query": "SELECT TOP 10 w.WorkOrderId, w.TurbineId, CAST(w.OpenedDate AS date) AS Opened, w.Summary,\n       ROUND(w.WaitingForPartsHours / 24, 1) AS DaysWaiting,\n       ROUND(w.DowntimeHours, 0) AS DowntimeHours,\n       ROUND(e.LostEnergyMwh, 0) AS LostEnergyMwh,\n       STRING_AGG(p.PartId, ', ') AS PartsUsed\nFROM ops_work_orders AS w\nJOIN ops_turbine_events AS e ON e.EventId = w.EventId\nLEFT JOIN ops_work_order_parts AS p ON p.WorkOrderId = w.WorkOrderId\nWHERE w.WaitingForPartsHours >= 48\nGROUP BY w.WorkOrderId, w.TurbineId, w.OpenedDate, w.Summary, w.WaitingForPartsHours, w.DowntimeHours, e.LostEnergyMwh\nORDER BY w.WaitingForPartsHours DESC"
+   },
+   {
+    "id": "MP-05",
+    "question": "How was the technicians' time spent in the last 90 days: who led which kind of work?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min)\nSELECT t.name AS LeadTechnician, t.[role] AS TechnicianRole,\n       COUNT(*) AS WorkOrdersLed,\n       COUNT(CASE WHEN w.WorkType = 'Corrective' THEN 1 END) AS Corrective,\n       COUNT(CASE WHEN w.WorkType = 'Preventive' THEN 1 END) AS Preventive,\n       ROUND(SUM(w.LaborHours), 0) AS CrewLabourHours\nFROM ops_work_orders AS w\nJOIN ref_technicians AS t ON t.technicianId = w.LeadTechnicianId\nCROSS JOIN asof AS a\nWHERE w.Status = 'Closed' AND w.OpenedDate >= DATEADD(day, -90, a.AsOf)\nGROUP BY t.name, t.[role]\nORDER BY CrewLabourHours DESC"
+   },
+   {
+    "id": "AM-01",
+    "question": "What is our revenue for the year to date, and how does it compare with the budget?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\ny AS (SELECT DATEFROMPARTS(YEAR(AsOf), 1, 1) AS YearStart, AsOf FROM asof),\ne AS (SELECT SUM(s.EnergyKwh) / 1000 AS EnergyMwh\n      FROM ops_scada_10min AS s CROSS JOIN y WHERE s.[Timestamp] >= y.YearStart),\nc AS (SELECT SUM(CASE WHEN u.Compensated = 1 THEN u.LostEnergyMwh ELSE 0 END) AS DeemedMwh,\n             SUM(CASE WHEN u.Compensated = 1 THEN 0 ELSE u.LostEnergyMwh END) AS UnpaidCurtailmentMwh\n      FROM ops_curtailments AS u CROSS JOIN y WHERE u.StartTime >= y.YearStart),\nb AS (SELECT SUM(CASE WHEN m.[Month] < MONTH(y.AsOf) THEN m.BudgetRevenueUsd\n                      ELSE m.BudgetRevenueUsd * DAY(y.AsOf) / DAY(EOMONTH(y.AsOf)) END) AS BudgetRevenueUsd\n      FROM ops_monthly_budget AS m CROSS JOIN y\n      WHERE m.[Year] = YEAR(y.AsOf) AND m.[Month] <= MONTH(y.AsOf))\nSELECT ROUND(e.EnergyMwh, 0) AS EnergyMwh,\n       ROUND(c.DeemedMwh, 0) AS DeemedGenerationMwh,\n       ROUND((e.EnergyMwh + c.DeemedMwh) * st.ppaPriceUsdPerMwh, 0) AS RevenueUsd,\n       ROUND(b.BudgetRevenueUsd, 0) AS BudgetRevenueUsd,\n       ROUND(100 * (e.EnergyMwh + c.DeemedMwh) * st.ppaPriceUsdPerMwh / b.BudgetRevenueUsd, 1) AS PctOfBudget,\n       ROUND(c.UnpaidCurtailmentMwh * st.ppaPriceUsdPerMwh, 0) AS RevenueLostToUnpaidCurtailmentUsd\nFROM e CROSS JOIN c CROSS JOIN b CROSS JOIN ref_site AS st"
+   },
+   {
+    "id": "AM-03",
+    "question": "Did the service provider meet the availability guarantee in the last contract year, and what are the liquidated damages if not?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\ncy AS (SELECT CAST(DATEFROMPARTS(YEAR(AsOf) - CASE WHEN MONTH(AsOf) >= 7 THEN 1 ELSE 2 END, 7, 1) AS datetime2) AS YearStart FROM asof),\nk AS (SELECT guaranteedAvailabilityPct AS Guarantee, liquidatedDamagesUsdPerMwh AS DamagesRate,\n             scheduledMaintenanceAllowanceHoursPerTurbineYear AS Allowance\n      FROM ref_contracts WHERE contractId = 'CT-SMA-001'),\nh AS (SELECT s.TurbineId,\n             COUNT(*) / 6e0 AS PeriodHours,\n             SUM(CASE WHEN s.AvailabilityCategory IN ('Forced outage', 'Planned corrective action') THEN 1 ELSE 0 END) / 6e0 AS OutageHours,\n             SUM(CASE WHEN s.AvailabilityCategory = 'Scheduled maintenance' THEN 1 ELSE 0 END) / 6e0 AS ScheduledHours,\n             SUM(CASE WHEN s.AvailabilityCategory IN ('Out of electrical specification', 'Out of environmental specification',\n                                                      'Requested shutdown', 'Information unavailable') THEN 1 ELSE 0 END) / 6e0 AS ExcludedHours,\n             SUM(s.PossibleEnergyKwh) / 1000 AS PossibleMwh\n      FROM ops_scada_10min AS s CROSS JOIN cy\n      WHERE s.[Timestamp] >= cy.YearStart AND s.[Timestamp] < DATEADD(month, 12, cy.YearStart)\n      GROUP BY s.TurbineId),\nx AS (SELECT e.TurbineId, SUM(e.DurationHours) AS NotTheProvidersHours\n      FROM ops_turbine_events AS e CROSS JOIN cy\n      WHERE e.AvailabilityCategory = 'Forced outage' AND e.ResponsibleParty <> 'Service provider'\n        AND e.StartTime >= cy.YearStart AND e.StartTime < DATEADD(month, 12, cy.YearStart)\n      GROUP BY e.TurbineId),\nt AS (SELECT h.TurbineId, h.PossibleMwh,\n             100 * (1 - (h.OutageHours - COALESCE(x.NotTheProvidersHours, 0)\n                         + CASE WHEN h.ScheduledHours > k.Allowance THEN h.ScheduledHours - k.Allowance ELSE 0 END)\n                        / (h.PeriodHours - h.ExcludedHours - COALESCE(x.NotTheProvidersHours, 0))) AS AvailabilityPct\n      FROM h LEFT JOIN x ON x.TurbineId = h.TurbineId CROSS JOIN k),\nz AS (SELECT AVG(AvailabilityPct) AS MeanPct, MIN(AvailabilityPct) AS LowestPct, SUM(PossibleMwh) AS PossibleMwh FROM t)\nSELECT CAST(cy.YearStart AS date) AS ContractYearStart,\n       ROUND(z.MeanPct, 2) AS ContractualAvailabilityPct,\n       k.Guarantee AS GuaranteePct,\n       ROUND(z.LowestPct, 2) AS LowestTurbinePct,\n       (SELECT TOP 1 TurbineId FROM t ORDER BY AvailabilityPct) AS LowestTurbine,\n       ROUND(CASE WHEN k.Guarantee > z.MeanPct THEN k.Guarantee - z.MeanPct ELSE 0 END / 100 * z.PossibleMwh, 0) AS EnergyBelowGuaranteeMwh,\n       ROUND(CASE WHEN k.Guarantee > z.MeanPct THEN k.Guarantee - z.MeanPct ELSE 0 END / 100 * z.PossibleMwh * k.DamagesRate, 0) AS LiquidatedDamagesUsd\nFROM z CROSS JOIN k CROSS JOIN cy"
+   },
+   {
+    "id": "AM-04",
+    "question": "What have repairs cost us this year, compared with the budget, and what was covered by warranty?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\ny AS (SELECT DATEFROMPARTS(YEAR(AsOf), 1, 1) AS YearStart, AsOf FROM asof),\nw AS (SELECT SUM(CASE WHEN o.CostBorneBy = 'Owner' THEN o.TotalCostUsd ELSE 0 END) AS OwnerUsd,\n             SUM(CASE WHEN o.CostBorneBy = 'Warranty' THEN o.TotalCostUsd ELSE 0 END) AS WarrantyUsd,\n             COUNT(CASE WHEN o.CostBorneBy = 'Owner' THEN 1 END) AS Repairs\n      FROM ops_work_orders AS o CROSS JOIN y\n      WHERE o.WorkType = 'Corrective' AND o.Status = 'Closed' AND o.OpenedDate >= y.YearStart),\nb AS (SELECT SUM(CASE WHEN m.[Month] < MONTH(y.AsOf) THEN m.BudgetCorrectiveMaintenanceUsd\n                      ELSE m.BudgetCorrectiveMaintenanceUsd * DAY(y.AsOf) / DAY(EOMONTH(y.AsOf)) END) AS BudgetUsd\n      FROM ops_monthly_budget AS m CROSS JOIN y\n      WHERE m.[Year] = YEAR(y.AsOf) AND m.[Month] <= MONTH(y.AsOf)),\ne AS (SELECT SUM(s.EnergyKwh) / 1000 AS EnergyMwh\n      FROM ops_scada_10min AS s CROSS JOIN y WHERE s.[Timestamp] >= y.YearStart)\nSELECT w.Repairs,\n       ROUND(w.OwnerUsd, 0) AS RepairCostPaidByOwnerUsd,\n       ROUND(b.BudgetUsd, 0) AS BudgetUsd,\n       ROUND(100 * w.OwnerUsd / b.BudgetUsd, 1) AS PctOfBudget,\n       ROUND(w.OwnerUsd / e.EnergyMwh, 2) AS RepairCostUsdPerMwh,\n       ROUND(w.WarrantyUsd, 0) AS CoveredByWarrantyUsd\nFROM w CROSS JOIN b CROSS JOIN e"
+   },
+   {
+    "id": "AM-05",
+    "question": "How accurate was the day-ahead power forecast in each of the last six months?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nactual AS (\n    SELECT DATEADD(hour, DATEDIFF(hour, CAST('2000-01-01' AS datetime2), [Timestamp]), CAST('2000-01-01' AS datetime2)) AS HourStart,\n           SUM(PossiblePower) / 6 / 1000 AS PossibleMw, SUM(ActivePower) / 6 / 1000 AS ActualMw\n    FROM ops_scada_10min\n    GROUP BY DATEADD(hour, DATEDIFF(hour, CAST('2000-01-01' AS datetime2), [Timestamp]), CAST('2000-01-01' AS datetime2)))\nSELECT CONCAT(YEAR(f.TargetTime), '-', RIGHT(CONCAT('0', MONTH(f.TargetTime)), 2)) AS YearMonth,\n       ROUND(100 * AVG(ABS(f.PowerMw - x.PossibleMw)) / MAX(st.capacityMw), 1) AS MeanAbsoluteErrorPctOfCapacity,\n       ROUND(100 * AVG(f.PowerMw - x.PossibleMw) / MAX(st.capacityMw), 1) AS BiasPctOfCapacity,\n       ROUND(100 * AVG(CASE WHEN x.PossibleMw BETWEEN f.PowerMwP10 AND f.PowerMwP90 THEN 1e0 ELSE 0e0 END), 0) AS HoursInsideP10P90BandPct,\n       ROUND(100 * AVG(ABS(f.PowerMw - x.ActualMw)) / MAX(st.capacityMw), 1) AS ErrorAgainstActualPctOfCapacity\nFROM ops_power_forecast AS f\nJOIN actual AS x ON x.HourStart = f.TargetTime\nCROSS JOIN ref_site AS st\nCROSS JOIN asof AS a\nWHERE f.ForecastType = 'Day-ahead'\n  AND f.TargetTime >= DATEADD(month, -6, DATEFROMPARTS(YEAR(a.AsOf), MONTH(a.AsOf), 1)) AND f.TargetTime < DATEFROMPARTS(YEAR(a.AsOf), MONTH(a.AsOf), 1)\nGROUP BY YEAR(f.TargetTime), MONTH(f.TargetTime)\nORDER BY YEAR(f.TargetTime), MONTH(f.TargetTime)"
+   },
+   {
+    "id": "AM-06",
+    "question": "What would our energy have earned on the real-time market in the last 12 months, compared with the contract price?",
+    "query": "WITH asof AS (SELECT MAX([Timestamp]) AS AsOf FROM ops_scada_10min),\nh AS (\n    SELECT DATEADD(hour, DATEDIFF(hour, CAST('2000-01-01' AS datetime2), [Timestamp]), CAST('2000-01-01' AS datetime2)) AS HourStart, SUM(EnergyKwh) / 1000 AS EnergyMwh\n    FROM ops_scada_10min\n    GROUP BY DATEADD(hour, DATEDIFF(hour, CAST('2000-01-01' AS datetime2), [Timestamp]), CAST('2000-01-01' AS datetime2)))\nSELECT ROUND(SUM(h.EnergyMwh), 0) AS EnergyMwh,\n       MAX(st.ppaPriceUsdPerMwh) AS ContractPrice,\n       ROUND(SUM(h.EnergyMwh * p.RealTimePriceUsdPerMwh) / SUM(h.EnergyMwh), 2) AS CapturedRealTimePrice,\n       ROUND(AVG(p.RealTimePriceUsdPerMwh), 2) AS MeanRealTimePrice,\n       ROUND(SUM(h.EnergyMwh * (st.ppaPriceUsdPerMwh - p.RealTimePriceUsdPerMwh)), 0) AS ContractValueOverMarketUsd,\n       COUNT(CASE WHEN p.RealTimePriceUsdPerMwh < 0 THEN 1 END) AS HoursWithNegativePrice\nFROM h\nJOIN ops_market_prices AS p ON p.[Timestamp] = h.HourStart\nCROSS JOIN ref_site AS st\nCROSS JOIN asof AS a\nWHERE h.HourStart >= DATEADD(month, -12, a.AsOf)"
+   }
+  ]
+ },
+ "kql": {
+  "name": "WindFarmEH",
+  "description": "Live data of the wind farm from the edge, a few seconds old: telemetry of every turbine, weather at the met mast, alarms as they are raised and cleared, and state changes. Only for right now and the last 24 hours. Not for periods of days or months, not for what an alarm code means, not for forecasts.",
+  "instructions": "TurbineTelemetry: one row per turbine every few seconds. ActivePower and PowerSetpoint are kW, WindSpeed is m/s,\ntemperatures are degrees Celsius, GearboxVibration is mm/s. State is RUNNING, DERATED, CURTAILED, IDLE, PAUSED,\nSTOPPED, STOPPED_HIGH_WIND, MAINTENANCE or FAULT.\nThe latest row per turbine: TurbineTelemetry | where Timestamp > ago(10m) | summarize arg_max(Timestamp, *) by TurbineId.\nAlarmEvents: one row when an alarm is raised (Status 'raised') and one when it clears (Status 'cleared'), linked\nby AlarmId. An alarm is active when its latest row has Status 'raised'. SopId is the procedure.\nTurbineStateChanges: one row each time a turbine changes state, with the Reason.\nWeatherObservations: the met mast, one row every few seconds.\nAlways filter on Timestamp first (ago(15m), ago(1h), ago(24h)). Site power is the sum over turbines of the\naverage ActivePower per turbine, divided by 1000 for MW. All times are UTC.\nUse this source only for the last 24 hours. It does not explain alarm codes, it holds no forecast, and it holds\nno history: for those, use the lakehouse.\n",
+  "tables": [
+   "TurbineTelemetry",
+   "AlarmEvents",
+   "TurbineStateChanges",
+   "WeatherObservations"
+  ],
+  "examples": [
+   {
+    "question": "What is every turbine doing right now?",
+    "query": "TurbineTelemetry\n| where Timestamp > ago(10m)\n| summarize arg_max(Timestamp, State, WindSpeed, ActivePower, PowerSetpoint, GearboxBearingTemp, GearboxVibration) by TurbineId\n| order by TurbineId asc"
+   },
+   {
+    "question": "Which alarms are active, and which procedure applies to each?",
+    "query": "AlarmEvents\n| where Timestamp > ago(7d) and AlarmCode != 'COMMS-RESTORED'\n| summarize arg_max(Timestamp, *) by AlarmId\n| where Status == 'raised'\n| project RaisedAt = Timestamp, TurbineId, AlarmCode, Severity, Description, Value, Threshold, Unit, SopId\n| order by RaisedAt desc"
+   },
+   {
+    "question": "How much is the site producing, and how has that changed over the last hour?",
+    "query": "TurbineTelemetry\n| where Timestamp > ago(1h)\n| summarize TurbinePowerKw = avg(ActivePower) by TurbineId, bin(Timestamp, 5m)\n| summarize SitePowerMw = round(sum(TurbinePowerKw) / 1000, 2), TurbinesReporting = dcount(TurbineId) by Timestamp\n| order by Timestamp asc"
+   },
+   {
+    "question": "Which turbine stands out from the fleet right now on gearbox temperature and vibration?",
+    "query": "let recent = TurbineTelemetry\n    | where Timestamp > ago(15m) and State in ('RUNNING', 'DERATED')\n    | summarize BearingTemp = avg(GearboxBearingTemp), OilTemp = avg(GearboxOilTemp), Vibration = avg(GearboxVibration), PowerKw = avg(ActivePower) by TurbineId;\nlet fleetBearingTemp = toscalar(recent | summarize percentile(BearingTemp, 50));\nlet fleetVibration = toscalar(recent | summarize percentile(Vibration, 50));\nrecent\n| project TurbineId, PowerKw = round(PowerKw, 0), BearingTemp = round(BearingTemp, 1),\n          BearingTempVsFleet = round(BearingTemp - fleetBearingTemp, 1), OilTemp = round(OilTemp, 1),\n          Vibration = round(Vibration, 2), VibrationVsFleet = round(Vibration - fleetVibration, 2)\n| order by VibrationVsFleet desc"
+   },
+   {
+    "question": "How did the gearbox vibration of WT-07 develop over the last 6 hours?",
+    "query": "TurbineTelemetry\n| where Timestamp > ago(6h) and TurbineId == 'WT-07'\n| summarize Vibration = round(avg(GearboxVibration), 2), OilTemp = round(avg(GearboxOilTemp), 1), PowerKw = round(avg(ActivePower), 0) by bin(Timestamp, 15m)\n| order by Timestamp asc"
+   },
+   {
+    "question": "Which turbines changed state in the last 24 hours, and why?",
+    "query": "TurbineStateChanges\n| where Timestamp > ago(24h)\n| project Timestamp, TurbineId, PreviousState, State, Reason\n| order by Timestamp desc\n| take 25"
+   }
+  ]
+ },
+ "ontology": "WindFarmOntology",
+ "test": {
+  "setupSql": "CREATE OR REPLACE TEMP VIEW q_asof AS\nSELECT max(Timestamp) AS AsOf FROM ops_scada_10min",
+  "criticPrompt": "You are checking the answer of a data assistant for a wind farm.\n\nQuestion: {query}\n\nGround truth: {expected_answer}\n\nDecide whether the most recent answer agrees with the ground truth.\nIt agrees when every figure it gives matches the ground truth within rounding: 1 percent, or the last digit shown.\nIt may show fewer rows or fewer columns than the ground truth, another order, other wording, or correctly converted units.\nIt does not agree when a figure contradicts the ground truth, when it covers a different period, or when it gives\nno figures although the ground truth has them.\nRows that tie on the value they are ranked by may come in either order. Where the ground truth names the one\nitem with the highest count and the answer names another item with the same count, the answer agrees.\nA first or last period that is only partly inside the time window may differ.\nWhere the ground truth says that the data cannot answer the question, the answer agrees only when it says so and\ngives no number.\nReturn only one word: Yes, No, or Unclear.",
+  "questions": [
+   {
+    "id": "SM-01",
+    "question": "How much energy did we produce last month, and how does that compare with the budget?",
+    "sql": "WITH m AS (SELECT add_months(date_trunc('month', AsOf), -1) AS MonthStart, date_trunc('month', AsOf) AS MonthEnd FROM q_asof)\nSELECT date_format(m.MonthStart, 'yyyy-MM')                               AS Month,\n       round(sum(s.EnergyKwh) / 1000, 0)                                  AS EnergyMwh,\n       max(b.P50EnergyMwh)                                                AS BudgetP50Mwh,\n       max(b.P90EnergyMwh)                                                AS BudgetP90Mwh,\n       round(100 * sum(s.EnergyKwh) / 1000 / max(b.P50EnergyMwh), 1)      AS PctOfBudget\nFROM ops_scada_10min s\nCROSS JOIN m\nJOIN ops_monthly_budget b ON b.YearMonth = date_format(m.MonthStart, 'yyyy-MM')\nWHERE s.Timestamp >= m.MonthStart AND s.Timestamp < m.MonthEnd\nGROUP BY m.MonthStart",
+    "kind": "example"
+   },
+   {
+    "id": "SM-02",
+    "question": "Show production, budget and capacity factor by month for the last 12 months.",
+    "sql": "SELECT date_format(s.Timestamp, 'yyyy-MM')                                AS Month,\n       round(sum(s.EnergyKwh) / 1000, 0)                                  AS EnergyMwh,\n       max(b.P50EnergyMwh)                                                AS BudgetP50Mwh,\n       round(100 * sum(s.EnergyKwh) / 1000 / max(b.P50EnergyMwh), 1)      AS PctOfBudget,\n       round(100 * sum(s.EnergyKwh) / sum(t.ratedPowerKw / 6.0), 1)       AS CapacityFactorPct\nFROM ops_scada_10min s\nJOIN ref_turbines t ON t.turbineId = s.TurbineId\nJOIN ops_monthly_budget b ON b.YearMonth = date_format(s.Timestamp, 'yyyy-MM')\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= add_months(date_trunc('month', a.AsOf), -12) AND s.Timestamp < date_trunc('month', a.AsOf)\nGROUP BY date_format(s.Timestamp, 'yyyy-MM')\nORDER BY Month",
+    "kind": "example"
+   },
+   {
+    "id": "SM-03",
+    "question": "What was the availability of each turbine over the last 90 days? Which turbines are below 97 percent?",
+    "sql": "SELECT s.TurbineId,\n       round(100 * (1 - sum(CASE WHEN s.AvailabilityCategory IN ('Forced outage', 'Scheduled maintenance', 'Planned corrective action') THEN 1 ELSE 0 END) / count(*)), 2) AS TimeAvailabilityPct,\n       round(100 * sum(s.EnergyKwh) / (sum(s.EnergyKwh)\n             + sum(CASE WHEN s.LossCause IN ('Component fault', 'Scheduled maintenance', 'Corrective maintenance', 'Technical derate') THEN s.LostEnergyKwh ELSE 0 END)), 2)             AS EnergyAvailabilityPct,\n       round(sum(CASE WHEN s.AvailabilityCategory = 'Forced outage' THEN 1 ELSE 0 END) / 6.0, 1)          AS ForcedOutageHours,\n       round(sum(s.EnergyKwh) / 1000, 0)                                                                  AS EnergyMwh\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 90 DAYS AND s.AvailabilityCategory <> 'Information unavailable'\nGROUP BY s.TurbineId\nORDER BY TimeAvailabilityPct",
+    "kind": "example"
+   },
+   {
+    "id": "SM-04",
+    "question": "What did we lose energy to in the last 12 months, and what was it worth?",
+    "sql": "SELECT s.LossCause,\n       round(sum(s.LostEnergyKwh) / 1000, 0)                                         AS LostEnergyMwh,\n       round(sum(s.LostEnergyKwh) / 1000 * max(st.ppaPriceUsdPerMwh), 0)             AS ValueAtContractPriceUsd,\n       round(100 * sum(s.LostEnergyKwh) / sum(sum(s.LostEnergyKwh)) OVER (), 1)      AS SharePct\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nCROSS JOIN ref_site st\nWHERE s.Timestamp >= add_months(a.AsOf, -12) AND s.LostEnergyKwh > 0\nGROUP BY s.LossCause\nORDER BY LostEnergyMwh DESC",
+    "kind": "example"
+   },
+   {
+    "id": "SM-05",
+    "question": "Which work orders are open, overdue or planned for the next 30 days?",
+    "sql": "SELECT w.WorkOrderId, w.TurbineId, w.WorkType, w.Priority, w.Status,\n       to_date(w.ScheduledDate)                                           AS ScheduledDay,\n       datediff(w.ScheduledDate, a.AsOf)                                  AS DaysFromNow,\n       CASE WHEN w.ScheduledDate < a.AsOf THEN 'Overdue'\n            WHEN w.ScheduledDate < a.AsOf + INTERVAL 30 DAYS THEN 'Next 30 days'\n            ELSE 'Later' END                                              AS Timing,\n       w.Summary, t.name AS LeadTechnician\nFROM ops_work_orders w\nCROSS JOIN q_asof a\nLEFT JOIN ref_technicians t ON t.technicianId = w.LeadTechnicianId\nWHERE w.Status <> 'Closed'\nORDER BY w.ScheduledDate",
+    "kind": "example"
+   },
+   {
+    "id": "SM-06",
+    "question": "Which spare parts are at or below their reorder point, and how long would a new one take to arrive?",
+    "sql": "SELECT partId, description, componentCode, quantityOnHand, reorderPoint, leadTimeDays, unitCostUsd\nFROM ref_spare_parts\nWHERE quantityOnHand <= reorderPoint\nORDER BY leadTimeDays DESC",
+    "kind": "example"
+   },
+   {
+    "id": "PE-01",
+    "question": "Which turbines produce less than they should for the wind they get? Rank them by performance index for the last 90 days.",
+    "sql": "SELECT s.TurbineId,\n       round(sum(s.EnergyKwh) / sum(s.PossibleEnergyKwh), 4)                AS PerformanceIndex,\n       round((sum(s.PossibleEnergyKwh) - sum(s.EnergyKwh)) / 1000, 0)       AS ShortfallMwh,\n       round(count(*) / 6.0, 0)                                             AS HoursInFullPerformance\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 90 DAYS AND s.AvailabilityCategory = 'Full performance'\nGROUP BY s.TurbineId\nORDER BY PerformanceIndex",
+    "kind": "example"
+   },
+   {
+    "id": "PE-02",
+    "question": "Compare the measured power curve of WT-09 with the rest of the fleet and with the manufacturer's curve.",
+    "sql": "WITH binned AS (\n    SELECT s.TurbineId, s.ActivePower,\n           round(s.WindSpeed * pow(s.AirDensity / 1.225, 1.0 / 3)) AS WindBin\n    FROM ops_scada_10min s\n    CROSS JOIN q_asof a\n    WHERE s.Timestamp >= a.AsOf - INTERVAL 180 DAYS AND s.AvailabilityCategory = 'Full performance')\nSELECT b.WindBin                                                                       AS WindSpeedBin,\n       max(r.powerKw)                                                                  AS ManufacturerKw,\n       round(avg(CASE WHEN b.TurbineId <> 'WT-09' THEN b.ActivePower END), 0)          AS RestOfFleetKw,\n       round(avg(CASE WHEN b.TurbineId = 'WT-09' THEN b.ActivePower END), 0)           AS Wt09Kw,\n       round(100 * (avg(CASE WHEN b.TurbineId = 'WT-09' THEN b.ActivePower END)\n                    / avg(CASE WHEN b.TurbineId <> 'WT-09' THEN b.ActivePower END) - 1), 1) AS Wt09VsFleetPct\nFROM binned b\nJOIN ref_power_curve r ON r.windSpeed = b.WindBin\nWHERE b.WindBin BETWEEN 4 AND 13\nGROUP BY b.WindBin\nORDER BY b.WindBin",
+    "kind": "example"
+   },
+   {
+    "id": "PE-03",
+    "question": "Is any turbine misaligned with the wind? Compare each nacelle direction with the wind direction at the met mast.",
+    "sql": "SELECT s.TurbineId,\n       round(avg(pmod(s.NacelleDirection - m.WindDirection + 540, 360) - 180), 1)  AS MeanOffsetDeg,\n       count(*)                                                                    AS Records\nFROM ops_scada_10min s\nJOIN ops_met_10min m ON m.Timestamp = s.Timestamp\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 60 DAYS AND s.State = 'RUNNING' AND m.WindSpeed BETWEEN 6 AND 12\nGROUP BY s.TurbineId\nORDER BY abs(avg(pmod(s.NacelleDirection - m.WindDirection + 540, 360) - 180)) DESC",
+    "kind": "example"
+   },
+   {
+    "id": "PE-04",
+    "question": "When did WT-05 and WT-09 start to underperform? Show their performance index by month against the rest of the fleet.",
+    "sql": "SELECT date_format(s.Timestamp, 'yyyy-MM') AS Month,\n       round(sum(CASE WHEN s.TurbineId = 'WT-05' THEN s.EnergyKwh END)\n             / sum(CASE WHEN s.TurbineId = 'WT-05' THEN s.PossibleEnergyKwh END), 3)  AS Wt05,\n       round(sum(CASE WHEN s.TurbineId = 'WT-09' THEN s.EnergyKwh END)\n             / sum(CASE WHEN s.TurbineId = 'WT-09' THEN s.PossibleEnergyKwh END), 3)  AS Wt09,\n       round(sum(CASE WHEN s.TurbineId NOT IN ('WT-05', 'WT-09') THEN s.EnergyKwh END)\n             / sum(CASE WHEN s.TurbineId NOT IN ('WT-05', 'WT-09') THEN s.PossibleEnergyKwh END), 3) AS RestOfFleet\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= add_months(date_trunc('month', a.AsOf), -11) AND s.AvailabilityCategory = 'Full performance'\nGROUP BY date_format(s.Timestamp, 'yyyy-MM')\nORDER BY Month",
+    "kind": "example"
+   },
+   {
+    "id": "PE-05",
+    "question": "From which wind directions do the turbines get the least wind compared with the met mast, and which turbine is affected most?",
+    "sql": "WITH r AS (\n    SELECT floor(pmod(m.WindDirection + 15, 360) / 30) * 30 AS SectorDeg, s.TurbineId,\n           avg(s.WindSpeed) / avg(m.WindSpeed) AS Ratio, count(*) AS Records\n    FROM ops_scada_10min s\n    JOIN ops_met_10min m ON m.Timestamp = s.Timestamp\n    CROSS JOIN q_asof a\n    WHERE s.Timestamp >= add_months(a.AsOf, -12) AND s.AvailabilityCategory = 'Full performance'\n      AND m.WindSpeed BETWEEN 5 AND 12\n    GROUP BY floor(pmod(m.WindDirection + 15, 360) / 30) * 30, s.TurbineId)\nSELECT cast(SectorDeg AS int)                                    AS SectorDeg,\n       round(100 * sum(Records) / sum(sum(Records)) OVER (), 1)  AS ShareOfTimePct,\n       round(avg(Ratio), 3)                                      AS FarmToMastWindRatio,\n       min_by(TurbineId, Ratio)                                  AS MostAffectedTurbine,\n       round(min(Ratio), 3)                                      AS ItsRatio\nFROM r\nGROUP BY SectorDeg\nORDER BY SectorDeg",
+    "kind": "example"
+   },
+   {
+    "id": "PE-06",
+    "question": "How many hours and how much energy did we lose to icing and to high-wind shutdowns, by month?",
+    "sql": "SELECT date_format(s.Timestamp, 'yyyy-MM')        AS Month,\n       s.LossCause,\n       round(count(*) / 6.0, 0)                   AS TurbineHours,\n       round(sum(s.LostEnergyKwh) / 1000, 0)      AS LostEnergyMwh\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= add_months(a.AsOf, -12) AND s.LossCause IN ('Icing', 'High wind')\nGROUP BY date_format(s.Timestamp, 'yyyy-MM'), s.LossCause\nORDER BY Month, s.LossCause",
+    "kind": "no example"
+   },
+   {
+    "id": "PE-07",
+    "question": "Why were we above or below budget in each of the last six months: the wind, the turbines, or curtailment?",
+    "sql": "WITH e AS (\n    SELECT date_format(Timestamp, 'yyyy-MM') AS Month,\n           sum(EnergyKwh) / 1000 AS EnergyMwh,\n           sum(CASE WHEN LossCause IN ('Component fault', 'Scheduled maintenance', 'Corrective maintenance', 'Technical derate') THEN LostEnergyKwh ELSE 0 END) / 1000 AS TurbineLossMwh,\n           sum(CASE WHEN LossCause = 'Grid curtailment' THEN LostEnergyKwh ELSE 0 END) / 1000 AS CurtailmentMwh,\n           sum(CASE WHEN LossCause IN ('Icing', 'High wind', 'Grid outage') THEN LostEnergyKwh ELSE 0 END) / 1000 AS WeatherAndGridLossMwh\n    FROM ops_scada_10min\n    GROUP BY date_format(Timestamp, 'yyyy-MM')),\nw AS (\n    SELECT date_format(Timestamp, 'yyyy-MM') AS Month, avg(WindSpeed) AS MeanWindSpeed\n    FROM ops_met_10min\n    GROUP BY date_format(Timestamp, 'yyyy-MM'))\nSELECT e.Month,\n       round(e.EnergyMwh, 0)                               AS EnergyMwh,\n       b.P50EnergyMwh                                      AS BudgetP50Mwh,\n       round(e.EnergyMwh - b.P50EnergyMwh, 0)              AS VarianceMwh,\n       round(w.MeanWindSpeed, 2)                           AS MeanWindSpeed,\n       b.LongTermWindSpeed,\n       round(100 * w.MeanWindSpeed / b.LongTermWindSpeed, 1) AS WindIndexPct,\n       round(e.TurbineLossMwh, 0)                          AS TurbineLossMwh,\n       round(e.CurtailmentMwh, 0)                          AS CurtailmentMwh,\n       round(e.WeatherAndGridLossMwh, 0)                   AS WeatherAndGridLossMwh\nFROM e\nJOIN w ON w.Month = e.Month\nJOIN ops_monthly_budget b ON b.YearMonth = e.Month\nCROSS JOIN q_asof a\nWHERE e.Month < date_format(a.AsOf, 'yyyy-MM') AND e.Month >= date_format(add_months(a.AsOf, -6), 'yyyy-MM')\nORDER BY e.Month",
+    "kind": "example"
+   },
+   {
+    "id": "RE-01",
+    "question": "Which components cost us the most downtime and energy in the last 12 months?",
+    "sql": "SELECT e.Component,\n       count(*)                                AS Failures,\n       round(sum(e.DurationHours), 0)          AS DowntimeHours,\n       round(avg(e.DurationHours), 1)          AS MeanTimeToRepairHours,\n       round(sum(e.LostEnergyMwh), 0)          AS LostEnergyMwh,\n       round(sum(w.TotalCostUsd), 0)           AS RepairCostUsd\nFROM ops_turbine_events e\nLEFT JOIN ops_work_orders w ON w.WorkOrderId = e.WorkOrderId\nCROSS JOIN q_asof a\nWHERE e.Cause = 'Component fault' AND e.StartTime >= add_months(a.AsOf, -12)\nGROUP BY e.Component\nORDER BY LostEnergyMwh DESC",
+    "kind": "example"
+   },
+   {
+    "id": "RE-02",
+    "question": "What are the mean time between failures and the mean time to repair of each turbine over the last 12 months?",
+    "sql": "SELECT t.turbineId                                                                          AS TurbineId,\n       count(CASE WHEN e.Cause = 'Component fault' THEN 1 END)                              AS Failures,\n       count(CASE WHEN e.Cause = 'Auto-reset fault' THEN 1 END)                             AS AutoResets,\n       round(coalesce(sum(CASE WHEN e.Cause = 'Component fault' THEN e.DurationHours END), 0), 0) AS DowntimeHours,\n       round(avg(CASE WHEN e.Cause = 'Component fault' THEN e.DurationHours END), 1)        AS MeanTimeToRepairHours,\n       round((8760 - coalesce(sum(CASE WHEN e.Cause = 'Component fault' THEN e.DurationHours END), 0))\n             / nullif(count(CASE WHEN e.Cause = 'Component fault' THEN 1 END), 0), 0)       AS MeanTimeBetweenFailuresHours\nFROM ref_turbines t\nCROSS JOIN q_asof a\nLEFT JOIN ops_turbine_events e\n       ON e.TurbineId = t.turbineId AND e.AvailabilityCategory = 'Forced outage' AND e.StartTime >= add_months(a.AsOf, -12)\nGROUP BY t.turbineId\nORDER BY Failures DESC, TurbineId",
+    "kind": "example"
+   },
+   {
+    "id": "RE-03",
+    "question": "Do we have repeat offenders: the same component failing again and again on the same turbine?",
+    "sql": "SELECT e.TurbineId, e.Component,\n       count(*)                                                     AS Faults,\n       count(CASE WHEN e.Cause = 'Component fault' THEN 1 END)      AS NeededATechnician,\n       round(sum(e.DurationHours), 0)                               AS DowntimeHours,\n       round(sum(e.LostEnergyMwh), 0)                               AS LostEnergyMwh,\n       max_by(e.FailureMode, e.StartTime)                           AS LatestFailureMode\nFROM ops_turbine_events e\nCROSS JOIN q_asof a\nWHERE e.AvailabilityCategory = 'Forced outage' AND e.Component IS NOT NULL AND e.StartTime >= add_months(a.AsOf, -12)\nGROUP BY e.TurbineId, e.Component\nORDER BY Faults DESC\nLIMIT 8",
+    "kind": "example"
+   },
+   {
+    "id": "RE-04",
+    "question": "What are the ten most frequent alarms of the last 90 days, and on which turbine does each one occur most?",
+    "sql": "WITH n AS (\n    SELECT l.AlarmCode, l.TurbineId, count(*) AS Times\n    FROM ops_alarm_log l\n    CROSS JOIN q_asof a\n    WHERE l.RaisedAt >= a.AsOf - INTERVAL 90 DAYS\n    GROUP BY l.AlarmCode, l.TurbineId)\nSELECT n.AlarmCode, c.description AS Description, c.severity AS Severity,\n       sum(n.Times)                     AS Times,\n       count(*)                         AS TurbinesAffected,\n       max_by(n.TurbineId, n.Times)     AS MostAffectedTurbine,\n       max(n.Times)                     AS TimesOnThatTurbine\nFROM n\nJOIN ref_alarm_codes c ON c.alarmCode = n.AlarmCode\nGROUP BY n.AlarmCode, c.description, c.severity\nORDER BY Times DESC\nLIMIT 10",
+    "kind": "example"
+   },
+   {
+    "id": "RE-05",
+    "question": "Is any gearbox running hotter or rougher than the rest of the fleet at the same load?",
+    "sql": "WITH x AS (\n    SELECT s.TurbineId,\n           avg(s.GearboxBearingTemp) AS BearingTemp, avg(s.GearboxOilTemp) AS OilTemp, avg(s.GearboxVibration) AS Vibration\n    FROM ops_scada_10min s\n    CROSS JOIN q_asof a\n    WHERE s.Timestamp >= a.AsOf - INTERVAL 30 DAYS AND s.State = 'RUNNING' AND s.ActivePower > 3000\n    GROUP BY s.TurbineId)\nSELECT TurbineId,\n       round(BearingTemp, 1)                                AS GearboxBearingTemp,\n       round(BearingTemp - avg(BearingTemp) OVER (), 1)     AS BearingTempVsFleet,\n       round(OilTemp, 1)                                    AS GearboxOilTemp,\n       round(OilTemp - avg(OilTemp) OVER (), 1)             AS OilTempVsFleet,\n       round(Vibration, 2)                                  AS GearboxVibration,\n       round(Vibration - avg(Vibration) OVER (), 2)         AS VibrationVsFleet\nFROM x\nORDER BY BearingTempVsFleet DESC",
+    "kind": "example"
+   },
+   {
+    "id": "RE-06",
+    "question": "Since when has the WT-07 gearbox been drifting away from the fleet? Show the trend by week.",
+    "sql": "SELECT to_date(date_trunc('week', s.Timestamp))                                                AS WeekStarting,\n       round(avg(CASE WHEN s.TurbineId = 'WT-07' THEN s.GearboxBearingTemp END), 1)            AS Wt07BearingTemp,\n       round(avg(CASE WHEN s.TurbineId <> 'WT-07' THEN s.GearboxBearingTemp END), 1)           AS FleetBearingTemp,\n       round(avg(CASE WHEN s.TurbineId = 'WT-07' THEN s.GearboxVibration END), 2)              AS Wt07Vibration,\n       round(avg(CASE WHEN s.TurbineId <> 'WT-07' THEN s.GearboxVibration END), 2)             AS FleetVibration\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 182 DAYS AND s.State = 'RUNNING' AND s.ActivePower > 2000\nGROUP BY to_date(date_trunc('week', s.Timestamp))\nORDER BY WeekStarting",
+    "kind": "example"
+   },
+   {
+    "id": "RE-07",
+    "question": "What do the gearbox oil samples of WT-07 show, and how do they compare with WT-02 before its bearing failed?",
+    "sql": "SELECT TurbineId, SampleDate, IronPpm, CopperPpm, WaterPpm, ParticleCountIso4406, Condition, LabComment\nFROM ops_oil_analysis\nWHERE TurbineId IN ('WT-02', 'WT-07')\nORDER BY TurbineId, SampleDate",
+    "kind": "example"
+   },
+   {
+    "id": "RE-08",
+    "question": "Have we had a major gearbox failure before? What happened, how long was the turbine down and what did it cost?",
+    "sql": "SELECT e.TurbineId, to_date(e.StartTime) AS FailureDate, e.FailureMode,\n       round(e.DurationHours, 0)            AS DowntimeHours,\n       round(e.LostEnergyMwh, 0)            AS LostEnergyMwh,\n       w.WorkOrderId, w.Summary,\n       round(w.TotalCostUsd, 0)             AS TotalCostUsd,\n       w.CostBorneBy,\n       round(w.WaitingForPartsHours / 24, 1) AS DaysWaitingForPartsOrCrane,\n       w.Findings\nFROM ops_turbine_events e\nJOIN ops_work_orders w ON w.WorkOrderId = e.WorkOrderId\nWHERE e.ComponentCode = 'GBX' AND e.FaultClass = 'C'\nORDER BY w.TotalCostUsd DESC\nLIMIT 5",
+    "kind": "example"
+   },
+   {
+    "id": "RE-09",
+    "question": "Which components are still under warranty, until when, and under which contract?",
+    "sql": "SELECT c.componentType, count(*) AS Components, c.warrantyEndDate,\n       datediff(c.warrantyEndDate, a.AsOf) AS DaysLeft,\n       c.warrantyContractId, k.counterparty, k.terms\nFROM ref_components c\nCROSS JOIN q_asof a\nLEFT JOIN ref_contracts k ON k.contractId = c.warrantyContractId\nWHERE c.warrantyEndDate >= to_date(a.AsOf)\nGROUP BY c.componentType, c.warrantyEndDate, datediff(c.warrantyEndDate, a.AsOf), c.warrantyContractId, k.counterparty, k.terms\nORDER BY c.warrantyEndDate, c.componentType",
+    "kind": "example"
+   },
+   {
+    "id": "RE-10",
+    "question": "Which blade findings of category 3 or worse are still open, and is the repair planned?",
+    "sql": "SELECT b.TurbineId, b.Blade, b.InspectionDate, b.FindingType, b.SeverityCategory, b.SpanPositionM,\n       b.RecommendedAction, b.Status, b.RepairWorkOrderId,\n       to_date(w.ScheduledDate) AS RepairScheduledDay, w.Status AS RepairStatus\nFROM ops_blade_inspections b\nLEFT JOIN ops_work_orders w ON w.WorkOrderId = b.RepairWorkOrderId\nWHERE b.Status <> 'Closed' AND b.SeverityCategory >= 3\nORDER BY b.SeverityCategory DESC, b.TurbineId, b.Blade",
+    "kind": "no example"
+   },
+   {
+    "id": "MP-01",
+    "question": "On which working day of the coming week would stopping one turbine for maintenance cost the least production, and is the wind low enough to work?",
+    "sql": "WITH f AS (\n    SELECT from_utc_timestamp(p.TargetTime, st.timezone) AS LocalTime, p.WindSpeed, p.WindSpeedP90, p.PowerMw, p.IcingRisk,\n           st.turbineCount, st.ppaPriceUsdPerMwh\n    FROM ops_power_forecast p\n    CROSS JOIN ref_site st\n    WHERE p.ForecastType = 'Latest')\nSELECT to_date(LocalTime)                                             AS Day,\n       date_format(LocalTime, 'EEEE')                                 AS Weekday,\n       round(avg(WindSpeed), 1)                                       AS MeanWindSpeed,\n       round(max(WindSpeedP90), 1)                                    AS HighestLikelyWindSpeed,\n       sum(CASE WHEN WindSpeedP90 < 10 THEN 1 ELSE 0 END)             AS HoursCalmEnoughForBladeWork,\n       round(sum(PowerMw) / max(turbineCount), 1)                     AS MwhLostIfOneTurbineIsStopped,\n       round(sum(PowerMw) / max(turbineCount) * max(ppaPriceUsdPerMwh), 0) AS RevenueLostUsd,\n       bool_or(IcingRisk)                                             AS IcingRisk\nFROM f\nWHERE hour(LocalTime) BETWEEN 7 AND 16 AND dayofweek(LocalTime) <> 1\nGROUP BY to_date(LocalTime), date_format(LocalTime, 'EEEE')\nHAVING count(*) = 10\nORDER BY MwhLostIfOneTurbineIsStopped",
+    "kind": "example"
+   },
+   {
+    "id": "MP-02",
+    "question": "How good is our preventive maintenance compliance? Of the preventive work due in the last 12 months, how much was done on time?",
+    "sql": "SELECT CASE WHEN w.Status = 'Closed' AND w.ClosedDate <= w.ScheduledDate + INTERVAL 7 DAYS THEN '1 Done within a week of the plan'\n            WHEN w.Status = 'Closed' THEN '2 Done late'\n            ELSE '3 Not done, overdue' END                         AS Result,\n       count(*)                                                    AS WorkOrders,\n       round(100 * count(*) / sum(count(*)) OVER (), 1)            AS SharePct\nFROM ops_work_orders w\nCROSS JOIN q_asof a\nWHERE w.WorkType = 'Preventive' AND w.ScheduledDate >= add_months(a.AsOf, -12) AND w.ScheduledDate < a.AsOf\nGROUP BY 1\nORDER BY Result",
+    "kind": "example"
+   },
+   {
+    "id": "MP-03",
+    "question": "Which repairs were held up by waiting for parts, and what did the waiting cost in lost energy?",
+    "sql": "SELECT w.WorkOrderId, w.TurbineId, to_date(w.OpenedDate) AS Opened, w.Summary,\n       round(w.WaitingForPartsHours / 24, 1)        AS DaysWaiting,\n       round(w.DowntimeHours, 0)                    AS DowntimeHours,\n       round(e.LostEnergyMwh, 0)                    AS LostEnergyMwh,\n       concat_ws(', ', collect_list(p.PartId))      AS PartsUsed\nFROM ops_work_orders w\nJOIN ops_turbine_events e ON e.EventId = w.EventId\nLEFT JOIN ops_work_order_parts p ON p.WorkOrderId = w.WorkOrderId\nWHERE w.WaitingForPartsHours >= 48\nGROUP BY w.WorkOrderId, w.TurbineId, to_date(w.OpenedDate), w.Summary, w.WaitingForPartsHours, w.DowntimeHours, e.LostEnergyMwh\nORDER BY w.WaitingForPartsHours DESC\nLIMIT 10",
+    "kind": "example"
+   },
+   {
+    "id": "MP-04",
+    "question": "Which spare parts did we use most in the last 12 months, and how many months of stock do we hold?",
+    "sql": "WITH used AS (\n    SELECT p.PartId, sum(p.Quantity) AS Quantity\n    FROM ops_work_order_parts p\n    JOIN ops_work_orders w ON w.WorkOrderId = p.WorkOrderId\n    CROSS JOIN q_asof a\n    WHERE w.OpenedDate >= add_months(a.AsOf, -12) AND w.Status = 'Closed'\n    GROUP BY p.PartId)\nSELECT sp.partId, sp.description,\n       coalesce(u.Quantity, 0)                                   AS UsedInLast12Months,\n       sp.quantityOnHand, sp.reorderPoint, sp.leadTimeDays,\n       round(sp.quantityOnHand / (u.Quantity / 12.0), 1)         AS MonthsOfStock\nFROM ref_spare_parts sp\nLEFT JOIN used u ON u.PartId = sp.partId\nORDER BY UsedInLast12Months DESC, sp.partId\nLIMIT 12",
+    "kind": "example"
+   },
+   {
+    "id": "MP-05",
+    "question": "How was the technicians' time spent in the last 90 days: who led which kind of work?",
+    "sql": "SELECT t.name AS LeadTechnician, t.role AS Role,\n       count(*)                                                        AS WorkOrdersLed,\n       count(CASE WHEN w.WorkType = 'Corrective' THEN 1 END)           AS Corrective,\n       count(CASE WHEN w.WorkType = 'Preventive' THEN 1 END)           AS Preventive,\n       round(sum(w.LaborHours), 0)                                     AS CrewLabourHours\nFROM ops_work_orders w\nJOIN ref_technicians t ON t.technicianId = w.LeadTechnicianId\nCROSS JOIN q_asof a\nWHERE w.Status = 'Closed' AND w.OpenedDate >= a.AsOf - INTERVAL 90 DAYS\nGROUP BY t.name, t.role\nORDER BY CrewLabourHours DESC",
+    "kind": "example"
+   },
+   {
+    "id": "AM-01",
+    "question": "What is our revenue for the year to date, and how does it compare with the budget?",
+    "sql": "WITH y AS (SELECT date_trunc('year', AsOf) AS YearStart, AsOf FROM q_asof),\ne AS (SELECT sum(s.EnergyKwh) / 1000 AS EnergyMwh FROM ops_scada_10min s CROSS JOIN y WHERE s.Timestamp >= y.YearStart),\nc AS (SELECT sum(CASE WHEN c.Compensated THEN c.LostEnergyMwh ELSE 0 END) AS DeemedMwh,\n             sum(CASE WHEN c.Compensated THEN 0 ELSE c.LostEnergyMwh END) AS UnpaidCurtailmentMwh\n      FROM ops_curtailments c CROSS JOIN y WHERE c.StartTime >= y.YearStart),\nb AS (SELECT sum(CASE WHEN b.YearMonth < date_format(y.AsOf, 'yyyy-MM') THEN b.BudgetRevenueUsd\n                      ELSE b.BudgetRevenueUsd * day(y.AsOf) / day(last_day(y.AsOf)) END) AS BudgetRevenueUsd\n      FROM ops_monthly_budget b CROSS JOIN y\n      WHERE b.Year = year(y.AsOf) AND b.YearMonth <= date_format(y.AsOf, 'yyyy-MM'))\nSELECT round(e.EnergyMwh, 0)                                                       AS EnergyMwh,\n       round(c.DeemedMwh, 0)                                                       AS DeemedGenerationMwh,\n       round((e.EnergyMwh + c.DeemedMwh) * st.ppaPriceUsdPerMwh, 0)                AS RevenueUsd,\n       round(b.BudgetRevenueUsd, 0)                                                AS BudgetRevenueUsd,\n       round(100 * (e.EnergyMwh + c.DeemedMwh) * st.ppaPriceUsdPerMwh / b.BudgetRevenueUsd, 1) AS PctOfBudget,\n       round(c.UnpaidCurtailmentMwh * st.ppaPriceUsdPerMwh, 0)                     AS RevenueLostToUnpaidCurtailmentUsd\nFROM e CROSS JOIN c CROSS JOIN b CROSS JOIN ref_site st",
+    "kind": "example"
+   },
+   {
+    "id": "AM-02",
+    "question": "How much were we curtailed in the last 12 months, why, and how much of it were we paid for?",
+    "sql": "SELECT c.Reason, c.InstructedBy, c.Compensated,\n       count(*)                                                                       AS Events,\n       round(sum(c.DurationHours), 0)                                                 AS Hours,\n       round(sum(c.LostEnergyMwh), 0)                                                 AS CurtailedMwh,\n       round(sum(CASE WHEN c.Compensated THEN 0 ELSE c.LostEnergyMwh END) * max(st.ppaPriceUsdPerMwh), 0) AS RevenueLostUsd,\n       round(avg(c.AvgRealTimePriceUsdPerMwh), 1)                                     AS MeanRealTimePrice\nFROM ops_curtailments c\nCROSS JOIN q_asof a\nCROSS JOIN ref_site st\nWHERE c.StartTime >= add_months(a.AsOf, -12)\nGROUP BY c.Reason, c.InstructedBy, c.Compensated\nORDER BY CurtailedMwh DESC",
+    "kind": "example"
+   },
+   {
+    "id": "AM-03",
+    "question": "Did the service provider meet the availability guarantee in the last contract year, and what are the liquidated damages if not?",
+    "sql": "WITH cy AS (\n    SELECT cast(make_date(year(AsOf) - CASE WHEN month(AsOf) >= 7 THEN 1 ELSE 2 END, 7, 1) AS timestamp) AS YearStart FROM q_asof),\nk AS (\n    SELECT guaranteedAvailabilityPct AS Guarantee, liquidatedDamagesUsdPerMwh AS DamagesRate,\n           scheduledMaintenanceAllowanceHoursPerTurbineYear AS Allowance\n    FROM ref_contracts WHERE contractId = 'CT-SMA-001'),\nh AS (\n    SELECT s.TurbineId,\n           count(*) / 6.0 AS PeriodHours,\n           sum(CASE WHEN s.AvailabilityCategory IN ('Forced outage', 'Planned corrective action') THEN 1 ELSE 0 END) / 6.0 AS OutageHours,\n           sum(CASE WHEN s.AvailabilityCategory = 'Scheduled maintenance' THEN 1 ELSE 0 END) / 6.0 AS ScheduledHours,\n           sum(CASE WHEN s.AvailabilityCategory IN ('Out of electrical specification', 'Out of environmental specification',\n                                                    'Requested shutdown', 'Information unavailable') THEN 1 ELSE 0 END) / 6.0 AS ExcludedHours,\n           sum(s.PossibleEnergyKwh) / 1000 AS PossibleMwh\n    FROM ops_scada_10min s CROSS JOIN cy\n    WHERE s.Timestamp >= cy.YearStart AND s.Timestamp < add_months(cy.YearStart, 12)\n    GROUP BY s.TurbineId),\nx AS (\n    SELECT e.TurbineId, sum(e.DurationHours) AS NotTheProvidersHours\n    FROM ops_turbine_events e CROSS JOIN cy\n    WHERE e.AvailabilityCategory = 'Forced outage' AND e.ResponsibleParty <> 'Service provider'\n      AND e.StartTime >= cy.YearStart AND e.StartTime < add_months(cy.YearStart, 12)\n    GROUP BY e.TurbineId),\nt AS (\n    SELECT h.TurbineId, h.PossibleMwh,\n           100 * (1 - (h.OutageHours - coalesce(x.NotTheProvidersHours, 0) + greatest(h.ScheduledHours - k.Allowance, 0))\n                      / (h.PeriodHours - h.ExcludedHours - coalesce(x.NotTheProvidersHours, 0))) AS AvailabilityPct\n    FROM h LEFT JOIN x ON x.TurbineId = h.TurbineId CROSS JOIN k)\nSELECT to_date(max(cy.YearStart))                                                   AS ContractYearStart,\n       round(avg(t.AvailabilityPct), 2)                                             AS ContractualAvailabilityPct,\n       max(k.Guarantee)                                                             AS GuaranteePct,\n       round(min(t.AvailabilityPct), 2)                                             AS LowestTurbinePct,\n       min_by(t.TurbineId, t.AvailabilityPct)                                       AS LowestTurbine,\n       round(greatest(max(k.Guarantee) - avg(t.AvailabilityPct), 0) / 100 * sum(t.PossibleMwh), 0) AS EnergyBelowGuaranteeMwh,\n       round(greatest(max(k.Guarantee) - avg(t.AvailabilityPct), 0) / 100 * sum(t.PossibleMwh) * max(k.DamagesRate), 0) AS LiquidatedDamagesUsd\nFROM t CROSS JOIN k CROSS JOIN cy",
+    "kind": "example"
+   },
+   {
+    "id": "AM-04",
+    "question": "What have repairs cost us this year, compared with the budget, and what was covered by warranty?",
+    "sql": "WITH y AS (SELECT date_trunc('year', AsOf) AS YearStart, AsOf FROM q_asof),\nw AS (SELECT sum(CASE WHEN w.CostBorneBy = 'Owner' THEN w.TotalCostUsd ELSE 0 END)    AS OwnerUsd,\n             sum(CASE WHEN w.CostBorneBy = 'Warranty' THEN w.TotalCostUsd ELSE 0 END) AS WarrantyUsd,\n             count(CASE WHEN w.CostBorneBy = 'Owner' THEN 1 END)                      AS Repairs\n      FROM ops_work_orders w CROSS JOIN y\n      WHERE w.WorkType = 'Corrective' AND w.Status = 'Closed' AND w.OpenedDate >= y.YearStart),\nb AS (SELECT sum(CASE WHEN b.YearMonth < date_format(y.AsOf, 'yyyy-MM') THEN b.BudgetCorrectiveMaintenanceUsd\n                      ELSE b.BudgetCorrectiveMaintenanceUsd * day(y.AsOf) / day(last_day(y.AsOf)) END) AS BudgetUsd\n      FROM ops_monthly_budget b CROSS JOIN y\n      WHERE b.Year = year(y.AsOf) AND b.YearMonth <= date_format(y.AsOf, 'yyyy-MM')),\ne AS (SELECT sum(s.EnergyKwh) / 1000 AS EnergyMwh FROM ops_scada_10min s CROSS JOIN y WHERE s.Timestamp >= y.YearStart)\nSELECT w.Repairs,\n       round(w.OwnerUsd, 0)                         AS RepairCostPaidByOwnerUsd,\n       round(b.BudgetUsd, 0)                        AS BudgetUsd,\n       round(100 * w.OwnerUsd / b.BudgetUsd, 1)     AS PctOfBudget,\n       round(w.OwnerUsd / e.EnergyMwh, 2)           AS RepairCostUsdPerMwh,\n       round(w.WarrantyUsd, 0)                      AS CoveredByWarrantyUsd\nFROM w CROSS JOIN b CROSS JOIN e",
+    "kind": "example"
+   },
+   {
+    "id": "AM-05",
+    "question": "How accurate was the day-ahead power forecast in each of the last six months?",
+    "sql": "WITH actual AS (\n    SELECT date_trunc('hour', Timestamp) AS Hour,\n           sum(PossiblePower) / 6 / 1000 AS PossibleMw, sum(ActivePower) / 6 / 1000 AS ActualMw\n    FROM ops_scada_10min\n    GROUP BY date_trunc('hour', Timestamp))\nSELECT date_format(f.TargetTime, 'yyyy-MM')                                                       AS Month,\n       round(100 * avg(abs(f.PowerMw - x.PossibleMw)) / max(st.capacityMw), 1)                    AS MeanAbsoluteErrorPctOfCapacity,\n       round(100 * avg(f.PowerMw - x.PossibleMw) / max(st.capacityMw), 1)                         AS BiasPctOfCapacity,\n       round(100 * avg(CASE WHEN x.PossibleMw BETWEEN f.PowerMwP10 AND f.PowerMwP90 THEN 1.0 ELSE 0.0 END), 0) AS HoursInsideP10P90BandPct,\n       round(100 * avg(abs(f.PowerMw - x.ActualMw)) / max(st.capacityMw), 1)                      AS ErrorAgainstActualPctOfCapacity\nFROM ops_power_forecast f\nJOIN actual x ON x.Hour = f.TargetTime\nCROSS JOIN ref_site st\nCROSS JOIN q_asof a\nWHERE f.ForecastType = 'Day-ahead'\n  AND f.TargetTime >= add_months(date_trunc('month', a.AsOf), -6) AND f.TargetTime < date_trunc('month', a.AsOf)\nGROUP BY date_format(f.TargetTime, 'yyyy-MM')\nORDER BY Month",
+    "kind": "example"
+   },
+   {
+    "id": "AM-06",
+    "question": "What would our energy have earned on the real-time market in the last 12 months, compared with the contract price?",
+    "sql": "WITH h AS (\n    SELECT date_trunc('hour', Timestamp) AS Hour, sum(EnergyKwh) / 1000 AS EnergyMwh\n    FROM ops_scada_10min\n    GROUP BY date_trunc('hour', Timestamp))\nSELECT round(sum(h.EnergyMwh), 0)                                                         AS EnergyMwh,\n       max(st.ppaPriceUsdPerMwh)                                                          AS ContractPrice,\n       round(sum(h.EnergyMwh * p.RealTimePriceUsdPerMwh) / sum(h.EnergyMwh), 2)           AS CapturedRealTimePrice,\n       round(avg(p.RealTimePriceUsdPerMwh), 2)                                            AS MeanRealTimePrice,\n       round(sum(h.EnergyMwh * (st.ppaPriceUsdPerMwh - p.RealTimePriceUsdPerMwh)), 0)     AS ContractValueOverMarketUsd,\n       count(CASE WHEN p.RealTimePriceUsdPerMwh < 0 THEN 1 END)                           AS HoursWithNegativePrice\nFROM h\nJOIN ops_market_prices p ON p.Timestamp = h.Hour\nCROSS JOIN ref_site st\nCROSS JOIN q_asof a\nWHERE h.Hour >= add_months(a.AsOf, -12)",
+    "kind": "example"
+   },
+   {
+    "id": "AM-07",
+    "question": "How much carbon dioxide did the site avoid this year?",
+    "sql": "SELECT round(sum(s.EnergyKwh) / 1000, 0)                                                 AS EnergyMwh,\n       max(st.gridEmissionFactorKgCo2PerMwh)                                             AS GridKgCo2PerMwh,\n       round(sum(s.EnergyKwh) / 1000 * max(st.gridEmissionFactorKgCo2PerMwh) / 1000, 0)  AS TonnesCo2Avoided\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nCROSS JOIN ref_site st\nWHERE s.Timestamp >= date_trunc('year', a.AsOf)",
+    "kind": "no example"
+   },
+   {
+    "id": "OP-01",
+    "question": "A gearbox vibration alarm came in. What does it mean, what will the controller do, and which procedure applies?",
+    "sql": "SELECT c.alarmCode, c.severity, c.description, c.threshold, c.unit, c.controllerAction, c.sopId, s.title AS Procedure, s.file\nFROM ref_alarm_codes c\nLEFT JOIN ref_sop_index s ON s.sopId = c.sopId\nWHERE c.alarmCode LIKE 'GBX-VIB%' OR c.alarmCode LIKE 'GBX-OIL-TEMP%'\nORDER BY c.threshold",
+    "kind": "example"
+   },
+   {
+    "id": "OP-02",
+    "question": "Who is on call, and in which order do I escalate?",
+    "sql": "SELECT r.escalationOrder, r.role, r.shift, r.contactChannel, concat_ws(', ', collect_list(t.name)) AS People\nFROM ref_oncall_roster r\nLEFT JOIN ref_technicians t ON t.onCallRoleId = r.roleId\nWHERE r.onCall = true\nGROUP BY r.escalationOrder, r.role, r.shift, r.contactChannel\nORDER BY r.escalationOrder, r.shift",
+    "kind": "example"
+   },
+   {
+    "id": "OP-03",
+    "question": "How often did gearbox alarms come up on each turbine in the last 12 months? Is WT-07 different?",
+    "sql": "SELECT l.TurbineId,\n       count(*)                                            AS GearboxAlarms,\n       count(CASE WHEN c.severity = 'critical' THEN 1 END) AS OfWhichCritical,\n       to_date(max(l.RaisedAt))                            AS LastRaised\nFROM ops_alarm_log l\nJOIN ref_alarm_codes c ON c.alarmCode = l.AlarmCode\nCROSS JOIN q_asof a\nWHERE c.component = 'gearbox' AND l.RaisedAt >= add_months(a.AsOf, -12)\nGROUP BY l.TurbineId\nORDER BY GearboxAlarms DESC",
+    "kind": "example"
+   },
+   {
+    "id": "OP-04",
+    "question": "What does the forecast say for the next 24 hours: how much power, and is there a risk of icing or a high-wind shutdown?",
+    "sql": "SELECT date_format(from_utc_timestamp(p.TargetTime, st.timezone), 'EEE HH:mm') AS SiteTime,\n       p.WindSpeed, p.WindSpeedP90, p.PowerMw, p.PowerMwP10, p.PowerMwP90, p.AmbientTemp, p.IcingRisk,\n       p.WindSpeedP90 >= 22                                                    AS HighWindRisk\nFROM ops_power_forecast p\nCROSS JOIN ref_site st\nWHERE p.ForecastType = 'Latest' AND p.HorizonHours <= 24\nORDER BY p.TargetTime",
+    "kind": "no example"
+   },
+   {
+    "id": "VA-01",
+    "question": "What was the availability of each turbine over the last 30 days?",
+    "sql": "SELECT s.TurbineId,\n       round(100 * (1 - sum(CASE WHEN s.AvailabilityCategory IN ('Forced outage', 'Scheduled maintenance', 'Planned corrective action') THEN 1 ELSE 0 END) / count(*)), 2) AS TimeAvailabilityPct,\n       round(100 * sum(s.EnergyKwh) / (sum(s.EnergyKwh)\n             + sum(CASE WHEN s.LossCause IN ('Component fault', 'Scheduled maintenance', 'Corrective maintenance', 'Technical derate') THEN s.LostEnergyKwh ELSE 0 END)), 2)             AS EnergyAvailabilityPct,\n       round(sum(CASE WHEN s.AvailabilityCategory = 'Forced outage' THEN 1 ELSE 0 END) / 6.0, 1)          AS ForcedOutageHours,\n       round(sum(s.EnergyKwh) / 1000, 0)                                                                  AS EnergyMwh\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 30 DAYS AND s.AvailabilityCategory <> 'Information unavailable'\nGROUP BY s.TurbineId\nORDER BY TimeAvailabilityPct",
+    "kind": "variation of SM-03"
+   },
+   {
+    "id": "VA-02",
+    "question": "Rank the turbines by performance index for the last 30 days.",
+    "sql": "SELECT s.TurbineId,\n       round(sum(s.EnergyKwh) / sum(s.PossibleEnergyKwh), 4)                AS PerformanceIndex,\n       round((sum(s.PossibleEnergyKwh) - sum(s.EnergyKwh)) / 1000, 0)       AS ShortfallMwh,\n       round(count(*) / 6.0, 0)                                             AS HoursInFullPerformance\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 30 DAYS AND s.AvailabilityCategory = 'Full performance'\nGROUP BY s.TurbineId\nORDER BY PerformanceIndex",
+    "kind": "variation of PE-01"
+   },
+   {
+    "id": "VA-03",
+    "question": "Show the performance index of WT-03 and WT-09 against the rest of the fleet for each of the last 12 months, the running month included.",
+    "sql": "SELECT date_format(s.Timestamp, 'yyyy-MM') AS Month,\n       round(sum(CASE WHEN s.TurbineId = 'WT-03' THEN s.EnergyKwh END)\n             / sum(CASE WHEN s.TurbineId = 'WT-03' THEN s.PossibleEnergyKwh END), 3)  AS Wt03,\n       round(sum(CASE WHEN s.TurbineId = 'WT-09' THEN s.EnergyKwh END)\n             / sum(CASE WHEN s.TurbineId = 'WT-09' THEN s.PossibleEnergyKwh END), 3)  AS Wt09,\n       round(sum(CASE WHEN s.TurbineId NOT IN ('WT-03', 'WT-09') THEN s.EnergyKwh END)\n             / sum(CASE WHEN s.TurbineId NOT IN ('WT-03', 'WT-09') THEN s.PossibleEnergyKwh END), 3) AS RestOfFleet\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= add_months(date_trunc('month', a.AsOf), -11) AND s.AvailabilityCategory = 'Full performance'\nGROUP BY date_format(s.Timestamp, 'yyyy-MM')\nORDER BY Month",
+    "kind": "variation of PE-04"
+   },
+   {
+    "id": "VA-04",
+    "question": "Is the WT-02 gearbox drifting away from the fleet? Show the trend by week over the last 182 days.",
+    "sql": "SELECT to_date(date_trunc('week', s.Timestamp))                                                AS WeekStarting,\n       round(avg(CASE WHEN s.TurbineId = 'WT-02' THEN s.GearboxBearingTemp END), 1)            AS Wt02BearingTemp,\n       round(avg(CASE WHEN s.TurbineId <> 'WT-02' THEN s.GearboxBearingTemp END), 1)           AS FleetBearingTemp,\n       round(avg(CASE WHEN s.TurbineId = 'WT-02' THEN s.GearboxVibration END), 2)              AS Wt02Vibration,\n       round(avg(CASE WHEN s.TurbineId <> 'WT-02' THEN s.GearboxVibration END), 2)             AS FleetVibration\nFROM ops_scada_10min s\nCROSS JOIN q_asof a\nWHERE s.Timestamp >= a.AsOf - INTERVAL 182 DAYS AND s.State = 'RUNNING' AND s.ActivePower > 2000\nGROUP BY to_date(date_trunc('week', s.Timestamp))\nORDER BY WeekStarting",
+    "kind": "variation of RE-06"
+   },
+   {
+    "id": "VA-05",
+    "question": "What are the five most frequent alarms of the last 30 days, and on which turbine does each one occur most?",
+    "sql": "WITH n AS (\n    SELECT l.AlarmCode, l.TurbineId, count(*) AS Times\n    FROM ops_alarm_log l\n    CROSS JOIN q_asof a\n    WHERE l.RaisedAt >= a.AsOf - INTERVAL 30 DAYS\n    GROUP BY l.AlarmCode, l.TurbineId)\nSELECT n.AlarmCode, c.description AS Description, c.severity AS Severity,\n       sum(n.Times)                     AS Times,\n       count(*)                         AS TurbinesAffected,\n       max_by(n.TurbineId, n.Times)     AS MostAffectedTurbine,\n       max(n.Times)                     AS TimesOnThatTurbine\nFROM n\nJOIN ref_alarm_codes c ON c.alarmCode = n.AlarmCode\nGROUP BY n.AlarmCode, c.description, c.severity\nORDER BY Times DESC\nLIMIT 5",
+    "kind": "variation of RE-04"
+   },
+   {
+    "id": "VA-06",
+    "question": "Which components cost us the most downtime and energy in the last 6 months?",
+    "sql": "SELECT e.Component,\n       count(*)                                AS Failures,\n       round(sum(e.DurationHours), 0)          AS DowntimeHours,\n       round(avg(e.DurationHours), 1)          AS MeanTimeToRepairHours,\n       round(sum(e.LostEnergyMwh), 0)          AS LostEnergyMwh,\n       round(sum(w.TotalCostUsd), 0)           AS RepairCostUsd\nFROM ops_turbine_events e\nLEFT JOIN ops_work_orders w ON w.WorkOrderId = e.WorkOrderId\nCROSS JOIN q_asof a\nWHERE e.Cause = 'Component fault' AND e.StartTime >= add_months(a.AsOf, -6)\nGROUP BY e.Component\nORDER BY LostEnergyMwh DESC",
+    "kind": "variation of RE-01"
+   },
+   {
+    "id": "VA-07",
+    "question": "Who led which kind of work in the last 180 days?",
+    "sql": "SELECT t.name AS LeadTechnician, t.role AS Role,\n       count(*)                                                        AS WorkOrdersLed,\n       count(CASE WHEN w.WorkType = 'Corrective' THEN 1 END)           AS Corrective,\n       count(CASE WHEN w.WorkType = 'Preventive' THEN 1 END)           AS Preventive,\n       round(sum(w.LaborHours), 0)                                     AS CrewLabourHours\nFROM ops_work_orders w\nJOIN ref_technicians t ON t.technicianId = w.LeadTechnicianId\nCROSS JOIN q_asof a\nWHERE w.Status = 'Closed' AND w.OpenedDate >= a.AsOf - INTERVAL 180 DAYS\nGROUP BY t.name, t.role\nORDER BY CrewLabourHours DESC",
+    "kind": "variation of MP-05"
+   },
+   {
+    "id": "VA-08",
+    "question": "What do the gearbox oil samples of WT-08 show?",
+    "sql": "SELECT TurbineId, SampleDate, IronPpm, CopperPpm, WaterPpm, ParticleCountIso4406, Condition, LabComment\nFROM ops_oil_analysis\nWHERE TurbineId IN ('WT-08')\nORDER BY TurbineId, SampleDate",
+    "kind": "variation of RE-07"
+   },
+   {
+    "id": "VA-09",
+    "question": "How often did pitch system alarms come up on each turbine in the last 12 months?",
+    "sql": "SELECT l.TurbineId,\n       count(*)                                            AS PitchAlarms,\n       count(CASE WHEN c.severity = 'critical' THEN 1 END) AS OfWhichCritical,\n       to_date(max(l.RaisedAt))                            AS LastRaised\nFROM ops_alarm_log l\nJOIN ref_alarm_codes c ON c.alarmCode = l.AlarmCode\nCROSS JOIN q_asof a\nWHERE c.component = 'pitch system' AND l.RaisedAt >= add_months(a.AsOf, -12)\nGROUP BY l.TurbineId\nORDER BY PitchAlarms DESC",
+    "kind": "variation of OP-03"
+   },
+   {
+    "id": "VA-10",
+    "question": "How much were we curtailed in the last 6 months, why, and how much of it were we paid for?",
+    "sql": "SELECT c.Reason, c.InstructedBy, c.Compensated,\n       count(*)                                                                       AS Events,\n       round(sum(c.DurationHours), 0)                                                 AS Hours,\n       round(sum(c.LostEnergyMwh), 0)                                                 AS CurtailedMwh,\n       round(sum(CASE WHEN c.Compensated THEN 0 ELSE c.LostEnergyMwh END) * max(st.ppaPriceUsdPerMwh), 0) AS RevenueLostUsd,\n       round(avg(c.AvgRealTimePriceUsdPerMwh), 1)                                     AS MeanRealTimePrice\nFROM ops_curtailments c\nCROSS JOIN q_asof a\nCROSS JOIN ref_site st\nWHERE c.StartTime >= add_months(a.AsOf, -6)\nGROUP BY c.Reason, c.InstructedBy, c.Compensated\nORDER BY CurtailedMwh DESC",
+    "kind": "variation of AM-02"
+   }
+  ],
+  "live": [
+   {
+    "id": "OP-05",
+    "question": "What is every turbine doing right now?"
+   },
+   {
+    "id": "OP-06",
+    "question": "Which alarms are active, and which procedure applies to each?"
+   },
+   {
+    "id": "OP-07",
+    "question": "How much is the site producing, and how has that changed over the last hour?"
+   },
+   {
+    "id": "OP-08",
+    "question": "Which turbine stands out from the fleet right now on gearbox temperature and vibration?"
+   }
+  ],
+  "unanswerable": [
+   {
+    "id": "NO-01",
+    "question": "How many bird strikes did we record last year?",
+    "expected": "The data holds no wildlife or bird strike records."
+   },
+   {
+    "id": "NO-02",
+    "question": "What is the remaining useful life of the WT-07 gearbox in months?",
+    "expected": "The data holds no remaining-life estimate. It holds vibration, temperatures, oil samples and past failures."
+   },
+   {
+    "id": "NO-03",
+    "question": "How does our availability compare with the neighbouring wind farm?",
+    "expected": "The data covers one site only; there is no data for other wind farms."
+   }
+  ]
+ }
+}

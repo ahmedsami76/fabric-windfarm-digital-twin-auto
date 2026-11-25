@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stand-in for npx in the scenario tests of app/create-principal.sh: only "rayfin secret …" is used.
+echo "npx $* (in $(basename "$PWD"))" >> "$STUB_DIR/calls.log"
+case "$*" in
+  "rayfin secret set --env-file rayfin/.env.secrets")
+      [[ ! -f "$STUB_DIR/rayfin_signed_out" ]] || { echo "❌ Not signed in. Run 'rayfin login'." >&2; exit 1; }
+      cp rayfin/.env.secrets "$STUB_DIR/secrets_received"; echo "✅ 3 secrets set" ;;
+  "rayfin secret list") echo "KUSTO_CLIENT_ID  KUSTO_CLIENT_SECRET  KUSTO_TENANT_ID" ;;
+  "rayfin secret delete "*) ;;
+  *) echo "npx stand-in: unexpected call: $*" >&2; exit 9 ;;
+esac

@@ -1,0 +1,40 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -100.509729,
+              32.189847
+            ],
+            [
+              -100.450271,
+              32.189847
+            ],
+            [
+              -100.450271,
+              32.240153
+            ],
+            [
+              -100.509729,
+              32.240153
+            ],
+            [
+              -100.509729,
+              32.189847
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "id": "northwind-ridge",
+        "name": "Northwind Ridge Wind Farm",
+        "areaKm2": 31.4
+      }
+    }
+  ]
+}

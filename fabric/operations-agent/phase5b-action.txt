@@ -1,0 +1,23 @@
+The action of the operations agent, for adding it by hand (guide, step 4, the part headed 'By hand').
+bash infra/09-remediation-agent.sh enters the same values through the Fabric API.
+
+In Agent setup: Add action, then Fabric item, and browse to the notebook. The dialog 'Add action' opens.
+
+Fabric item:         the notebook 12_send_edge_command, in this workspace
+Action name:         Curtail turbine
+Action description:  Limits the power of one wind turbine to a percentage of its rated power for a limited time, by
+                     sending a curtail command to the edge of the wind farm. Use it for a running turbine whose
+                     gearbox shows the early warning. The limit ends by itself after the duration. At 30 percent a
+                     turbine delivers at most 1260 kW.
+
+Parameters. Fabric lists them by itself, from the notebook's first code cell, each with the type string.
+There must be exactly these four. Enter the description of each:
+
+  turbine       The turbine to limit, as in the column TurbineId, for example WT-03. One turbine, never empty.
+  percent       The power limit in percent of rated power, as in the column CurtailToPercent. Normally 30. A number from 0 to 100.
+  duration      How long the limit lasts before it ends by itself, for example 60m. A number and s, m or h.
+  requested_by  Who asks for it. Always the text: operations agent WindFarmGearboxWatch, approved in Teams
+
+If the list shows more rows (command, reason, dry_run, EVENTSTREAM), the notebook in the workspace is
+an older one: cancel, replace the notebook (guide, step 2) and add the action again. The command is not
+a parameter on purpose: the action can limit a turbine and cannot stop one.

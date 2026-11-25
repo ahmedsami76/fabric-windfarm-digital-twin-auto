@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stand-in for npx in the scenario tests of app/create-app.sh: the scaffolder writes the few files of
+# the Universal App template that the script looks at.
+echo "npx $*" >> "$STUB_DIR/calls.log"
+if [[ "$*" == *create-rayfin* && ! -e "$STUB_DIR/scaffold_fails" ]]; then
+  mkdir -p windfarm-twin/rayfin windfarm-twin/scripts windfarm-twin/packages/frontend/src
+  echo "id: windfarm-twin" > windfarm-twin/rayfin/rayfin.yml
+  echo "// scaffold" > windfarm-twin/scripts/scaffold.mjs
+  echo "export default function App() { return null; } // welcome screen of the template" > windfarm-twin/packages/frontend/src/App.tsx
+  printf '{\n  "name": "@rayfin-app/frontend",\n  "dependencies": {\n    "react": "^19.2.7"\n  }\n}\n' > windfarm-twin/packages/frontend/package.json
+  echo "<html><head><title>Fabric App</title></head></html>" > windfarm-twin/packages/frontend/index.html
+fi
+exit 0

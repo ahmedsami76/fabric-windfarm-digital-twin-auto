@@ -1,0 +1,12 @@
+TurbineTelemetry: one row per turbine every few seconds. ActivePower and PowerSetpoint are kW, WindSpeed is m/s,
+temperatures are degrees Celsius, GearboxVibration is mm/s. State is RUNNING, DERATED, CURTAILED, IDLE, PAUSED,
+STOPPED, STOPPED_HIGH_WIND, MAINTENANCE or FAULT.
+The latest row per turbine: TurbineTelemetry | where Timestamp > ago(10m) | summarize arg_max(Timestamp, *) by TurbineId.
+AlarmEvents: one row when an alarm is raised (Status 'raised') and one when it clears (Status 'cleared'), linked
+by AlarmId. An alarm is active when its latest row has Status 'raised'. SopId is the procedure.
+TurbineStateChanges: one row each time a turbine changes state, with the Reason.
+WeatherObservations: the met mast, one row every few seconds.
+Always filter on Timestamp first (ago(15m), ago(1h), ago(24h)). Site power is the sum over turbines of the
+average ActivePower per turbine, divided by 1000 for MW. All times are UTC.
+Use this source only for the last 24 hours. It does not explain alarm codes, it holds no forecast, and it holds
+no history: for those, use the lakehouse.

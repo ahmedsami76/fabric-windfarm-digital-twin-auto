@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stand-in for node in the scenario tests of app/create-app.sh: only the version is asked for.
+echo "node $*" >> "$STUB_DIR/calls.log"
+[[ "${1:-}" == "--version" ]] && cat "$STUB_DIR/node_version" 2>/dev/null || echo "v22.23.5"

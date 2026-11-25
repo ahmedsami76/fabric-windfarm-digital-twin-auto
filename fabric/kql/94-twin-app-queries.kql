@@ -1,0 +1,51 @@
+// =====================================================================================
+// Wind farm digital twin: the queries of the app of Phase 4
+//
+// These are the queries the functions of the Fabric app run, word for word
+// (app/overlay/packages/functions/src/live.ts; a test compares the two). Run them here
+// to see what the app sees. Each block is one query: put the cursor in it and select Run.
+// =====================================================================================
+
+// 1. The newest row of every turbine. The app asks every 5 seconds.
+//    Expected: 12 rows while the simulator runs, none when it has been silent for 10 minutes.
+TurbineTelemetry
+| where Timestamp > ago(10m)
+| summarize arg_max(Timestamp, State, WindSpeed, WindDirection, AmbientTemp, ActivePower, PowerSetpoint, RotorSpeed, PitchAngle, NacelleDirection, YawError, GearboxOilTemp, GearboxBearingTemp, GearboxOilPressure, GearboxVibration, GeneratorWindingTemp, GeneratorBearingTemp, MainBearingTemp, TransformerTemp, HydraulicPressure, TowerVibration) by TurbineId
+| order by TurbineId asc
+
+// 2. The alarms that are raised and have not cleared. Expected: no row on a healthy site.
+ActiveAlarms()
+| order by RaisedAt desc
+| take 100
+
+// 3. The newest observation of the met mast. Expected: one row.
+WeatherObservations
+| where Timestamp > ago(10m)
+| summarize arg_max(Timestamp, WindSpeed, WindDirection, WindGust, AmbientTemp, AirDensity)
+
+// 4. One turbine, minute by minute, for the panel of that turbine. The app puts in the
+//    turbine and the number of minutes (5 to 360) after checking both.
+TurbineTelemetry
+| where Timestamp > ago(60m) and TurbineId == 'WT-07'
+| summarize ActivePower = avg(ActivePower), WindSpeed = avg(WindSpeed), RotorSpeed = avg(RotorSpeed), GearboxOilTemp = avg(GearboxOilTemp), GearboxBearingTemp = avg(GearboxBearingTemp), GearboxVibration = avg(GearboxVibration) by Timestamp = bin(Timestamp, 1m)
+| order by Timestamp asc
+
+// 5. What the connection check of the app runs. Expected: about 24 rows from 12 turbines.
+TurbineTelemetry | where Timestamp > ago(2m) | summarize Rows = count(), Turbines = dcount(TurbineId), Newest = max(Timestamp)
+
+// 6. How long a reading takes from the turbine to this database: the time the row arrived minus
+//    the time the turbine put on it. The connection check of the app prints this line. The page
+//    calls its values stale when the newest one is older than 2 minutes (STALE_AFTER_S in
+//    app/overlay/packages/frontend/src/twin/data/provider.ts); Highest should stay well below that.
+//    One reading of the age on the page of the deployed app, on 23 November 2026: 56 seconds.
+TurbineTelemetry
+| where Timestamp > ago(15m)
+| extend DelayS = datetime_diff('second', IngestedAt, Timestamp)
+| summarize Rows = count(), Median = percentile(DelayS, 50), P95 = percentile(DelayS, 95), Highest = max(DelayS)
+
+// 7. The command log of the edge with what the telemetry showed afterwards (Phase 5c). The app asks
+//    with the other live values and shows who limited a turbine, since when and until when.
+//    Needs block 1 of 07-command-log.kql; without it this query fails here and the app shows no commands.
+CommandLog(24h)
+| order by Timestamp desc, TurbineId asc
+| take 60

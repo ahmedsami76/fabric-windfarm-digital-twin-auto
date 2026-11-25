@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Stand-in for the Azure CLI in the scenario tests of app/create-principal.sh. It answers from files in
+# $STUB_DIR and logs every call. The secret it "makes" is a fixed text, so a test can look for it.
+S="$STUB_DIR"; args="$*"
+echo "az $args" >> "$S/calls.log"
+WS="638251b5-0826-4632-b8f1-642e05d39629"
+case "$args" in
+  "account show --query tenantId"*)  [[ ! -f "$S/not_signed_in" ]] || { echo "ERROR: Please run 'az login' to setup account." >&2; exit 1; }; echo 11111111-2222-3333-4444-555555555555 ;;
+  "account show --query user.name"*) echo sami@contoso.example ;;
+  "rest --resource https://api.fabric.microsoft.com --method get --url https://api.fabric.microsoft.com/v1/workspaces --output json")
+      [[ ! -f "$S/fabric_down" ]] || { echo "ERROR: (ServiceUnavailable)" >&2; exit 1; }
+      echo '{"value": [{"id": "other", "displayName": "Sales"}], "continuationUri": "https://api.fabric.microsoft.com/v1/workspaces?continuationToken=2"}' ;;
+  "rest --resource https://api.fabric.microsoft.com --method get --url https://api.fabric.microsoft.com/v1/workspaces?continuationToken=2 --output json")
+      if [[ -f "$S/no_workspace" ]]; then echo '{"value": []}'; else echo "{\"value\": [{\"id\": \"$WS\", \"displayName\": \"WindFarmDigitalTwin\"}]}"; fi ;;
+  "rest --resource https://api.fabric.microsoft.com --method get --url https://api.fabric.microsoft.com/v1/workspaces/$WS/roleAssignments --output json")
+      cat "$S/roles.json" 2>/dev/null || echo '{"value": []}' ;;
+  "rest --resource https://api.fabric.microsoft.com --method post --url https://api.fabric.microsoft.com/v1/workspaces/$WS/roleAssignments --body "*)
+      [[ ! -f "$S/role_refused" ]] || { echo "ERROR: (InsufficientPrivileges) The caller does not have sufficient permissions" >&2; exit 1; }
+      # A principal that Fabric does not know yet: refused this many times, then accepted.
+      left="$(cat "$S/principal_unknown" 2>/dev/null || echo 0)"
+      if (( left > 0 )); then echo $((left - 1)) > "$S/principal_unknown"; echo "ERROR: (PrincipalNotFound) The requested principal was not found" >&2; exit 1; fi
+      body="$(echo "$args" | sed -E 's/.*--body (.*) --output none/\1/')"
+      python3 -c 'import json,sys; b=json.loads(sys.argv[1]); print(json.dumps({"value": [{"id": b["principal"]["id"], "principal": b["principal"], "role": b["role"]}]}))' "$body" > "$S/roles.json" ;;
+  "rest --resource https://api.fabric.microsoft.com --method delete --url https://api.fabric.microsoft.com/v1/workspaces/$WS/roleAssignments/"*) rm -f "$S/roles.json" ;;
+  "ad app list --filter displayName eq 'windfarm-twin-eventhouse-reader'"*) cat "$S/appid" 2>/dev/null || true ;;   # no match: nothing, exit 0, as az does
+  "ad app create --display-name windfarm-twin-eventhouse-reader --sign-in-audience AzureADMyOrg"*)
+      [[ ! -f "$S/no_app_rights" ]] || { echo "ERROR: Insufficient privileges to complete the operation." >&2; exit 1; }
+      echo aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee | tee "$S/appid" ;;
+  "ad sp show --id "*)   [[ -s "$S/spid" ]] && cat "$S/spid" || { echo "ERROR: Resource does not exist" >&2; exit 3; } ;;
+  "ad sp create --id "*) echo 99999999-8888-7777-6666-555555555555 | tee "$S/spid" ;;
+  "ad app credential reset --id aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee --display-name windfarm-twin --years 1"*)
+      [[ ! -f "$S/no_secrets" ]] || { echo "ERROR: Credential type not allowed as per assigned policy." >&2; exit 1; }
+      echo "WARNING: The output includes credentials that you must protect." >&2; echo "S3cr3t~made.by-the_stub" ;;
+  "ad app delete --id "*) rm -f "$S/appid" "$S/spid" ;;
+  *) echo "az stand-in: unexpected call: $args" >&2; exit 9 ;;
+esac

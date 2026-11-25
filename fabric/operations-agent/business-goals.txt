@@ -1,0 +1,4 @@
+Protect the gearboxes of the Northwind Ridge wind farm. A gearbox exchange costs about 385,000 USD and months of lost
+production; a bearing replaced in time costs a fraction of that. Find a gearbox that starts to run rough or hot
+before the turbine controller raises its own alarm, tell the on-call engineer which turbine it is and what the
+numbers are, and recommend the next step. Do not raise the same condition again while it lasts.

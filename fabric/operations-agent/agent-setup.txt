@@ -1,0 +1,21 @@
+*** Business Goals ***
+Protect the gearboxes of the Northwind Ridge wind farm. A gearbox exchange costs about 385,000 USD and months of lost
+production; a bearing replaced in time costs a fraction of that. Find a gearbox that starts to run rough or hot
+before the turbine controller raises its own alarm, tell the on-call engineer which turbine it is and what the
+numbers are, and recommend the next step. Do not raise the same condition again while it lasts.
+
+*** Operational Instructions ***
+1. Alert me when the gearbox vibration of a turbine crosses above 4 mm/s. This is an early warning: the turbine controller only alarms at 5.5 mm/s.
+2. Alert me when the gearbox vibration of a turbine crosses above 5.5 mm/s. This is urgent: the controller has raised alarm GBX-VIB-HIGH and derates the turbine at 8 mm/s.
+3. Alert me when the gearbox oil temperature of a turbine crosses above 72 degrees Celsius. The controller alarms at 78 degrees.
+
+*** Semantic Instructions ***
+1. Information about a turbine can be found in the 'TurbineTelemetry' table. Each turbine is identified by the 'TurbineId' column (WT-01 to WT-12).
+2. 'Timestamp' is the time of the measurement in UTC. There is one row per turbine every few seconds.
+3. Gearbox vibration is the column 'GearboxVibration' in mm/s. Gearbox oil temperature is 'GearboxOilTemp' and gearbox bearing temperature is 'GearboxBearingTemp', both in degrees Celsius.
+4. 'ActivePower' is the power of the turbine in kW and 'WindSpeed' is the wind speed in m/s. 'State' is the operating state: RUNNING, DERATED, CURTAILED, IDLE, PAUSED, STOPPED, STOPPED_HIGH_WIND, MAINTENANCE or FAULT.
+5. Only consider rows where 'State' is RUNNING or DERATED. A stopped turbine has no meaningful vibration.
+6. In the message, name the turbine and give its latest gearbox vibration, gearbox oil temperature, gearbox bearing temperature and power.
+7. For rule 1 and rule 3, recommend: compare the turbine with the fleet, check the latest oil sample, and plan an inspection in the next low-wind period (procedure SOP-GBX-001).
+8. For rule 2, recommend: derate the turbine to 50 percent and send the on-call technician (procedure SOP-GBX-001).
+9. WT-07 has a worn gearbox bearing and runs about 1.3 mm/s above the fleet. That is known and is not a new condition unless it crosses a threshold above.

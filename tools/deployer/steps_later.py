@@ -1,0 +1,357 @@
+"""The steps of Phases 2 to 4 and of the opt-in Phase 5a, and the whole catalogue in order.
+
+Three kinds of step appear here that Phase 1 does not have:
+  - a notebook that installs a library with %pip. Microsoft documents that this is switched off in pipeline runs
+    and how to switch it on there; for a run started through the API nothing is written. So these are the
+    operator's by default, and the runner's only with --opt-in pip-jobs;
+  - a preview feature, behind --allow-preview;
+  - what has no API at all, or only one that asks a person: tenant settings, the operations agent, Teams, the
+    sign-in of the app's tool.
+"""
+from __future__ import annotations
+
+import json
+import re
+
+from .cloud import SQL_RESOURCE, CloudError, run_notebook
+from .core import Blocked, Options, Probe, Step, blocked, done, todo
+from .steps import (DATA_AGENT, MODEL, NOTEBOOKS, ONTOLOGY, OPERATIONS_AGENT, REPORT, after, confirmation,
+                    data_flow, freshness, gate_lakehouse, import_notebooks, instance, item, items, kql, kql_database, name,
+                    need_item, notebook_probe, notebooks_probe, phase1, ran, run_kql_file, run_step, schedule_act,
+                    scheduled_probe, script, tenant_settings, workspace_id)
+
+PIP = "optin:pip-jobs"
+INLINE_INSTALL = {"_inlineInstallationEnabled": {"value": "True", "type": "bool"}}
+BY_HAND = ("In the workspace open the notebook {notebook} and select Run all. {expect}\n"
+           "Then run the same apply again: it looks for {artifact}.")
+
+
+def functions(ctx) -> set:
+    return {row.get("Name") for row in kql(ctx, ".show functions | project Name")}
+
+
+def tables(ctx) -> set:
+    return {row.get("TableName") for row in kql(ctx, ".show tables | project TableName")}
+
+
+def p2_views(ctx) -> Probe:
+    if not kql_database(ctx):
+        return after("p1.eventhouse")
+    missing = {"Scada10Min", "AlarmIntervals", "GearboxVsFleet"} - functions(ctx)
+    return todo("missing functions: " + ", ".join(sorted(missing))) if missing else done("three prepared views in the Eventhouse")
+
+
+def pip_notebook(step_id: str, phase: str, title: str, notebook: str, prerequisite: str, options: Options, *,
+                 artifact: tuple | None = None, expect: str = "", needs: tuple = (), optional: bool = False) -> Step:
+    """A notebook whose first cell is %pip install. The operator's unless the opt-in was given.
+
+    With an artifact (an item the notebook creates), the step is complete when the item is there, whoever ran the
+    notebook. Without one, a run by the runner is recorded, and a run by hand is confirmed by the operator.
+    """
+    what = f"the {artifact[0]} {artifact[1]}" if artifact else "your confirmation"
+
+    def probe(ctx) -> Probe:
+        if not item(ctx, "Notebook", notebook):
+            return after(prerequisite)
+        if artifact:
+            found = item(ctx, artifact[0], artifact[1])
+            return done(f"{artifact[0]} {artifact[1]} exists") if found else todo()
+        if ran(ctx, step_id, notebook):
+            return done(f"{notebook} ran to the end")
+        return confirmation(ctx, step_id, f"{notebook} run by hand")
+
+    def manual(ctx) -> str:
+        text = BY_HAND.format(notebook=notebook, expect=expect, artifact=what)
+        if not artifact:
+            text += f"\nThen: python3 tools/deploy.py apply --approve <plan> --confirm {step_id}"
+        return text + ("\nThe runner leaves this notebook to you because its first cell installs a library with %pip, and "
+                       "Microsoft does not say whether that works in a run started through the API. To let the runner try: "
+                       "--opt-in pip-jobs.")
+
+    def act(ctx) -> None:
+        try:
+            run_notebook(ctx, workspace_id(ctx), need_item(ctx, "Notebook", notebook)["id"], notebook, INLINE_INSTALL)
+        except CloudError as error:
+            raise Blocked(f"The run of {notebook} as a job did not work: {error}",
+                          BY_HAND.format(notebook=notebook, expect=expect, artifact=what)
+                          + "\nIf the failure names %pip: that is the undocumented part. Leave --opt-in pip-jobs away from now on.") from None
+
+    tried = PIP in options.granted
+    return Step(step_id, phase, title, probe, act if tried else None, manual=manual, needs=needs, optional=optional,
+                inputs=(f"fabric/notebooks/{notebook}.ipynb",), observable=bool(artifact),
+                writes="" if optional else f"with --opt-in pip-jobs: runs {notebook} as a job, with %pip switched on by the "
+                "parameter Microsoft documents for pipelines",
+                basis="Job Scheduler - Run On Demand Item Job; _inlineInstallationEnabled is documented for pipeline runs only",
+                proof="none" if tried else "live")
+
+
+def phase2(options: Options) -> list[Step]:
+    gate_probe, gate_act = gate_lakehouse("phase2", "p2.gate", "p2.model_tables")
+    return [
+        Step("p2.prepared_views", "phase2", "Prepared views in the Eventhouse", p2_views,
+             lambda ctx: run_kql_file(ctx, "fabric/kql/04-prepared-views.kql"), inputs=("fabric/kql/04-prepared-views.kql",),
+             writes="three functions in the folder Prepared", basis="Kusto REST API, .create-or-alter function"),
+        Step("p2.notebooks", "phase2", "Notebooks 05 to 08 imported", notebooks_probe("phase2", "p1.lakehouse"), import_notebooks("phase2"),
+             inputs=tuple(f"fabric/notebooks/{n}.ipynb" for n in NOTEBOOKS["phase2"]), wait_seconds=60,
+             writes="four notebooks, each with the Lakehouse as its default", basis="Notebook - Create Notebook (definition, ipynb)"),
+        Step("p2.model_tables", "phase2", "Model tables built (notebook 05)",
+             notebook_probe("p2.model_tables", "05_build_model_tables", "p2.notebooks"), run_step("05_build_model_tables"),
+             observable=False, writes="the star schema in the Lakehouse", basis="Job Scheduler - Run On Demand Item Job (RunNotebook)"),
+        pip_notebook("p2.semantic_model", "phase2", "Semantic model built (notebook 06)", "06_build_semantic_model", "p2.notebooks",
+                     options, artifact=("SemanticModel", MODEL), expect="It builds the Direct Lake model WindFarm Operations."),
+        pip_notebook("p2.acceptance", "phase2", "Model tested against the Lakehouse (notebook 07)", "07_model_acceptance",
+                     "p2.notebooks", options, expect="Expect eleven lines that begin with PASS."),
+        pip_notebook("p2.report", "phase2", "Report built (notebook 08)", "08_build_report", "p2.notebooks", options,
+                     artifact=("Report", REPORT), expect="It builds the report WindFarm Operations Report."),
+        Step("p2.schedule", "phase2", "Model tables refreshed every hour",
+             scheduled_probe("p2.schedule", "05_build_model_tables", "p2.notebooks", False),
+             schedule_act("05_build_model_tables", "hourly", False), writes="one hourly schedule for notebook 05",
+             basis="Job Scheduler - Create Item Schedule (Cron, interval in minutes)"),
+        Step("p2.gate", "phase2", "GATE: model tables populated", gate_probe, gate_act, observable=False,
+             writes="one run of the gate notebook", basis="Job Scheduler - Run On Demand Item Job; the job's state is the verdict"),
+    ]
+
+
+def p3_capacity(ctx) -> Probe:
+    from .steps import capacity
+    chosen = capacity(ctx) or {}
+    sku = str(chosen.get("sku", ""))
+    if sku.upper().startswith("FT") or "trial" in sku.lower():
+        return blocked(f"The capacity is a trial ({sku}). The data agent and the operations agent need a paid capacity.",
+                       "Moving a workspace to another capacity is yours to decide and to do: workspace settings, License info. "
+                       "A workspace with items cannot move to a capacity in another region. Then set FABRIC_CAPACITY_ID and plan again.")
+    return done(f"capacity SKU {sku}")
+
+
+OPERATIONS_AGENT_STEPS = f"""The operations agent is set up in the portal; Fabric has no documented way to create one with its playbook.
+Follow step 9 of docs/09-deployment-guide-phase3.md:
+1. In the workspace: New item, Operations agent, name {OPERATIONS_AGENT}.
+2. Paste the text of fabric/operations-agent/agent-setup.txt into the one box; add the KQL database as its data source.
+3. Generate the playbook, read its rules, and start the agent.
+4. In Teams, install the app Fabric Operations Agent. The agent writes to the person who created it.
+The runner looks for an item of type OperationsAgent with that name. It does not read or change the agent."""
+
+
+def phase3(options: Options) -> list[Step]:
+    settings_probe, settings_manual = tenant_settings("phase3")
+    preview_agent = "preview:data-agent-sdk"
+    ontology_allowed = "preview:ontology" in options.granted
+
+    def ontology_probe(ctx) -> Probe:
+        if not item(ctx, "Notebook", "11_build_ontology"):
+            return after("p3.notebooks")
+        found = [entry for entry in items(ctx) if entry.get("displayName") == ONTOLOGY and entry.get("type") == "Ontology"]
+        return done(f"ontology {ONTOLOGY} exists") if found else todo()
+
+    return [
+        Step("p3.capacity", "phase3", "A paid capacity for the agents", p3_capacity, basis="GET /v1/capacities"),
+        Step("phase3.tenant_settings", "phase3", "Tenant settings for Phase 3", settings_probe, manual=settings_manual,
+             observable=False, basis="Fabric admin portal", proof="none"),
+        Step("p3.notebooks", "phase3", "Notebooks 09 to 11 imported", notebooks_probe("phase3", "p1.lakehouse"), import_notebooks("phase3"),
+             inputs=tuple(f"fabric/notebooks/{n}.ipynb" for n in NOTEBOOKS["phase3"]), wait_seconds=60,
+             writes="three notebooks", basis="Notebook - Create Notebook (definition, ipynb)"),
+        pip_notebook("p3.data_agent", "phase3", "Data agent built (notebook 09)", "09_build_data_agent", "p3.notebooks", options,
+                     artifact=("DataAgent", DATA_AGENT), needs=(preview_agent,) if PIP in options.granted else (),
+                     expect="It creates and publishes the data agent with a pre-release of Microsoft's SDK (0.1.36a0)."),
+        pip_notebook("p3.data_agent_test", "phase3", "Data agent tested (notebook 10)", "10_test_data_agent", "p3.notebooks",
+                     options, optional=True, expect="About 39 of 52 questions pass; one run is good to about two questions."),
+        Step("p3.ontology", "phase3", "Ontology built (notebook 11, preview)", ontology_probe,
+             run_step("11_build_ontology") if ontology_allowed else None, optional=not ontology_allowed,
+             needs=("preview:ontology",), inputs=("fabric/notebooks/11_build_ontology.ipynb",),
+             manual="The ontology is a preview feature, and the notebook writes the old ontology experience, which retires on 31 "
+             "January 2027. The demo's data agent runs without it. To have the runner build it: --allow-preview ontology. "
+             "By hand: open 11_build_ontology and select Run all.",
+             writes="runs notebook 11, which creates the ontology item", basis="Job Scheduler - Run On Demand Item Job (RunNotebook)",
+             proof="none"),
+        Step("p3.agent_readiness", "phase3", "KQL database prepared for the operations agent",
+             lambda ctx: (done("table GearboxVsFleetLive and its update policy") if "GearboxVsFleetLive" in tables(ctx) else todo())
+             if kql_database(ctx) else after("p1.eventhouse"),
+             lambda ctx: run_kql_file(ctx, "fabric/kql/05-agent-readiness.kql"), inputs=("fabric/kql/05-agent-readiness.kql",),
+             writes="descriptions of the columns, and the table GearboxVsFleetLive with its update policy",
+             basis="Kusto REST API, .execute database script"),
+        Step("p3.operations_agent", "phase3", "Operations agent set up and started, Teams app installed",
+             lambda ctx: (done(f"operations agent {OPERATIONS_AGENT} exists; that it runs and that Teams is set up, the runner cannot see")
+                          if item(ctx, "OperationsAgent", OPERATIONS_AGENT) else todo()) if workspace_id(ctx) else after("p1.workspace"),
+             manual=OPERATIONS_AGENT_STEPS, basis="none: portal only (preview)", proof="live"),
+    ]
+
+
+def build_stamp(ctx, relative: str) -> str:
+    path = ctx.root / relative
+    found = re.search(r"'([0-9a-f]{12})'", path.read_text(encoding="utf-8")) if path.exists() else None
+    return found.group(1) if found else ""
+
+
+def p4_node(ctx) -> Probe:
+    code, text = ctx.shell.capture(["node", "--version"])
+    major = int((re.search(r"v(\d+)", text) or [0, 0])[1]) if code == 0 else 0
+    if major not in (20, 22, 24):
+        return blocked(f"Node.js is {text.strip() or 'not installed'}. The app's tool lists 20, 22 and 24.",
+                       "Install Node.js 22 as in step 2 of docs/11-deployment-guide-phase4.md.")
+    return done(f"Node.js {text.strip()}")
+
+
+def p4_scaffold(ctx) -> Probe:
+    ours = build_stamp(ctx, "app/overlay/packages/functions/src/build.ts")
+    theirs = build_stamp(ctx, "app/windfarm-twin/packages/functions/src/build.ts")
+    config = ctx.root / "app/windfarm-twin/packages/functions/src/config.ts"
+    if not theirs:
+        return todo()
+    if theirs != ours:
+        return todo(f"the app holds build {theirs}; the repository is at {ours}")
+    if f"WORKSPACE_NAME = '{ctx.cfg['FABRIC_WORKSPACE_NAME']}'" not in config.read_text(encoding="utf-8"):
+        return todo("the app names another workspace")
+    return done(f"app scaffolded in app/windfarm-twin, build {ours}, looking for workspace {ctx.cfg['FABRIC_WORKSPACE_NAME']}")
+
+
+def app_item(ctx) -> dict | None:
+    data_kinds = {"Notebook", "Lakehouse", "Eventhouse", "KQLDatabase", "Eventstream", "SemanticModel", "Report", "SQLEndpoint"}
+    found = [entry for entry in items(ctx) if entry.get("displayName") == name(ctx, "APP_NAME") and entry.get("type") not in data_kinds]
+    return found[0] if len(found) == 1 else None
+
+
+SIGN_IN = ("cd app/windfarm-twin && export RAYFIN_ENCRYPTION_FALLBACK_ENABLED=true && npx rayfin login\n"
+           "(The export is for WSL, which has no keychain; it lets the tool keep your sign-in unencrypted under ~/.rayfin. "
+           "The runner does not set it for you. On WSL no browser opens by itself: step 4 of docs/11-deployment-guide-phase4.md.)")
+
+
+def act_deploy_app(ctx) -> None:
+    workspace_name = ctx.cfg["FABRIC_WORKSPACE_NAME"]
+    same = [w for w in ctx.fabric.listing("workspaces") if w.get("displayName") == workspace_name]
+    if len(same) != 1 or same[0].get("id") != workspace_id(ctx):
+        raise Blocked(f"The app's tool takes the workspace by name, and the name {workspace_name} stands for {len(same)} "
+                      "workspaces you can see, or for another one than this deployment's.", "Rename or remove the other workspace.")
+    code, text = ctx.shell.run(["npx", "rayfin", "up", "--workspace", workspace_name, "--item-name", name(ctx, "APP_NAME")],
+                               cwd=ctx.root / "app" / "windfarm-twin")
+    if code != 0:
+        if re.search(r"(?i)sign[ -]?in|log ?in|keychain|unauthor|401", text):
+            raise Blocked("The app's tool is not signed in. Signing in opens a browser and is yours to do.", SIGN_IN)
+        raise CloudError(f"npx rayfin up ended with exit code {code}. Its last lines are above; it names a diagnostic log.")
+
+
+def lakehouse_route(ctx) -> dict:
+    """Asks the SQL endpoint of the Lakehouse what the twin's fallback route asks it, as the signed-in person."""
+    ws = workspace_id(ctx)
+    lakehouse = need_item(ctx, "Lakehouse", name(ctx, "FABRIC_LAKEHOUSE_NAME"))
+    details = ctx.fabric.get(f"workspaces/{ws}/lakehouses/{lakehouse['id']}") or {}
+    server = (((details.get("properties") or {}).get("sqlEndpointProperties")) or {}).get("connectionString")
+    if not server:
+        raise Blocked("The Lakehouse has no SQL endpoint yet.", "It is made a few minutes after the Lakehouse. Run apply again.")
+    code, text = ctx.shell.capture(["node", "app/probe-lakehouse-route.mjs"], env={
+        "SQL_SERVER": server, "SQL_DATABASE": lakehouse["displayName"], "SQL_TOKEN": ctx.az.token(SQL_RESOURCE)})
+    try:
+        return json.loads(text.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"error": ctx.redact(text.strip()[-400:]) or f"the probe ended with exit code {code}"}
+
+
+def gate_route_act(ctx) -> None:
+    seen = lakehouse_route(ctx)
+    if seen.get("error") or not seen.get("rows"):
+        raise Blocked(f"Lakehouse route: {seen.get('error') or 'the query ran and found no telemetry in the last 60 minutes'}.",
+                      "If the Eventhouse has fresh telemetry (python3 tools/deploy.py status), the SQL endpoint is only behind, which "
+                      "it is after a time without use: run apply again in a few minutes. Seen on 25 November 2026: no rows, and "
+                      "7,548 rows three and a half minutes later.")
+    live = freshness(ctx) if data_flow(ctx) else {}
+    ctx.state.note("p4.gate_data_route", passed=(
+        f"Lakehouse route PASS: {seen['rows']} rows from {seen.get('turbines')} turbines in the last 60 minutes, the newest "
+        f"{seen.get('newest_minutes')} min old. Eventhouse: newest reading {live.get('age_seconds', '?')} s old; the app's Eventhouse "
+        "route needs the optional service principal and was not asked for"), route="lakehouse", figures=seen)
+
+
+def gate_route_probe(ctx) -> Probe:
+    saved = (ctx.state.step("p4.gate_data_route").get("evidence") or {})
+    if saved.get("passed"):
+        return done(saved["passed"])
+    return todo() if app_item(ctx) else after("p4.deploy")
+
+
+def phase4(options: Options) -> list[Step]:
+    settings_probe, settings_manual = tenant_settings("phase4")
+    return [
+        Step("phase4.tenant_settings", "phase4", "Tenant setting Fabric Apps", settings_probe, manual=settings_manual,
+             observable=False, basis="Fabric admin portal", proof="none"),
+        Step("p4.node", "phase4", "Node.js on this computer", p4_node, basis="node --version"),
+        Step("p4.scaffold", "phase4", "App created from Microsoft's template, with the twin laid over it", p4_scaffold,
+             lambda ctx: script(ctx, "app/create-app.sh", env={"FABRIC_WORKSPACE_NAME": ctx.cfg["FABRIC_WORKSPACE_NAME"]}),
+             inputs=("app/create-app.sh", "app/overlay/packages/functions/src/build.ts"),
+             writes="the folder app/windfarm-twin on this computer; nothing in Fabric", basis="app/create-app.sh", proof="live"),
+        Step("p4.deploy", "phase4", "App deployed to the workspace",
+             lambda ctx: (done(f"app item {name(ctx, 'APP_NAME')} is in the workspace") if app_item(ctx) else todo())
+             if workspace_id(ctx) else after("p1.workspace"), act_deploy_app, wait_seconds=120,
+             writes="the Fabric app item WindFarmTwin, its page and its seven functions",
+             basis="npx rayfin up --workspace NAME --item-name NAME (Rayfin 2.0.1)", proof="live"),
+        Step("p4.gate_data_route", "phase4", "GATE: a data route of the twin answers", gate_route_probe, gate_route_act,
+             observable=False, writes="nothing; one query against the SQL endpoint of the Lakehouse",
+             basis="SQL analytics endpoint, with a token for https://database.windows.net", proof="offline"),
+        Step("p4.eventhouse_principal", "phase4", "Real-time values: the service principal (optional)",
+             lambda ctx: todo("not looked at: optional, and the runner neither creates an app registration nor grants it a role"),
+             optional=True, observable=False, manual="When you want the twin 40 seconds behind the turbines instead of minutes:\n"
+             "FABRIC_WORKSPACE_NAME=<workspace> bash app/create-principal.sh\nIt creates an app registration with a secret and gives "
+             "it Viewer in the workspace; step 7 of docs/11-deployment-guide-phase4.md. Without it the twin runs on the Lakehouse route.",
+             basis="app/create-principal.sh", proof="live"),
+        Step("p4.connection_check", "phase4", "The app's own connection check (optional)",
+             lambda ctx: todo("yours to look at"), optional=True, observable=False,
+             manual="Open the app in the workspace and select the badge at the top right. Every line of the Lakehouse route says PASS.",
+             basis="the app", proof="live"),
+    ]
+
+
+def command_flow(ctx) -> dict | None:
+    return ctx.remember("commandflow", lambda: ctx.az.maybe(
+        "iot", "ops", "dataflow", "show", "--resource-group", ctx.cfg["RESOURCE_GROUP"], "--instance", ctx.cfg["AIO_INSTANCE_NAME"],
+        "--profile", "default", "--name", "fabric-to-windfarm-control"))
+
+
+def p5a_command_path(ctx) -> Probe:
+    if not instance(ctx) or not workspace_id(ctx):
+        return after("p1.iot_operations and p1.workspace")
+    flow = command_flow(ctx)
+    if not flow:
+        return todo()
+    mode = (flow.get("properties") or {}).get("mode", "Enabled")
+    if mode == "Disabled":
+        return done("command path in place and switched off: no command reaches the simulator")
+    return done("command path in place and SWITCHED ON. The runner created it switched off; a person enabled it")
+
+
+ENABLE = """The command path exists and is switched off. Switching it on, and every command, is yours:
+  bash infra/08-create-command-path.sh        switches the data flow on
+  then docs/12-deployment-guide-phase5a.md from step 3 (watch the control topic, send one command with notebook 12)
+The runner never runs notebook 12 or 13, never publishes to the control topic and never injects a fault."""
+
+
+def phase5a(options: Options) -> list[Step]:
+    return [
+        Step("p5a.isolation", "phase5a", "This edge is an isolated simulator",
+             lambda ctx: confirmation(ctx, "p5a.isolation", "isolated simulator") if instance(ctx) else after("p1.iot_operations"),
+             manual=lambda ctx: (
+                 f"Phase 5a builds a path on which a message from Fabric becomes a command on the MQTT broker of {ctx.cfg['AIO_INSTANCE_NAME']}.\n"
+                 "Confirm that nothing but this demo's simulator listens on that broker: no real controller, no other bridge.\n"
+                 "The runner can see that it made this instance itself; it cannot see what else was connected to it since.\n"
+                 "Then: python3 tools/deploy.py apply --approve <plan> --confirm p5a.isolation"),
+             observable=False, basis="none: a statement only a person can make", proof="none"),
+        Step("p5a.command_path", "phase5a", "Command path provisioned, switched off", p5a_command_path,
+             lambda ctx: script(ctx, "infra/08-create-command-path.sh", env={"COMMAND_DATAFLOW_MODE": "Disabled"}),
+             inputs=("infra/08-create-command-path.sh", "edge/dataflows/fabric-to-windfarm-control.template.json"), wait_seconds=120,
+             writes="eventstream WindFarmCommands, endpoint fabric-commands, and the data flow fabric-to-windfarm-control with mode Disabled",
+             basis="infra/08-create-command-path.sh; az iot ops dataflow apply with \"mode\": \"Disabled\"", proof="offline"),
+        Step("p5a.notebook", "phase5a", "Notebook 12 imported, not run", notebooks_probe("phase5a", "p1.lakehouse"), import_notebooks("phase5a"),
+             inputs=("fabric/notebooks/12_send_edge_command.ipynb",), wait_seconds=60,
+             writes="imports the notebook. It is never run by the runner", basis="Notebook - Create Notebook (definition, ipynb)"),
+        Step("p5a.enable", "phase5a", "Switch the command path on and send a command (yours)", lambda ctx: todo("yours"),
+             optional=True, observable=False, manual=ENABLE, basis="docs/12-deployment-guide-phase5a.md", proof="live"),
+    ]
+
+
+PREREQUISITES = {"p3.capacity", "phase3.tenant_settings", "phase4.tenant_settings", "p4.node", "p5a.isolation"}
+
+
+def catalogue(options: Options) -> list[Step]:
+    steps = phase1() + phase2(options) + phase3(options) + phase4(options) + phase5a(options)
+    seen = set()
+    for step in steps:
+        assert step.id not in seen, f"two steps are named {step.id}"
+        seen.add(step.id)
+        step.prerequisite = step.phase == "preflight" or step.id in PREREQUISITES
+    return steps
