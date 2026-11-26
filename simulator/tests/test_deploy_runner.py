@@ -317,6 +317,39 @@ def test_an_operation_fabric_has_not_finished_is_asked_about_again_and_not_start
     assert bench.world.writes.count("POST eventhouses WindFarmEH") == 1 and "pending" in bench.state and not bench.state["pending"]
 
 
+def test_an_operation_whose_address_fabric_names_on_a_regional_host_is_asked_about_on_the_api(bench):
+    # 26 November 2026, the first eventstream the runner made: "The Fabric API pointed to another address
+    # (wabi-us-central-b-primary-redirect.analysis.windows.net). Stopped." The request had been accepted.
+    bench.world.slow, bench.world.operations_elsewhere = {"eventstream"}, True
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == core.EXIT_RUNNING and "pointed to another address" not in text, text[-600:]
+    kept = bench.state["pending"]["p1.eventstream"]["eventstream"]["location"]
+    assert kept.startswith("https://api.fabric.microsoft.com/v1/operations/")           # what is kept is where the token may go
+    # the checkpoint of that day holds the regional address as Fabric wrote it: the next apply asks the API all the same
+    state_file = bench.root / ".deploy" / bench.suffix / "state.json"
+    state = json.loads(state_file.read_text())
+    state["pending"]["p1.eventstream"]["eventstream"]["location"] = kept.replace("https://api.fabric.microsoft.com", "https://wabi-us-central-b-primary-redirect.analysis.windows.net")
+    state_file.write_text(json.dumps(state))
+    next(iter(bench.world.operations.values()))["finish"] = True
+    code, text = bench.apply(ROLES)
+    assert code == 0 and bench.world.writes.count("POST eventstreams es-windfarm-edge") == 1, text[-600:]
+    # and a request the runner lost track of, whose result is there all the same, is not listed as under way for ever
+    state = json.loads(state_file.read_text())
+    state["pending"]["p1.eventstream"] = {"eventstream": {"location": "https://wabi-x.analysis.windows.net/v1/operations/gone"}}
+    state["steps"]["p1.eventstream"]["status"] = "failed"
+    state_file.write_text(json.dumps(state))
+    code, text = bench.apply(ROLES)
+    assert code == 0 and not bench.state["pending"] and bench.world.writes.count("POST eventstreams es-windfarm-edge") == 1
+    # any other address on another host is still refused, and the token goes nowhere
+    from operations_agent import FabricError, api_address
+    api = "https://api.fabric.microsoft.com/v1"
+    assert api_address(api, "https://x.analysis.windows.net/v1/operations/abc/result") == api + "/operations/abc/result"
+    assert api_address(api, "https://x.analysis.windows.net/v1/workspaces/w/items/i/jobs/instances/j") == api + "/workspaces/w/items/i/jobs/instances/j"
+    for elsewhere in ("https://example.invalid/v1/jobs/1", "https://example.invalid/operations/abc", "https://example.invalid/v1/workspaces/w/items"):
+        with pytest.raises(FabricError, match="pointed to another address"):
+            api_address(api, elsewhere)
+
+
 def test_a_run_started_by_an_apply_that_died_is_waited_for_not_repeated(deployed):
     """The request went out, the computer went down before the checkpoint was written."""
     world, ws = deployed.world, deployed.world.workspaces[0]["id"]
@@ -812,6 +845,77 @@ def test_a_deployment_that_has_its_resource_group_is_not_moved_by_an_option(depl
     assert deployed.cfg["LOCATION"] == region and deployed.world.writes == writes
     # the region it has is no change, and is taken
     assert deployed.run("plan", ROLES, "--edge-region", region)[0] == 0 and deployed.cfg["LOCATION"] == region
+
+
+def test_on_a_line_that_large_answers_do_not_cross_the_iot_operations_script_is_handed_over_and_not_started(bench):
+    # 26 November 2026: from a workstation that got 5 kB a second from Azure, `az iot ops init` stood for ninety minutes,
+    # twice. The script finished from Azure Cloud Shell with the deployment's settings, and the apply went on from there.
+    bench.world.slow_line = True
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == core.EXIT_BLOCKED and "blocked  p1.iot_operations" in text, text[-900:]
+    assert "did not arrive on this computer within 45 seconds" in text and "Azure Cloud Shell" in text
+    assert 'ENV_FILE="$HOME/demo.env" bash infra/04-deploy-iot-operations.sh' in text and f".deploy/{bench.suffix}/demo.env" in text
+    assert not [c for c in bench.world.shell_calls if "04-deploy-iot-operations" in c]        # the script was not started
+    # the operator ran it elsewhere: the instance is there, the next apply asks for no large answer and goes on to the end
+    bench.world.instance = {"id": "/subscriptions/sub-1111/x/instances/aio", "name": "aio", "properties": {"provisioningState": "Succeeded"}}
+    asked = bench.world.large_answers
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == 0 and "done     p1.iot_operations" in text and bench.world.large_answers == asked
+    # and where the line is good, the answer is asked for once, said, and the script runs
+    other = Bench(bench.root.parent / "fast")
+    code, text = other.apply(ROLES, confirm=[SETTINGS])
+    assert code == 0 and "a large answer from Azure arrived in" in text and other.world.large_answers == 1
+
+
+def test_a_confirmation_keeps_the_time_it_was_first_given(deployed):
+    first = deployed.state["confirmed"][SETTINGS]
+    code, _ = deployed.apply(ROLES, confirm=[SETTINGS])
+    assert code == 0 and deployed.state["confirmed"][SETTINGS] == first
+
+
+def test_role_assignments_that_azure_lists_a_little_later_are_waited_for_and_not_made_twice(bench):
+    # The first apply on a tenant, 25 November 2026: "the step ran without an error, and its result is not there.
+    # 0 of 2 role assignments are there", seconds after `az role assignment create` had returned twice.
+    bench.world.role_lag = 3
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == 0 and "FAILED" not in text, text[-800:]
+    assert "p1.vm_identity_roles: the VM's identity holds Arc onboarding and Reader" in text
+    assert len([w for w in bench.world.writes if w.startswith("az role assignment create")]) == 2
+    # a list that stays empty for longer than the step waits is still a failure, and the next apply makes nothing twice
+    other = Bench(bench.root.parent / "slow"); other.world.role_lag = 10_000
+    code, text = other.apply(ROLES, confirm=[SETTINGS])
+    assert code == core.EXIT_FAILED and "0 of 2 role assignments are there" in text
+    other.world.role_reads_empty = 0
+    code, text = other.apply(ROLES, confirm=[SETTINGS])
+    assert code == 0 and len([w for w in other.world.writes if w.startswith("az role assignment create")]) == 2
+
+
+def test_a_setting_changed_by_hand_in_a_deployment_comes_before_the_profile(bench):
+    # Found on 25 November while a first deployment waited for its apply: the shutdown hour, changed in the deployment's
+    # settings, was put back from the profile by the next plan, without a word, because the profile had been saved from
+    # this very deployment and "from the profile" had never been recorded for it.
+    code, text = bench.run("plan", ROLES, "--edge-region", "southcentralus", "--vm-size", "Standard_D8s_v7 Standard_D8s_v6", "--save-profile", answers=[])
+    assert code == 0, text
+    first = re.search(r"Plan (\w+)", text).group(1)
+    env = bench.env
+    env.write_text(env.read_text().replace('VM_AUTO_SHUTDOWN_UTC="0800"', 'VM_AUTO_SHUTDOWN_UTC="1200"'))
+    code, text = bench.run("plan", ROLES, answers=[])
+    assert code == 0 and bench.cfg["VM_AUTO_SHUTDOWN_UTC"] == "1200", text[-600:]
+    assert re.search(r"Plan (\w+)", text).group(1) != first          # and the change is one the approval sees
+    code, text = bench.run("apply", "--approve", first, ROLES)
+    assert code == core.EXIT_REFUSED and 'settings.VM_AUTO_SHUTDOWN_UTC: was "0800", is now "1200"' in text, text[-500:]
+    # the next deployment of the subscription still starts from the profile, where the hour is the one that was saved
+    code, text = bench.run("plan", ROLES, "--new", answers=[])
+    assert code == 0 and bench.cfg["VM_AUTO_SHUTDOWN_UTC"] == "0800" and bench.cfg["VM_SIZE"] == "Standard_D8s_v7 Standard_D8s_v6"
+
+
+def test_no_hint_shows_an_apply_line_that_apply_would_refuse(bench):
+    # Seen on a tenant on 25 November: the hint of a step of the operator's read "apply --approve <plan> --confirm ...",
+    # without the deployment that apply insists on. The one line to copy is the one the plan ends with.
+    text = bench.run("plan", ROLES, "--up-to", "phase4", PHASE5A)[1]
+    lines = [row for row in text.splitlines() if "tools/deploy.py apply" in row]
+    assert lines and all("--deployment " in row for row in lines), lines
+    assert "the apply line the plan ends with, and --confirm phase1.tenant_settings added to it" in text
 
 
 def test_what_an_apply_made_and_did_not_live_to_write_down_is_recognised_by_its_mark(deployed):

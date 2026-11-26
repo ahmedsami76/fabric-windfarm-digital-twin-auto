@@ -357,7 +357,8 @@ def run_apply(ctx: Context, steps: list, args, account: dict) -> int:
                              "The target, the sign-in, a setting, an option, a file a step uses, or the state of the cloud has changed since. ")
                           + "Nothing was changed, and nothing of this command was kept. Run plan again and read it.")
         # The plan and its target are the ones that were approved. Only now is anything of this command kept.
-        ctx.state.data["confirmed"].update(ctx.offered["confirmed"])
+        for step_id, said in ctx.offered["confirmed"].items():      # the first confirmation stands: who said so, and when
+            ctx.state.data["confirmed"].setdefault(step_id, said)
         for thing in ctx.offered["acknowledged"]:
             if thing not in ctx.state.data["acknowledged"]:
                 ctx.state.data["acknowledged"].append(thing)

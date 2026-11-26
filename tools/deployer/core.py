@@ -128,6 +128,10 @@ class State:
         entry = dict(self.data["steps"].get(step_id, {}))
         entry.update(status=status, at=self.stamp(), **more)
         self.data["steps"][step_id] = entry
+        if status == "complete":
+            # What was under way for a step is over once its result is there, however the result got there: a request
+            # the runner could not follow (26 November 2026, an address on a regional host) is not listed for ever.
+            self.data["pending"].pop(step_id, None)
         self.save()
 
     def note(self, step_id: str, **evidence) -> None:

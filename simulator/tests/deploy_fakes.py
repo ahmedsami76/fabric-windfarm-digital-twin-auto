@@ -20,6 +20,7 @@ from deployer.cloud import NO_SUBSCRIPTION, Az, CloudError  # noqa: E402
 from deployer.steps import ROLE_IDS  # noqa: E402
 
 API = "https://api.fabric.microsoft.com/v1"
+REGIONAL = "https://wabi-us-central-b-primary-redirect.analysis.windows.net/v1"
 KEY = "s3cr3tKeyOfTheEventstream0123456789abcdefghij="
 CONNECTION = f"Endpoint=sb://esehabc123.servicebus.windows.net/;SharedAccessKeyName=key_1;SharedAccessKey={KEY};EntityPath=esehabc123_eh"
 
@@ -46,6 +47,8 @@ class World:
         self.host = self.simulator = self.reference = False
         self.dataflows: dict = {}
         self.role_assignments: list = []
+        self.role_lag, self.role_reads_empty = 0, 0      # reads after a new assignment that do not show it yet
+        self.slow_line, self.large_answers = False, 0    # a computer that large answers from Azure do not reach in time
         self.capacities = [{"id": "cap-0001", "displayName": "demo-capacity", "sku": "F64", "region": "South Central US", "state": "Active"}]
         self.workspaces: list = []
         self.items: dict = {}
@@ -68,6 +71,7 @@ class World:
         self.die_after_post = ""             # a notebook: the request to run it is taken by Fabric, and its answer never read
         self.app_builds: list = []           # the folders the app was built in
         self.slow: set = set()              # kinds of item whose creation answers 202 and stays running
+        self.operations_elsewhere = False   # the Location of an accepted request names a regional host, not the API
         self.polls_per_job = 1
         self.failing_notebooks: set = set()
         self.destination_status = "Running"
@@ -208,6 +212,7 @@ class FakeAz:
             # by ID and with the kind of principal: the real CLI then asks neither for role definitions nor Microsoft Graph
             assert re.fullmatch(r"[0-9a-f-]{36}", opt(args, "--role")) and opt(args, "--assignee-principal-type") == "ServicePrincipal"
             w.role_assignments.append((opt(args, "--assignee-object-id"), opt(args, "--role"), opt(args, "--scope")))
+            w.role_reads_empty = w.role_lag      # Azure's list shows a new assignment some reads later
             w.wrote(f"az role assignment create {opt(args, '--role')} @ {opt(args, '--scope')}")
         else:
             raise AssertionError(f"the fake does not know az {' '.join(args)}")
@@ -239,6 +244,9 @@ class FakeAz:
                         for index, role in enumerate(w.my_roles)]
             principal = re.fullmatch(r"principalId eq '([^']+)'", asked)
             assert principal, f"a filter the documentation does not list: {asked}"
+            if w.role_reads_empty:
+                w.role_reads_empty -= 1
+                return []
             return [{"role": definition + role, "scope": at} for who, role, at in w.role_assignments if who == principal[1]]
         if args[:2] == ("vm", "list-usage"):
             assert opt(args, "--location") and timeout and timeout <= 60
@@ -276,6 +284,13 @@ class FakeAz:
                 return {"nameAvailable": not taken, "reason": "AlreadyExists" if taken else None}
             assert opt(args, "--method") == "get" and "/providers/Microsoft.Fabric/capacities/" in url
             return w.arm_capacities.get(url.rsplit("/", 1)[-1])
+        if args[:1] == ("rest",) and opt(args, "--url").endswith(f"/subscriptions/{self.answers['id']}/providers"):
+            # the list of resource providers, about 3.5 MB: asked once before the IoT Operations script, with a short limit
+            assert "api-version=2021-04-01" in args and opt(args, "--query") == "length(value)" and timeout and timeout <= 60
+            w.large_answers += 1
+            if w.slow_line:
+                raise CloudError(f"az rest --method get did not answer within {timeout} seconds.")
+            return 312
         if args[:1] == ("rest",) and "Microsoft.Compute/skus" in opt(args, "--url"):
             assert any(re.fullmatch(r"\$filter=location eq '[a-z0-9]+'", arg) for arg in args)
             assert "api-version=2021-07-01" in args and timeout and timeout <= 120
@@ -304,11 +319,16 @@ class FakeFabric:
         if slow_key in w.slow:
             op = w.new_id("op")
             w.operations[op] = {"status": "Running", "make": make}
-            return 202, {"Location": f"{API}/operations/{op}", "Retry-After": "5"}, None
+            # Microsoft's reference shows the address on the API. On 26 November 2026 Fabric named a regional host.
+            host = REGIONAL if w.operations_elsewhere else API
+            return 202, {"Location": f"{host}/operations/{op}", "Retry-After": "5"}, None
         return 201, {}, make()
+
+    api = API
 
     def call(self, method, path, body=None):
         w = self.w
+        assert not path.startswith("http") or path.startswith(API + "/"), f"the token was sent to another address: {path}"
         path = path.replace(API + "/", "").lstrip("/")
         route = f"{method} {path}"
         if route == "GET workspaces":

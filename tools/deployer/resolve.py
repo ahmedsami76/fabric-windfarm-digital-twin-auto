@@ -216,6 +216,11 @@ def _from_profile(ctx: Context, args) -> None:
         # Written as it is. If it has been paused or deleted since, pre.capacity blocks on it: no other capacity is taken.
         _set(ctx, FABRIC_CAPACITY_ID=saved["FABRIC_CAPACITY_ID"])
         _record(ctx, "capacity", f"existing {saved['FABRIC_CAPACITY_ID']}", "profile")
+    # These three have a value in every deployment from its first minute, the template's. The profile replaces it when
+    # the deployment is started and never afterwards: from its first plan on, a deployment's settings are its own, and a
+    # value changed in them by hand comes before the profile, as the order of the choices says.
+    if ctx.state.data.get("settled_once") or ctx.state.data.get("last_plan"):
+        return
     for key, record in (("VM_SIZE", "vm_size"), ("VM_AUTO_SHUTDOWN_UTC", "shutdown"), ("SSH_SOURCE_CIDR", "ssh")):
         if saved.get(key) and record not in made and not vm_made and cfg.get(key) != saved[key]:
             _set(ctx, **{key: saved[key]})
@@ -241,6 +246,7 @@ def settle(ctx: Context, args, ask: Asker | None) -> set:
     """Settles what can be settled and asks, together, what cannot. Returns the approvals an answer implies."""
     implied = _from_options(ctx, args, ask)
     _from_profile(ctx, args)
+    ctx.state.data["settled_once"] = True      # also with --no-profile: leaving the profile out is a choice of that first plan
     _from_discovery(ctx)
     if not ask:
         return implied

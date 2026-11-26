@@ -65,6 +65,27 @@ OUT="$OUT
 same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes) deploy:$([[ -e "$H/.deploy" ]] && echo sent || echo none)"
 check "push with the settings elsewhere: they become config/demo.env on the VM, and .deploy stays here" 0 "same:yes" "deploy:none" "settings in use here"
 
+# Port 22 closed by a policy of the subscription, hours after step 1 (26 November 2026: the first apply stopped here). Nothing
+# can be copied; the VM agent can say whether the VM already has what the edge scripts use, and can write the settings.
+reset; touch "$STUB_DIR"/port_open; run bash "$REPO"/infra/vm.sh push; H="$STUB_DIR/home/fabric-windfarm-digital-twin"
+rm -f "$STUB_DIR"/port_open "$STUB_DIR"/calls.log; echo stale > "$H/config/demo.env"; touch "$STUB_DIR"/agent_runs
+run bash "$REPO"/infra/vm.sh push
+OUT="$OUT
+same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes)"
+check "push, port 22 closed by policy, the VM has this folder's files: nothing copied, settings written through the VM agent" 0 \
+  "Nothing to copy" "written through the VM agent" "same:yes" "vm run-command invoke" "!nsg rule create" "!Cannot open SSH"
+
+echo "# changed on the VM" >> "$H/edge/scripts/05-deploy-simulator.sh"; echo stale > "$H/config/demo.env"; rm -f "$STUB_DIR"/calls.log
+run bash "$REPO"/infra/vm.sh push
+OUT="$OUT
+same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes || echo no)"
+check "push, port 22 closed by policy, the VM's copy differs: stops, says SSH is needed once, writes nothing" 1 \
+  "is not the one in this folder" "Cannot bring the VM's copy up to date without SSH" "same:no" "!nsg rule create"
+
+reset; touch "$STUB_DIR"/agent_runs; run bash "$REPO"/infra/vm.sh push
+check "push, port 22 closed by policy, no copy on the VM yet: stops and says so" 1 "has no copy of the repository yet" "!nsg rule create"
+rm -f "$STUB_DIR"/agent_runs
+
 reset; touch "$STUB_DIR"/port_open
 run bash "$REPO"/infra/vm.sh push-env;                  check "push-env: copies the settings file" 0 "scp .*demo.env azureuser@20.45.58.189:fabric-windfarm-digital-twin/config/demo.env"
 

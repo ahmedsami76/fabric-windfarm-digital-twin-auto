@@ -184,6 +184,38 @@ def script(ctx, *argv: str, env: dict | None = None) -> str:
                                                 **(env or {})})
 
 
+LARGE_ANSWER_SECONDS = 45
+
+
+def act_iot_operations(ctx) -> None:
+    """infra/04, after one look at the line to Azure.
+
+    `az iot ops init` and `create` fetch answers of several megabytes and give them no time limit of their own. On
+    26 November 2026, from a workstation that received 5 kB a second from Azure, init printed "Unable to stream
+    download." every ten minutes and stood until the script's limit of ninety minutes, twice. The same script, started
+    from Azure Cloud Shell with the deployment's settings, finished, and the next apply went on from there. So the
+    runner asks for one such answer first, and hands the script to the operator when it does not arrive.
+    """
+    started = ctx.clock()
+    try:
+        ctx.az.json("rest", "--method", "get",
+                    "--url", f"https://management.azure.com/subscriptions/{ctx.cfg['SUBSCRIPTION_ID']}/providers",
+                    "--url-parameters", "api-version=2021-04-01", "--query", "length(value)", timeout=LARGE_ANSWER_SECONDS)
+    except CloudError:
+        raise Blocked(
+            f"An answer of about 3.5 MB from Azure (the list of resource providers) did not arrive on this computer within "
+            f"{LARGE_ANSWER_SECONDS} seconds. The Azure CLI commands of this step fetch answers of that size and wait for "
+            "them without a limit: on a line like this they stood for ninety minutes and did not finish.",
+            "Run this one script where Azure answers quickly, for example in Azure Cloud Shell (Bash), signed in as the same person:\n"
+            f"  1. Upload two files there: the archive of this repository, and {ctx.env_label}\n"
+            "  2. python3 -m zipfile -e fabric-windfarm-digital-twin-auto.zip . && cd fabric-windfarm-digital-twin-auto && "
+            "ENV_FILE=\"$HOME/demo.env\" bash infra/04-deploy-iot-operations.sh\n"
+            "     It skips what exists. Press Enter now and then: Cloud Shell ends a session after 20 minutes without a key.\n"
+            "Or repair the line of this computer and apply again (compare a download here with one elsewhere).") from None
+    ctx.say(f"      . a large answer from Azure arrived in {ctx.clock() - started:.0f} s")
+    script(ctx, "infra/04-deploy-iot-operations.sh")
+
+
 def on_vm(ctx, *argv: str) -> str:
     """A script on the edge VM, through the repository's own way in (SSH, or the VM agent when SSH is closed)."""
     script(ctx, "infra/vm.sh", "push")
@@ -785,7 +817,7 @@ def tenant_settings(phase: str):
     def manual(ctx) -> str:
         rows = "\n".join(f"  - {row}" for row in TENANT_SETTINGS[phase])
         return ("A Fabric administrator checks these tenant settings in the admin portal. The runner cannot read them and never "
-                f"changes them:\n{rows}\nThen: python3 tools/deploy.py apply --approve <plan> --confirm {phase}.tenant_settings")
+                f"changes them:\n{rows}\nThen: the apply line the plan ends with, and --confirm {phase}.tenant_settings added to it")
     return probe, manual
 
 
@@ -1522,8 +1554,9 @@ def phase1() -> list[Step]:
         Step("p1.edge_vm", "phase1", "Edge VM", p1_edge_vm, act_edge_vm,
              inputs=("infra/01-create-edge-vm.sh",), writes="VM, network, SSH rule for your address, daily shutdown",
              basis="infra/01-create-edge-vm.sh, without its provider registration and role assignments", proof="live"),
+        # Waited for: on 25 November 2026 the list of role assignments, read straight after two were made, held neither.
         Step("p1.vm_identity_roles", "phase1", "Roles for the VM's identity, on the resource group only", p1_vm_roles, act_vm_roles,
-             needs=("roles",), writes="'Kubernetes Cluster - Azure Arc Onboarding' and 'Reader' for the VM's managed identity, "
+             needs=("roles",), wait_seconds=120, writes="'Kubernetes Cluster - Azure Arc Onboarding' and 'Reader' for the VM's managed identity, "
              "both on the demo's resource group. The manual guide gives Reader on the subscription; the runner does not",
              basis="az role assignment create, the role by its ID; read with Role Assignments - List For Scope", proof="offline"),
         Step("p1.edge_host", "phase1", "K3s and tools on the VM", lambda ctx: recorded(ctx, "p1.edge_host", "host prepared")
@@ -1533,8 +1566,7 @@ def phase1() -> list[Step]:
         Step("p1.arc", "phase1", "Cluster connected to Azure Arc", p1_arc, lambda ctx: on_vm(ctx, "./edge/scripts/03-arc-enable.sh"),
              inputs=("edge/scripts/03-arc-enable.sh",), wait_seconds=300, writes="Arc-enabled cluster with custom locations",
              basis="edge/scripts/03-arc-enable.sh (az connectedk8s connect, enable-features)", proof="live"),
-        Step("p1.iot_operations", "phase1", "Azure IoT Operations", p1_iot_operations,
-             lambda ctx: script(ctx, "infra/04-deploy-iot-operations.sh"), needs=("roles",),
+        Step("p1.iot_operations", "phase1", "Azure IoT Operations", p1_iot_operations, act_iot_operations, needs=("roles",),
              inputs=("infra/04-deploy-iot-operations.sh",), wait_seconds=120,
              writes="storage account, schema registry, device registry namespace, the instance. The Azure CLI gives the schema "
              "registry's identity 'Storage Blob Data Contributor' on that storage account",

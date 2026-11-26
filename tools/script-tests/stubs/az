@@ -85,6 +85,12 @@ case "$args" in
   "vm show --resource-group"*"--query id"*) echo "/subscriptions/s/resourceGroups/rg-windfarm-edge/providers/Microsoft.Compute/virtualMachines/vm-windfarm-edge" ;;
   "rest --method post"*initiate*)       b="$(echo "$args" | sed -E 's/.*--body (.*) --output none/\1/')"; ip="$(echo "$b" | python3 -c "import json,sys; print(json.load(sys.stdin)['virtualMachines'][0]['ports'][0]['allowedSourceAddressPrefix'])")"; printf '%s\tMicrosoftDefenderForCloud-JITRule-1-ABC\n' "$ip" > "$S/openings"; touch "$S/port_open" ;;
   "network nsg rule list"*)             printf 'Priority  Name\n' ;;
-  "vm run-command invoke"*)             while [[ $# -gt 0 ]]; do [[ "$1" == "--scripts" ]] && { sc="$2"; break; }; shift; done; printf 'Enable succeeded: \n[stdout]\n%s\n' "$sc" ;;
+  "vm run-command invoke"*)             while [[ $# -gt 0 ]]; do [[ "$1" == "--scripts" ]] && { sc="$2"; break; }; shift; done
+                                        if [[ -e "$STUB_DIR/agent_runs" ]]; then   # run what is inside bash -lc '...' with the pretend home, as the VM agent would
+                                          inner="${sc#*bash -lc \'}"; inner="${inner%\'}"
+                                          printf 'Enable succeeded: \n[stdout]\n%s\n[stderr]\n' "$(HOME="$STUB_DIR/home" bash -c "$inner" 2>&1)"
+                                        else
+                                          printf 'Enable succeeded: \n[stdout]\n%s\n' "$sc"
+                                        fi ;;
   *) echo "STUB: unexpected: az $args" >&2; exit 9 ;;
 esac

@@ -34,6 +34,7 @@ import base64
 import copy
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -64,6 +65,26 @@ class FabricError(Exception):
 
 
 # ----------------------------------------------------------------------------------------------- HTTP
+def api_address(api: str, url: str) -> str:
+    """The address to ask, on the Fabric API itself. The token is sent nowhere else.
+
+    An accepted request (202) names where to ask for its result in a Location header. Microsoft's reference shows that
+    address on the API (`.../v1/operations/{id}`). On 26 November 2026 Fabric named one on a regional host instead,
+    `wabi-us-central-b-primary-redirect.analysis.windows.net/v1/operations/{id}`. The operation is the same, and the
+    reference documents it on the API (Long Running Operations - Get Operation State, Get Operation Result), as it does
+    a job (Job Scheduler - Get Item Job Instance): an address of one of those two forms is asked on the API. Any other
+    address on another host is refused, as before.
+    """
+    base, asked = urllib.parse.urlsplit(api.rstrip("/")), urllib.parse.urlsplit(url)
+    if asked[:2] == base[:2]:
+        return url
+    known = re.fullmatch(re.escape(base.path) + r"(/operations/[^/]+(?:/result)?|/workspaces/[^/]+/items/[^/]+/jobs/instances/[^/]+)/?",
+                         asked.path)
+    if not known:
+        raise FabricError(f"The Fabric API pointed to another address ({asked.netloc}). Stopped.")
+    return f"{api.rstrip('/')}{known[1]}"
+
+
 class Fabric:
     def __init__(self, token: str, api: str = DEFAULT_API, poll_seconds: float = 3.0, sleep=time.sleep):
         if not token:
@@ -78,9 +99,7 @@ class Fabric:
 
     def _url(self, path: str) -> str:
         url = path if path.startswith("http") else f"{self.api}/{path.lstrip('/')}"
-        if urllib.parse.urlsplit(url)[:2] != self._origin:   # a Location header must not send the token elsewhere
-            raise FabricError(f"The Fabric API pointed to another address ({urllib.parse.urlsplit(url).netloc}). Stopped.")
-        return url
+        return api_address(self.api, url)   # a Location header must not send the token elsewhere
 
     def call(self, method: str, path: str, body=None):
         """One request. Returns (status, headers, parsed body or None). Waits and repeats on 429."""

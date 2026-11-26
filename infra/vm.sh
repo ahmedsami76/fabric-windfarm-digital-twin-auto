@@ -180,6 +180,37 @@ run_without_ssh() {
     --query "value[0].message" --output tsv
 }
 
+# What the scripts on the VM use of this repository, as one command that prints a digest of it. It runs here and, through
+# the VM agent, on the VM, so it must hold no single quote: it travels inside a single-quoted command.
+TREE_DIGEST='find edge simulator data config/load-env.sh -type f ! -path "*/__pycache__/*" ! -path "*/.pytest_cache/*" ! -path "*.egg-info/*" ! -path "simulator/tests/*" -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64'
+
+# push_without_ssh: for a subscription whose policy closes port 22 (seen on 20 and on 26 November 2026). Files cannot be
+# copied through the VM agent. What can be done: ask the VM whether its copy of what the edge scripts use is the one in
+# this folder, and, when it is, write the settings there. A copy that differs needs SSH once, and the script says so.
+push_without_ssh() {
+  local here there settings answer
+  warn "Port 22 is closed, there is no just-in-time policy and no SSH rule: nothing can be copied to the VM."
+  log "Comparing the VM's copy with this folder through the VM agent (takes at least 20 seconds)"
+  here="$(cd "$REPO_ROOT" && eval "$TREE_DIGEST")"
+  settings="$(base64 < "$ENV_FILE" | tr -d '\n')"
+  answer="$(az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --command-id RunShellScript \
+    --scripts "sudo -u ${VM_ADMIN} -H bash -lc 'cd ~/${REMOTE_DIR} 2>/dev/null || { echo COPY:none; exit 0; }; there=\$(${TREE_DIGEST}); echo COPY:\$there; if [ \"\$there\" = \"${here}\" ]; then mkdir -p config && echo ${settings} | base64 -d > config/demo.env && echo SETTINGS:written; fi'" \
+    --query "value[0].message" --output tsv)"
+  there="$(sed -n 's/^COPY://p' <<< "$answer" | head -n 1)"
+  if [[ "$there" == "none" || -z "$there" ]]; then
+    die "The VM has no copy of the repository yet, and without SSH none can be sent. bash infra/vm.sh nsg-log shows what closed port 22."
+  fi
+  if [[ "$there" != "$here" ]]; then
+    warn "The VM's copy of edge/, simulator/ and data/ is not the one in this folder, and without SSH it cannot be replaced."
+    warn "Either put this folder back to what was pushed, or get SSH for one push (an exception to the policy that"
+    warn "removed the rule, or Azure Bastion). bash infra/vm.sh nsg-log shows what removed the rule."
+    die "Cannot bring the VM's copy up to date without SSH."
+  fi
+  grep -q '^SETTINGS:written' <<< "$answer" || die "The VM's copy is the same as this folder, but the settings could not be written there. The VM agent said: $answer"
+  info "Nothing to copy: the VM has the same edge/, simulator/ and data/ as this folder."
+  info "config/demo.env on the VM is now the same as the settings in use here ($ENV_FILE), written through the VM agent."
+}
+
 # ssh_impossible: true when the VM runs, port 22 is closed, and there is neither a just-in-time
 # policy to ask nor an SSH rule to move. Sets IP and VM_STATE.
 ssh_impossible() {
@@ -270,6 +301,10 @@ case "$ACTION" in
 
   push)
     need ssh tar
+    if ssh_impossible; then
+      push_without_ssh
+      exit 0
+    fi
     ensure_access
     log "Copying the repository to ${VM_ADMIN}@${IP}:~/${REMOTE_DIR}"
     # The folders that belong to the repository are replaced, so files that no longer

@@ -65,7 +65,7 @@ def pip_notebook(step_id: str, phase: str, title: str, notebook: str, prerequisi
     def manual(ctx) -> str:
         text = BY_HAND.format(notebook=notebook, expect=expect, artifact=what)
         if not artifact:
-            text += f"\nThen: python3 tools/deploy.py apply --approve <plan> --confirm {step_id}"
+            text += f"\nThen: the apply line the plan ends with, and --confirm {step_id} added to it"
         return text + ("\nThe runner leaves this notebook to you because its first cell installs a library with %pip, and "
                        "Microsoft does not say whether that works in a run started through the API. To let the runner try: "
                        "--opt-in pip-jobs.")
@@ -364,7 +364,7 @@ def phase5a(options: Options) -> list[Step]:
                  f"Phase 5a builds a path on which a message from Fabric becomes a command on the MQTT broker of {ctx.cfg['AIO_INSTANCE_NAME']}.\n"
                  "Confirm that nothing but this demo's simulator listens on that broker: no real controller, no other bridge.\n"
                  "The runner can see that it made this instance itself; it cannot see what else was connected to it since.\n"
-                 "Then: python3 tools/deploy.py apply --approve <plan> --confirm p5a.isolation"),
+                 "Then: the apply line the plan ends with, and --confirm p5a.isolation added to it"),
              observable=False, basis="none: a statement only a person can make", proof="none"),
         Step("p5a.command_path", "phase5a", "Command path provisioned, switched off", p5a_command_path,
              lambda ctx: script(ctx, "infra/08-create-command-path.sh", env={"COMMAND_DATAFLOW_MODE": "Disabled"}),

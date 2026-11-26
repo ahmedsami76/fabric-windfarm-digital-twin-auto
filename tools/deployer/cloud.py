@@ -18,7 +18,7 @@ from .core import Blocked, Redactor, StepFailed, StillRunning
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from operations_agent import Fabric, FabricError  # noqa: E402  (the client of Phase 5b: 429, long-running calls, one origin)
+from operations_agent import DEFAULT_API, Fabric, FabricError, api_address  # noqa: E402  (the client of Phase 5b: 429, long-running calls, one origin)
 
 FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
 STORAGE_RESOURCE = "https://storage.azure.com"
@@ -337,6 +337,13 @@ def make_fabric(az: Az) -> RunnerFabric:
 
 
 # ------------------------------------------------------------------------- work that outlives one apply
+def _on_the_api(fabric, location: str) -> str:
+    try:
+        return api_address(getattr(fabric, "api", DEFAULT_API), location)
+    except FabricError as error:
+        raise CloudError(str(error)) from None
+
+
 def operation(ctx, key: str, start):
     """A Fabric call that may answer 202. Its address is kept in the checkpoint before the first wait, so that
     an apply that is interrupted, or gives up waiting, asks about the same operation next time and starts no second one.
@@ -345,6 +352,9 @@ def operation(ctx, key: str, start):
     """
     step, fabric = ctx.current, ctx.fabric
     location = (ctx.state.pending(step).get(key) or {}).get("location")
+    if location:
+        # A checkpoint of 26 November 2026 holds the address of an operation on a regional host, as Fabric named it.
+        location = _on_the_api(fabric, location)
     if not location:
         status, headers, payload = start()
         if status != 202:
@@ -352,6 +362,7 @@ def operation(ctx, key: str, start):
         location = next((value for name, value in headers.items() if name.lower() == "location"), None)
         if not location:
             raise CloudError("Fabric accepted the request and did not say where to ask for the result.")
+        location = _on_the_api(fabric, location)
         ctx.state.set_pending(step, key, {"location": location})
     deadline = ctx.clock() + ctx.options.limits["operation"]
     while True:
