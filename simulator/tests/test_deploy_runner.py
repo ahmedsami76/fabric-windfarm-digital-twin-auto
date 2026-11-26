@@ -2143,6 +2143,13 @@ def test_a_read_through_the_azure_cli_that_gets_no_answer_is_asked_again_and_a_c
     with pytest.raises(CloudError, match=r"within 45 seconds\.$"):
         az.json("rest", "--method", "get", "--url", "https://management.azure.com/x", timeout=45)
     assert given == [45]
+    given.clear()
+    hang[0] = 1                                               # a read with a minute is asked twice: 26 November, the plan of 16:15
+    assert az.json("rest", "--method", "get", "--url", "https://management.azure.com/roles", timeout=60) == [] and given == [20, 40]
+    given.clear()
+    hang[0] = 2
+    with pytest.raises(CloudError, match="within 60 seconds, asked 2 times"):
+        az.json("rest", "--method", "get", "--url", "https://management.azure.com/roles", timeout=60)
     assert Az.reads(["rest", "--method", "GET", "--url", "u"]) and not Az.reads(["rest", "--method", "put", "--url", "u/list"])
     assert Az.reads(["account", "get-access-token", "--resource", "r"]) and Az.reads(["iot", "ops", "show", "--name", "n"])
     assert not Az.reads(["vm", "run-command", "invoke", "--name", "show"]) and not Az.reads(["role", "assignment", "create"])
@@ -2305,3 +2312,34 @@ def test_the_six_mirroring_policies_are_asked_together_and_not_one_after_the_oth
     together.reset()
     code, text = deployed.run("plan", ROLES)
     assert "OneLake availability is off for: AlarmEvents" in text
+
+
+def test_a_token_that_ended_during_a_long_apply_is_replaced_and_the_request_made_once_more(monkeypatch):
+    # 26 November 2026, 16:50: the apply that completed Phase 1 ended with "demo-ready no ... The Fabric API answered
+    # 401: TokenExpired", fifty minutes after it began. The CLI hands out its cached token until that token ends.
+    import urllib.error
+    import urllib.request
+    from deployer.cloud import RunnerFabric
+    asked, sent, refusals = [], [], [1]
+
+    class OneAz:
+        def token(self, resource):
+            asked.append(resource)
+            return f"token-{len(asked)}-padding-padding"
+
+    def urlopen(request, timeout=0):
+        sent.append((request.get_method(), request.get_header("Authorization")))
+        if refusals[0] > 0:
+            refusals[0] -= 1
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(
+                b'{"errorCode": "TokenExpired", "message": "Access token has expired, resubmit with a new access token"}'))
+        return _Answer()
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    fabric = RunnerFabric(OneAz(), clock=lambda: 0.0, sleep=lambda seconds: None)
+    assert fabric.call("POST", "workspaces/w/items", {"displayName": "x"})[0] == 200
+    assert len(asked) == 2 and [token for _, token in sent] == ["Bearer token-1-padding-padding", "Bearer token-2-padding-padding"]
+    sent.clear()
+    refusals[0] = 2                                           # refused with the new token too: said, and not asked for ever
+    with pytest.raises(CloudError, match="TokenExpired") as stop:
+        fabric.get("workspaces")
+    assert stop.value.status == 401 and len(sent) == 2 and len(asked) == 3

@@ -186,7 +186,8 @@ run_without_ssh() {
 # the VM agent, on the VM, so it must hold no single quote: it travels inside a single-quoted command.
 # Left out: what a run leaves behind here and the VM never needs. On 26 November 2026 the data flow rendered by step 6 on
 # the workstation (edge/dataflows/rendered, ignored by git) made the two copies "differ" and stopped the step after it.
-TREE_DIGEST='find edge simulator data config/load-env.sh -type f ! -path "*/__pycache__/*" ! -path "*/.pytest_cache/*" ! -path "*.egg-info/*" ! -path "simulator/tests/*" ! -path "edge/dataflows/rendered/*" -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64'
+# Nor the files named "…:Zone.Identifier" that Windows leaves beside a downloaded file copied into WSL.
+TREE_DIGEST='find edge simulator data config/load-env.sh -type f ! -path "*/__pycache__/*" ! -path "*/.pytest_cache/*" ! -path "*.egg-info/*" ! -path "simulator/tests/*" ! -path "edge/dataflows/rendered/*" ! -name "*:Zone.Identifier" -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64'
 
 # ask_agent SCRIPT: one question for the VM through the VM agent, for a script that can be run twice without harm. On
 # 26 November 2026 `az vm run-command invoke` stood for 300 seconds on a workstation that drops single connections, and

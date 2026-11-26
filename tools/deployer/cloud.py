@@ -55,12 +55,20 @@ class RunnerFabric(Fabric):
     def call(self, method: str, path: str, body=None):
         if self._clock() - self._issued > self.FRESH_SECONDS:
             self._token, self._issued = self._az.token(FABRIC_RESOURCE), self._clock()
-        try:
-            return super().call(method, path, body)
-        except CloudError:
-            raise
-        except FabricError as error:
-            raise CloudError(str(error), error.status, error.code) from None
+        for first in (True, False):
+            try:
+                return super().call(method, path, body)
+            except CloudError:
+                raise
+            except FabricError as error:
+                if error.status == 401 and first:
+                    # The CLI hands out the token in its cache until that token ends, so one asked for a minute ago can
+                    # end now. On 26 November 2026 an apply of fifty minutes made everything and then could not measure
+                    # the telemetry: "401: TokenExpired". A 401 is a request Fabric did not act on: with a new token it
+                    # is made once more, whatever it is.
+                    self._token, self._issued = self._az.token(FABRIC_RESOURCE), self._clock()
+                    continue
+                raise CloudError(str(error), error.status, error.code) from None
 
 
 # Command groups that take no --subscription: seen with Azure CLI 2.93.0, where `az extension list --subscription X` and
@@ -69,7 +77,9 @@ NO_SUBSCRIPTION = ("ad", "extension", "config", "version", "login", "logout")
 TRIES = 3            # how often a read that gets no answer, or a connection that cannot be made, is tried
 SHARES = (1 / 6, 1 / 3, 1 / 2)      # of an `az` read's time, per try
 FIRST_READ_SECONDS = 60
-SPLIT_FROM = 120     # seconds: a read with less time than this is asked once (its first try would have under 20 s)
+SPLIT_FROM = 120     # seconds: a read with this much time is asked up to three times
+SHARES_SHORT = (1 / 3, 2 / 3)       # a read with a minute: twice (26 November 2026: the roles of the VM's identity, 60 s, once)
+SPLIT_SHORT_FROM = 60               # below this a read is asked once: its first try would have under 20 s
 READ_WORDS = ("show", "list", "list-usage", "list-skus", "check-name", "exists", "get-access-token")
 
 
@@ -103,11 +113,14 @@ class Az:
         return any(word in READ_WORDS for word in words)
 
     def _call(self, args, timeout):
-        # A read is asked up to TRIES times within its time, each try with more of it (a sixth, a third, a half): on
+        # A read is asked up to TRIES times within its time, each try with more of it (a sixth, a third, a half; with
+        # a minute or more and under two, twice: a third, two thirds): on
         # 26 November 2026 `az resource list` for one resource group stood for 180 seconds on a workstation where the
         # same question, asked again, took two. A read that is slow and not stuck still has half of the time in one
         # piece. A call that changes something is made once, with all of its time.
-        shares = SHARES if self.reads(args) and timeout >= SPLIT_FROM else (1.0,)
+        shares = (1.0,)
+        if self.reads(args):
+            shares = SHARES if timeout >= SPLIT_FROM else SHARES_SHORT if timeout >= SPLIT_SHORT_FROM else shares
         for attempt, share in enumerate(shares, start=1):
             try:
                 # No keyboard for the CLI: with its output captured, a question it asked (to install an extension, say)

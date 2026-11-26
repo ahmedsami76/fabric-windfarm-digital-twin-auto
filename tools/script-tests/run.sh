@@ -79,6 +79,10 @@ check "push, port 22 closed by policy, the VM has this folder's files: nothing c
 mkdir -p "$REPO/edge/dataflows/rendered"; echo '{}' > "$REPO/edge/dataflows/rendered/windfarm-to-fabric.json"; rm -f "$STUB_DIR"/calls.log
 run bash "$REPO"/infra/vm.sh push; rm -rf "$REPO/edge/dataflows/rendered"
 check "push, port 22 closed by policy, a data flow rendered here since the last copy: still nothing to copy" 0 "Nothing to copy" "!is not the one in this folder"
+# Nor is the marker Windows leaves beside a downloaded file that was copied into WSL (seen deleted by hand on 26 November 2026).
+echo '[ZoneTransfer]' > "$REPO/edge/scripts/05-deploy-simulator.sh:Zone.Identifier"; rm -f "$STUB_DIR"/calls.log
+run bash "$REPO"/infra/vm.sh push; rm -f "$REPO/edge/scripts/05-deploy-simulator.sh:Zone.Identifier"
+check "push, port 22 closed by policy, a Zone.Identifier file of Windows beside a script: still nothing to copy" 0 "Nothing to copy" "!is not the one in this folder"
 
 echo "# changed on the VM" >> "$H/edge/scripts/05-deploy-simulator.sh"; echo stale > "$H/config/demo.env"; rm -f "$STUB_DIR"/calls.log
 run bash "$REPO"/infra/vm.sh push
