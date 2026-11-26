@@ -578,6 +578,8 @@ def print_plan(ctx: Context, lines: list[Line], digest: str = "") -> None:
         ctx.say(f"  {line.step.id:<28} {word:<22} {line.step.title}")
         if line.probe.detail and line.decision in ("done", "confirmed", "unchecked", "measure", "blocked", "drift", "optional"):
             ctx.say(f"  {'':<28} {'':<22}   {line.probe.detail}")
+        if line.decision == "run" and line.probe.detail:
+            ctx.say(f"  {'':<28} {'':<22}   now: {line.probe.detail}")     # what the runner found, when that says why it will act
         if line.decision == "run" and line.step.writes:
             ctx.say(f"  {'':<28} {'':<22}   changes: {line.step.writes}")
         if line.decision in ("needs", "drift") and line.missing:

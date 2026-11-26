@@ -314,6 +314,22 @@ class FakeFabric:
     def listing(self, path):
         return list((self.call("GET", path)[2] or {}).get("value", []))
 
+    def _topology(self, ws, definition) -> dict:
+        """As Fabric answered on 26 November 2026: a destination that names the Eventhouse, as Microsoft's article has
+        it, fails; one that names the KQL database is built."""
+        w, destinations = self.w, []
+        for d in definition["destinations"]:
+            named = next((i for i in w.items.get(ws, []) if i["id"] == d["properties"].get("itemId")), {})
+            if named.get("type") == "KQLDatabase":
+                destinations.append(dict(d, id=w.new_id("dst"), status=w.destination_status))
+            else:
+                destinations.append(dict(d, id=w.new_id("dst"), status="Failed", error={
+                    "errorCode": "ESComponentCreationFailure", "isUserError": False,
+                    "errorMessage": f"Failed to create data source: {d['name']} due to the following error: Artifact with id "
+                                    f"'{d['properties'].get('itemId')}' is not a database artifact. It is of type 'KustoEventHouse'"}))
+        return {"sources": [dict(s, id=w.new_id("src"), status="Running") for s in definition["sources"]],
+                "destinations": destinations, "streams": definition["streams"]}
+
     def _created(self, kind: str, slow_key: str, make):
         w = self.w
         if slow_key in w.slow:
@@ -400,14 +416,22 @@ class FakeFabric:
 
             def make():
                 stream = w.add_item(ws, "Eventstream", body["displayName"])
-                w.topology[stream["id"]] = {
-                    "sources": [dict(s, id=w.new_id("src"), status="Running") for s in definition["sources"]],
-                    "destinations": [dict(d, id=w.new_id("dst"), status=w.destination_status) for d in definition["destinations"]],
-                    "streams": definition["streams"]}
+                w.topology[stream["id"]] = self._topology(ws, definition)
                 w.definition = definition
                 return stream
             w.wrote(f"POST eventstreams {body['displayName']}")
             return self._created("Eventstream", "eventstream", make)
+        found = re.fullmatch(r"eventstreams/([^/]+)/updateDefinition", rest)
+        if found and method == "POST":
+            # Update Eventstream Definition: the whole definition is replaced; the sources keep their IDs
+            definition = json.loads(base64.b64decode(body["definition"]["parts"][0]["payload"]))
+            before = w.topology[found[1]]
+            after = self._topology(ws, definition)
+            for old_source, new_source in zip(before["sources"], after["sources"]):
+                new_source["id"] = old_source["id"]
+            w.topology[found[1]], w.definition = after, definition
+            w.wrote(f"POST eventstreams updateDefinition {found[1]}")
+            return 200, {}, None
         found = re.fullmatch(r"eventstreams/([^/]+)/topology", rest)
         if found:
             return 200, {}, w.topology[found[1]]

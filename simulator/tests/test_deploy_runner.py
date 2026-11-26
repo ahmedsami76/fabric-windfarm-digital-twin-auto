@@ -178,7 +178,7 @@ def test_phase_1_runs_to_its_gates_and_says_what_was_measured(deployed):
     # the destination of the eventstream is the one of Microsoft's article, with the mapping the guide insists on
     destination = world.definition["destinations"][0]
     assert destination["properties"] == {"dataIngestionMode": "DirectIngestion", "workspaceId": ws["id"],
-                                         "itemId": world.find(ws["id"], "Eventhouse", "WindFarmEH")["id"], "tableName": "RawEvents",
+                                         "itemId": world.find(ws["id"], "KQLDatabase", "WindFarmEH")["id"], "tableName": "RawEvents",
                                          "connectionName": f"es-windfarm-raw-{deployed.cfg['DEPLOYMENT_SUFFIX']}",
                                          "mappingRuleName": "RawEvents_mapping"}
     assert len(destination["properties"]["connectionName"]) <= 40
@@ -431,6 +431,52 @@ def test_something_removed_behind_the_runners_back_is_drift_and_needs_a_new_appr
 
 # ------------------------------------------------------------------------------------------ handing over
 WIZARD_WORDS = ("Use existing mapping", "RawEvents_mapping", "Direct ingestion")
+
+
+def test_an_eventstream_the_runner_made_with_the_eventhouse_as_its_destination_is_written_again_with_the_database(bench):
+    # 26 November 2026: made word for word from Microsoft's article, with the Eventhouse's ID in the destination. Fabric:
+    # "Artifact with id '...' is not a database artifact. It is of type 'KustoEventHouse'", destination Failed.
+    bench.world.slow = {"eventstream"}
+    assert bench.apply(ROLES, confirm=[SETTINGS])[0] == core.EXIT_RUNNING       # up to the eventstream, which is not made yet
+    world = bench.world; ws = world.workspaces[0]["id"]
+    house, database = world.find(ws, "Eventhouse", "WindFarmEH"), world.find(ws, "KQLDatabase", "WindFarmEH")
+    world.operations.clear(); world.slow = set()
+    wrong = {"sources": [{"name": "aio-edge", "type": "CustomEndpoint", "properties": {}}],
+             "destinations": [{"name": "eventhouse-raw", "type": "Eventhouse", "inputNodes": [{"name": "es-windfarm-edge-stream"}],
+                               "properties": {"dataIngestionMode": "DirectIngestion", "workspaceId": ws, "itemId": house["id"],
+                                              "tableName": "RawEvents", "connectionName": "es-windfarm-raw-x", "mappingRuleName": "RawEvents_mapping"}}],
+             "streams": [{"name": "es-windfarm-edge-stream", "type": "DefaultStream", "properties": {}, "inputNodes": [{"name": "aio-edge"}]}],
+             "operators": [], "compatibilityLevel": "1.1"}
+    stream = world.add_item(ws, "Eventstream", "es-windfarm-edge")
+    world.topology[stream["id"]] = FakeFabric(world)._topology(ws, wrong)
+    source = world.topology[stream["id"]]["sources"][0]["id"]
+    state_file = bench.root / ".deploy" / bench.suffix / "state.json"
+    state = json.loads(state_file.read_text()); state["pending"] = {}; state_file.write_text(json.dumps(state))
+    code, text = bench.run("plan", ROLES)
+    assert re.search(r"p1\.eventstream\s+will run", text) and "definition will be written again" in text and "(destination Failed)" not in text
+    code, text = bench.apply(ROLES)
+    assert code == 0, text[-900:]
+    assert "writing the eventstream's definition again, with the KQL database as the destination" in text
+    assert world.definition["destinations"][0]["properties"]["itemId"] == database["id"]
+    assert len([w for w in world.writes if w.startswith("POST eventstreams updateDefinition")]) == 1
+    assert world.writes.count("POST eventstreams es-windfarm-edge") == 1                                   # no second eventstream
+    assert len([i for i in world.items[ws] if i["type"] == "Eventstream"]) == 1
+    assert world.topology[stream["id"]]["sources"][0]["id"] == source and world.topology[stream["id"]]["destinations"][0]["status"] == "Running"
+    assert bench.apply(ROLES)[0] == 0 and len([w for w in world.writes if "updateDefinition" in w]) == 1     # and not again
+
+
+def test_a_failed_destination_is_not_called_done_and_says_what_fabric_says(bench):
+    # 26 November 2026, the plan after the first eventstream: "p1.eventstream  done  ... (destination Failed)".
+    bench.world.destination_status = "Failed"
+    code, text = bench.apply(ROLES, confirm=[SETTINGS])
+    assert code == core.EXIT_BLOCKED and "blocked  p1.eventstream" in text and "state Failed" in text
+    assert "Fabric gives no reason in the topology" in text and all(word in text for word in WIZARD_WORDS)
+    for topology in bench.world.topology.values():
+        topology["destinations"][0]["error"] = {"errorCode": "DataConnectionFailed", "errorMessage": "the table was not found"}
+    code, text = bench.run("plan", ROLES)
+    assert re.search(r"p1\.eventstream\s+BLOCKED", text) and "Fabric says: DataConnectionFailed the table was not found" in text
+    assert not [w for w in bench.world.writes if "updateDefinition" in w]        # the right item is named: nothing to write again
+    assert "(destination Failed)" not in text
 
 
 def test_a_destination_that_fabric_took_and_that_ingests_nothing_is_handed_over_with_the_portal_steps(bench):

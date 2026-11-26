@@ -1162,7 +1162,7 @@ def act_shortcuts(ctx) -> None:
 
 SOURCE, DESTINATION = "aio-edge", "eventhouse-raw"
 WIZARD = """In the Fabric portal, as in step 6.7 of docs/01-deployment-guide-phase1.md:
-1. Open the eventstream {eventstream}, select Edit, and remove the destination {destination} if it shows a warning.
+1. Open the eventstream {eventstream}, select Edit, and remove the destination {destination} if it shows a warning or an error.
 2. Add destination, Eventhouse, Direct ingestion; name {destination}; Eventhouse {eventhouse}. Save, then Publish.
 3. In the live view select Configure on that destination. In the Get data wizard choose the existing table RawEvents.
 4. On Inspect the data set the format to JSON, open the mapping list above the preview, turn on Use existing mapping
@@ -1192,9 +1192,19 @@ def p1_eventstream(ctx) -> Probe:
                        "hand as in step 6.4 of docs/01-deployment-guide-phase1.md.")
     if not destination:
         return blocked("The eventstream has no Eventhouse destination.", WIZARD.format(**words))
-    if destination.get("status") == "Warning":
+    if destination.get("status") in ("Warning", "Failed"):
+        database = item(ctx, "KQLDatabase", name(ctx, "EVENTHOUSE_NAME")) or {}
+        if (destination.get("properties") or {}).get("itemId") != database.get("id"):
+            # The eventstream the runner made on 26 November 2026, from Microsoft's article word for word: the destination
+            # named the Eventhouse, and Fabric answered "is not a database artifact". The runner's own mistake is the
+            # runner's to put right: the definition is written again with the KQL database in that place.
+            return todo("the destination names the Eventhouse where Fabric wants the KQL database: the eventstream's "
+                        "definition will be written again")
         # Microsoft's page: a property set that does not fit the mode is accepted, ingests nothing and reports no error.
-        return blocked("The Eventhouse destination of the eventstream is in the state Warning: it ingests nothing.",
+        said = destination.get("error") or {}
+        why = " ".join(str(said.get(key) or "") for key in ("errorCode", "errorMessage", "message")).strip() if isinstance(said, dict) else str(said)
+        return blocked(f"The Eventhouse destination of the eventstream is in the state {destination['status']}: it ingests "
+                       f"nothing.{' Fabric says: ' + why if why else ' Fabric gives no reason in the topology.'}",
                        WIZARD.format(**words))
     return done(f"eventstream {words['eventstream']}: custom endpoint {SOURCE}, direct ingestion into RawEvents "
                 f"(destination {destination.get('status', 'state not reported')})", source_id=source.get("id"))
@@ -1202,24 +1212,44 @@ def p1_eventstream(ctx) -> Probe:
 
 def act_eventstream(ctx) -> None:
     ws, display = workspace_id(ctx), name(ctx, "EVENTSTREAM_NAME")
-    house = need_item(ctx, "Eventhouse", name(ctx, "EVENTHOUSE_NAME"))
+    database = need_item(ctx, "KQLDatabase", name(ctx, "EVENTHOUSE_NAME"))
     stream = f"{display}-stream"
-    # The destination is word for word the one of Microsoft's article "Create an Eventstream with an Eventhouse
-    # DirectIngestion destination by using APIs": the Eventhouse's item ID, a table, a connection name of at most 40
-    # characters, and a mapping that exists. The source is a custom endpoint, whose properties are empty.
+    # The destination is the one of Microsoft's article "Create an Eventstream with an Eventhouse DirectIngestion
+    # destination by using APIs": a table, a connection name of at most 40 characters, a mapping that exists, and an item
+    # ID. The article takes the Eventhouse's ID for that. Fabric refused it on 26 November 2026: "Artifact with id ... is
+    # not a database artifact. It is of type 'KustoEventHouse'". So it is the ID of the KQL database. The source is a
+    # custom endpoint, whose properties are empty.
     definition = {
         "sources": [{"name": SOURCE, "type": "CustomEndpoint", "properties": {}}],
         "destinations": [{"name": DESTINATION, "type": "Eventhouse",
-                          "properties": {"dataIngestionMode": "DirectIngestion", "workspaceId": ws, "itemId": house["id"],
+                          "properties": {"dataIngestionMode": "DirectIngestion", "workspaceId": ws, "itemId": database["id"],
                                          "tableName": "RawEvents", "connectionName": f"es-windfarm-raw-{suffix(ctx)}",
                                          "mappingRuleName": "RawEvents_mapping"},
                           "inputNodes": [{"name": stream}]}],
         "streams": [{"name": stream, "type": "DefaultStream", "properties": {}, "inputNodes": [{"name": SOURCE}]}],
         "operators": [], "compatibilityLevel": "1.1"}
     payload = base64.b64encode(json.dumps(definition).encode("utf-8")).decode("ascii")
-    operation(ctx, "eventstream", lambda: ctx.fabric.call("POST", f"workspaces/{ws}/eventstreams", {
-        "displayName": display, "description": "Telemetry from the edge of the wind farm demo.",
-        "definition": {"parts": [{"path": "eventstream.json", "payload": payload, "payloadType": "InlineBase64"}]}}))
+    parts = {"definition": {"parts": [{"path": "eventstream.json", "payload": payload, "payloadType": "InlineBase64"}]}}
+    existing = item(ctx, "Eventstream", display)
+    if existing:
+        # Only the eventstream of this deployment's own workspace, and only when the probe found the destination naming
+        # the wrong item. Update Eventstream Definition replaces the whole definition; nothing is deleted by the runner.
+        ctx.say("      writing the eventstream's definition again, with the KQL database as the destination")
+        operation(ctx, "eventstream-definition", lambda: ctx.fabric.call(
+            "POST", f"workspaces/{ws}/eventstreams/{existing['id']}/updateDefinition", parts))
+    else:
+        operation(ctx, "eventstream", lambda: ctx.fabric.call("POST", f"workspaces/{ws}/eventstreams", {
+            "displayName": display, "description": "Telemetry from the edge of the wind farm demo.", **parts}))
+    # Fabric builds the destination's connection after it has taken the definition. Until it has, the topology shows the
+    # state of before, which for a definition written again is the old failure.
+    deadline = ctx.clock() + 120
+    while ctx.clock() < deadline:
+        ctx.cache.clear()
+        topology = eventstream_topology(ctx) or {}
+        states = [d.get("status") for d in topology.get("destinations", []) if d.get("type") == "Eventhouse"]
+        if states and states[0] not in ("Failed", "Warning", "Creating", None):
+            break
+        ctx.sleep(ctx.options.limits["poll"])
 
 
 def edge_connection(ctx) -> tuple[str, str] | None:
@@ -1593,7 +1623,7 @@ def phase1() -> list[Step]:
              writes="six shortcuts under Tables of the Lakehouse", basis="OneLake Shortcuts - Create Shortcut (target: KQL database)"),
         Step("p1.eventstream", "phase1", "Eventstream with direct ingestion into RawEvents", p1_eventstream, act_eventstream,
              wait_seconds=180, writes="eventstream es-windfarm-edge: a custom endpoint, and the Eventhouse as destination with the "
-             "mapping RawEvents_mapping", basis="Learn: Create an Eventstream with an Eventhouse DirectIngestion destination by using APIs"),
+             "mapping RawEvents_mapping", basis="Learn: Create an Eventstream with an Eventhouse DirectIngestion destination by using APIs; Update Eventstream Definition"),
         Step("p1.edge_connection", "phase1", "Where the edge sends to", p1_edge_connection, act_edge_connection,
              writes="writes the bootstrap server and the topic into the settings file. No key is read out of the answer",
              basis="Topology - Get Eventstream Source Connection", proof="live"),
