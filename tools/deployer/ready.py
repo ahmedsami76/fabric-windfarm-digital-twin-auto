@@ -58,10 +58,13 @@ def report(ctx: Context, steps: list, code: int | None) -> list[str]:
     left = [step for step in counted if not _complete(ctx, step.id)]
     stopped = [(step.id, ctx.state.step(step.id).get("status"), ctx.state.step(step.id).get("detail", ""))
                for step in steps if ctx.state.step(step.id).get("status") in ("blocked", "failed", "running")]
+    # A complete step the runner could not ask about in this run: counted as complete, and named as what the run ended at.
+    stopped += [(step.id, "complete and could not be looked at just now", ctx.state.step(step.id)["unseen"].get("detail", ""))
+                for step in steps if ctx.state.step(step.id).get("unseen")]
     rows = [f"Where deployment {ctx.cfg['DEPLOYMENT_SUFFIX']} stands, up to {up_to}:"]
     provisioned = not left and (code in (None, EXIT_OK))
     rows.append(f"  provisioned   {'yes' if provisioned else 'no'}: {len(counted) - len(left)} of {len(counted)} steps complete"
-                + (f"; next: {left[0].id}" if left else ""))
+                + (f"; next: {left[0].id}" if left else "" if provisioned else "; this run did not get to look at all of them"))
     if stopped:
         rows.append("  blocked       " + "; ".join(f"{step} is {word}" + (f" ({detail[:110]})" if detail else "") for step, word, detail in stopped[:3]))
     why = []

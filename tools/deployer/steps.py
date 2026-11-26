@@ -13,7 +13,7 @@ import re
 import time
 
 from . import names
-from .cloud import CloudError, operation, run_notebook
+from .cloud import UNREACHED, CloudError, operation, run_notebook
 from .core import PHASES, Blocked, Probe, Refused, Step, StillRunning, blocked, done, kept, todo, unverified
 
 TAG = "windfarm-demo-deployment"
@@ -449,6 +449,12 @@ def pre_fabric(ctx) -> Probe:
     try:
         workspaces(ctx)
     except CloudError as error:
+        if error.code == UNREACHED:
+            # No answer at all: the network of this computer, not the sign-in (26 November 2026, a TLS handshake that hung).
+            return blocked(f"The Fabric API could not be reached from this computer: {error}",
+                           "This is the connection, not your sign-in. Run the same command again. If it says the same, time a "
+                           "connection from here:\n"
+                           "curl -sS -o /dev/null -w '%{time_connect} s to connect, %{time_appconnect} s for TLS\\n' https://api.fabric.microsoft.com/")
         return blocked(f"The Fabric API did not answer the signed-in user: {error}", "az login   (in a session that can get a "
                        "token for https://api.fabric.microsoft.com; Azure Cloud Shell often cannot)")
     return done("the Fabric API answers")

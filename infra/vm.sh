@@ -182,7 +182,9 @@ run_without_ssh() {
 
 # What the scripts on the VM use of this repository, as one command that prints a digest of it. It runs here and, through
 # the VM agent, on the VM, so it must hold no single quote: it travels inside a single-quoted command.
-TREE_DIGEST='find edge simulator data config/load-env.sh -type f ! -path "*/__pycache__/*" ! -path "*/.pytest_cache/*" ! -path "*.egg-info/*" ! -path "simulator/tests/*" -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64'
+# Left out: what a run leaves behind here and the VM never needs. On 26 November 2026 the data flow rendered by step 6 on
+# the workstation (edge/dataflows/rendered, ignored by git) made the two copies "differ" and stopped the step after it.
+TREE_DIGEST='find edge simulator data config/load-env.sh -type f ! -path "*/__pycache__/*" ! -path "*/.pytest_cache/*" ! -path "*.egg-info/*" ! -path "simulator/tests/*" ! -path "edge/dataflows/rendered/*" -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64'
 
 # push_without_ssh: for a subscription whose policy closes port 22 (seen on 20 and on 26 November 2026). Files cannot be
 # copied through the VM agent. What can be done: ask the VM whether its copy of what the edge scripts use is the one in

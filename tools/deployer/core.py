@@ -126,12 +126,25 @@ class State:
 
     def mark(self, step_id: str, status: str, **more) -> None:
         entry = dict(self.data["steps"].get(step_id, {}))
+        entry.pop("unseen", None)
         entry.update(status=status, at=self.stamp(), **more)
         self.data["steps"][step_id] = entry
         if status == "complete":
             # What was under way for a step is over once its result is there, however the result got there: a request
             # the runner could not follow (26 November 2026, an address on a regional host) is not listed for ever.
             self.data["pending"].pop(step_id, None)
+        self.save()
+
+    def unseen(self, step_id: str, detail: str | None) -> None:
+        """A question about a step got no answer (detail), or has one again (None). What is known of the step stays: a
+        complete step that could not be asked about for a moment is not a step that has to be done again."""
+        entry = dict(self.data["steps"].get(step_id, {}))
+        if (detail is None) == ("unseen" not in entry):
+            return
+        entry.pop("unseen", None)
+        if detail is not None:
+            entry["unseen"] = {"detail": self._redact(detail), "at": self.stamp()}
+        self.data["steps"][step_id] = entry
         self.save()
 
     def note(self, step_id: str, **evidence) -> None:
@@ -213,6 +226,9 @@ class Lock:
 
 
 # ----------------------------------------------------------------------------------------- steps
+UNSEEN = "unseen"       # in a probe's evidence: the question could not be asked, so this is no finding about the step
+
+
 @dataclass
 class Probe:
     """What a step found when it looked, without changing anything."""
@@ -375,7 +391,7 @@ def look(ctx: Context, step: Step, quiet: bool = False) -> Probe:
     except Blocked as stop:
         return Probe("blocked", stop.detail, action=stop.action)
     except StepFailed as failure:
-        return Probe("blocked", f"could not be looked at: {failure}",
+        return Probe("blocked", f"could not be looked at: {failure}", {UNSEEN: True},
                      action="Run the same command again. If it says the same, that line is what to send.")
     finally:
         if ctx.progress and not quiet:
@@ -578,7 +594,7 @@ def print_plan(ctx: Context, lines: list[Line], digest: str = "") -> None:
         ctx.say(f"  {line.step.id:<28} {word:<22} {line.step.title}")
         if line.probe.detail and line.decision in ("done", "confirmed", "unchecked", "measure", "blocked", "drift", "optional"):
             ctx.say(f"  {'':<28} {'':<22}   {line.probe.detail}")
-        if line.decision == "run" and line.probe.detail:
+        if line.decision == "run" and line.probe.detail and not line.probe.detail.startswith("after "):
             ctx.say(f"  {'':<28} {'':<22}   now: {line.probe.detail}")     # what the runner found, when that says why it will act
         if line.decision == "run" and line.step.writes:
             ctx.say(f"  {'':<28} {'':<22}   changes: {line.step.writes}")
@@ -612,7 +628,12 @@ def _wait_for(ctx: Context, step: Step, first: Probe | None = None) -> Probe:
 
 
 def _report_block(ctx: Context, step: Step, probe: Probe, why: str) -> int:
-    ctx.state.mark(step.id, "blocked", detail=probe.detail or why)
+    if probe.evidence.get(UNSEEN) and ctx.state.step(step.id).get("status") == "complete":
+        # No answer is no finding. On 26 November 2026 three applies in a row ended at a step that was complete, each on
+        # one connection that hung, and each time the count of complete steps went down by one.
+        ctx.state.unseen(step.id, probe.detail)
+    else:
+        ctx.state.mark(step.id, "blocked", detail=probe.detail or why)
     ctx.say(f"\nblocked  {step.id}: {step.title}")
     ctx.say(f"  {probe.detail or why}")
     action = manual_text(ctx, step, probe)
@@ -639,6 +660,7 @@ def apply(ctx: Context, steps: list[Step], approved: set[str]) -> int:
             if saved.get("status") != "complete":
                 ctx.state.mark(step.id, "complete", detail=probe.detail, evidence={**saved.get("evidence", {}), **probe.evidence},
                                verified=probe.state == "done")
+            ctx.state.unseen(step.id, None)
             _passed(ctx, step, probe)
             continue
         if step.optional:

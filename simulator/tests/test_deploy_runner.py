@@ -133,6 +133,7 @@ def deployed(bench):
 def test_the_first_plan_chooses_names_and_changes_nothing(bench):
     code, text = bench.run("plan")
     assert code == 0 and "Nothing was changed in Azure or Fabric" in text
+    assert "now: " in text and "now: after " not in text      # what was found is shown where it says why; "after p1.x" says nothing
     cfg, suffix = bench.cfg, bench.cfg["DEPLOYMENT_SUFFIX"]
     assert re.fullmatch(r"[a-z0-9]{3}", suffix)
     assert cfg["RESOURCE_GROUP"] == f"rg-windfarm-edge-{suffix}" and cfg["STORAGE_ACCOUNT_NAME"] == f"sawindfarm{suffix}"
@@ -290,6 +291,8 @@ def test_things_that_are_not_the_demos_stop_the_runner_until_they_are_named(depl
     digest = re.search(r"^Plan (\w+)$", text, re.M)[1]
     code, text = deployed.run("apply", "--approve", digest, ROLES)
     assert code == core.EXIT_BLOCKED
+    held = deployed.state["steps"]["p1.resource_group"]         # a finding about a complete step, unlike a question without an answer
+    assert held["status"] == "blocked" and "unseen" not in held and "next: p1.resource_group" in text
     code, text = deployed.run("apply", "--approve", digest, ROLES, "--acknowledge", world.resources[-1]["id"], "--acknowledge", stranger["id"])
     assert code == 0, text
 
@@ -829,8 +832,8 @@ def test_the_eventhouse_adapter_reads_rows_and_turns_a_refusal_into_a_block():
     from deployer.cloud import Blocked, Kusto, http
     calls = []
 
-    def request(method, url, token, body=None, headers=None, timeout=0):
-        calls.append((method, url, body))
+    def request(method, url, token, body=None, headers=None, timeout=0, read=False):
+        calls.append((method, url, body, read))
         if "refused" in body["csl"]:
             return 403, b"Forbidden"
         return 200, json.dumps({"Tables": [{"Columns": [{"ColumnName": "TableName"}, {"ColumnName": "Rows"}],
@@ -1018,7 +1021,7 @@ def test_a_long_apply_gets_a_new_token_before_the_old_one_ends():
         def token(self, resource):
             asked.append(resource)
             return f"token-{len(asked)}-padding-padding"
-    fabric = RunnerFabric(OneAz(), clock=lambda: now[0], api="https://127.0.0.1:9/v1")
+    fabric = RunnerFabric(OneAz(), clock=lambda: now[0], api="https://127.0.0.1:9/v1", sleep=lambda seconds: None)
     assert fabric._token.startswith("token-1")
     now[0] = 1300.0
     with pytest.raises(CloudError):           # nothing listens there; the token is renewed before the attempt
@@ -2103,3 +2106,175 @@ def test_under_the_lock_the_checkpoint_is_read_again_before_anything_is_decided(
     monkeypatch.setattr(core.Lock, "__enter__", another_apply_wrote_first)
     code, text = bench.run("apply", "--approve", digest, ROLES)
     assert code == core.EXIT_BLOCKED and bench.state["steps"]["p1.note"]["detail"].startswith("written by the apply")
+
+
+# ------------------------------------------------------------------------------------------ a line that drops single connections
+# 26 November 2026, 14:45 to 15:02: three applies in a row ended on one call that got no answer (a TLS handshake to the
+# Fabric API, `az resource list`, a TLS handshake again), on a workstation whose connections to the same hosts, timed
+# seconds before, took a fifth of a second. Each time nothing had been changed, and a step that was complete was no
+# longer counted.
+def test_a_read_through_the_azure_cli_that_gets_no_answer_is_asked_again_and_a_change_is_made_once():
+    import subprocess
+    import types
+    from deployer.cloud import Az
+    given, hang = [], [0]
+
+    def run(argv, **how):
+        given.append(how["timeout"])
+        if hang[0] > 0:
+            hang[0] -= 1
+            raise subprocess.TimeoutExpired(argv, how["timeout"])
+        return types.SimpleNamespace(returncode=0, stdout="[]", stderr="")
+    az = Az(core.Redactor(), run=run)
+    hang[0] = 2
+    assert az.json("resource", "list", "--resource-group", "rg-x") == [] and given == [30, 60, 90]      # of 180 seconds
+    given.clear()
+    hang[0] = 3
+    with pytest.raises(CloudError, match="az resource list --resource-group did not answer within 180 seconds, asked 3 times"):
+        az.json("resource", "list", "--resource-group", "rg-x")
+    assert given == [30, 60, 90]
+    given.clear()
+    hang[0] = 1                                               # a call that changes something: once, with all of its time
+    with pytest.raises(CloudError, match=r"did not answer within 1800 seconds\.$"):
+        az.run("group", "create", "--name", "list", "--location", "southcentralus")
+    assert given == [1800] and hang[0] == 0
+    given.clear()
+    hang[0] = 1                                               # a read with a short limit of its own is not cut into pieces
+    with pytest.raises(CloudError, match=r"within 45 seconds\.$"):
+        az.json("rest", "--method", "get", "--url", "https://management.azure.com/x", timeout=45)
+    assert given == [45]
+    assert Az.reads(["rest", "--method", "GET", "--url", "u"]) and not Az.reads(["rest", "--method", "put", "--url", "u/list"])
+    assert Az.reads(["account", "get-access-token", "--resource", "r"]) and Az.reads(["iot", "ops", "show", "--name", "n"])
+    assert not Az.reads(["vm", "run-command", "invoke", "--name", "show"]) and not Az.reads(["role", "assignment", "create"])
+
+
+class _Answer:
+    status, headers = 200, {}
+
+    def read(self):
+        return b'{"value": []}'
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def line(monkeypatch):
+    """urllib's door, with a list of what goes wrong on the next requests. Yields (sent, faults)."""
+    import urllib.request
+    sent, faults = [], []
+
+    def urlopen(request, timeout=0):
+        sent.append((request.get_method(), timeout))
+        if faults:
+            fault = faults.pop(0)
+            if fault is not None:
+                raise fault
+        return _Answer()
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return sent, faults
+
+
+def _handshake():
+    import urllib.error
+    return urllib.error.URLError(TimeoutError("_ssl.c:1063: The handshake operation timed out"))
+
+
+def test_a_connection_to_fabric_that_hangs_is_made_again_and_a_request_that_went_out_is_not_sent_twice(line):
+    from operations_agent import UNREACHED, Fabric, FabricError
+    sent, faults = line
+    naps = []
+    fabric = Fabric("token-token-token-token", sleep=naps.append)
+    faults[:] = [_handshake(), _handshake()]
+    assert fabric.get("workspaces") == {"value": []}
+    assert sent == [("GET", 20), ("GET", 20), ("GET", 60)] and naps == [2.0, 4.0]      # given up sooner, then given time
+    sent.clear()
+    faults[:] = [_handshake()]                                 # nothing was sent: a request that changes something goes again
+    assert fabric.call("POST", "workspaces/w/items", {"displayName": "x"})[0] == 200 and len(sent) == 2
+    sent.clear()
+    faults[:] = [TimeoutError("The read operation timed out")]  # it was sent, and no answer came: not sent a second time
+    with pytest.raises(FabricError, match=r"did not answer a request it was sent \(POST\)") as stop:
+        fabric.call("POST", "workspaces/w/items", {"displayName": "x"})
+    assert len(sent) == 1 and stop.value.code == UNREACHED and stop.value.status is None
+    sent.clear()
+    faults[:] = [TimeoutError("The read operation timed out"), TimeoutError("The read operation timed out")]
+    assert fabric.get("workspaces") == {"value": []} and len(sent) == 3            # a read is asked again
+    sent.clear()
+    faults[:] = [_handshake(), _handshake(), _handshake()]
+    with pytest.raises(FabricError, match="in 3 tries: .*handshake operation timed out") as stop:
+        fabric.get("workspaces")
+    assert len(sent) == 3 and stop.value.code == UNREACHED
+
+
+def test_the_other_addresses_are_asked_again_the_same_way_and_a_management_command_is_sent_once(line):
+    from deployer.cloud import UNREACHED, Kusto, http
+    sent, faults = line
+    naps = []
+    faults[:] = [_handshake(), TimeoutError("The read operation timed out")]
+    assert http("GET", "https://onelake.example/ws/item/Files", "token", sleep=naps.append)[0] == 200 and len(sent) == 3 and len(naps) == 2
+    sent.clear()
+    faults[:] = [TimeoutError("The read operation timed out")]
+    with pytest.raises(CloudError, match=r"onelake.example did not answer a request it was sent \(PUT\)") as stop:
+        http("PUT", "https://onelake.example/ws/item/Files/x", "token", body={}, sleep=naps.append)
+    assert len(sent) == 1 and stop.value.code == UNREACHED
+    sent.clear()
+    faults[:] = [_handshake(), _handshake(), _handshake()]
+    with pytest.raises(CloudError, match="Could not reach onelake.example, in 3 tries"):
+        http("PUT", "https://onelake.example/ws/item/Files/x", "token", body={}, sleep=naps.append)
+    # the Eventhouse: a query is a read although it is a POST, a management command is not
+    asked = []
+
+    def request(method, url, token, body=None, headers=None, timeout=0, read=False):
+        asked.append((url.rsplit("/", 1)[-1], read))
+        return 200, json.dumps({"Tables": [{"Columns": [], "Rows": []}]}).encode()
+
+    class TokenOnly:
+        token = staticmethod(lambda resource: "t")
+    kusto = Kusto(TokenOnly(), core.Redactor(), request=request)
+    kusto._audience["https://cluster.example"] = "https://cluster.example"
+    kusto.rows("https://cluster.example", "db", "RawEvents | count")
+    kusto.rows("https://cluster.example", "db", ".create table T (a: int)", mgmt=True)
+    assert asked == [("query", True), ("mgmt", False)]
+
+
+def test_a_complete_step_that_cannot_be_asked_about_for_a_moment_is_still_counted_as_complete(deployed):
+    complete = sum(1 for entry in deployed.state["steps"].values() if entry.get("status") == "complete")
+    before, calls = list(deployed.world.writes), list(deployed.world.shell_calls)
+    digest = deployed.plan(ROLES)
+    deployed.world.no_answer[("resource", "list")] = 2               # once as the apply reads the plan again, once at the step
+    code, text = deployed.run("apply", "--approve", digest, ROLES)
+    assert code == core.EXIT_BLOCKED and "blocked  p1.resource_group" in text and "could not be looked at" in text, text[-900:]
+    entry = deployed.state["steps"]["p1.resource_group"]
+    assert entry["status"] == "complete" and "did not answer within" in entry["unseen"]["detail"]
+    assert sum(1 for e in deployed.state["steps"].values() if e.get("status") == "complete") == complete
+    assert "provisioned   no: " in text and "steps complete; this run did not get to look at all of them" in text
+    assert "p1.resource_group is complete and could not be looked at just now" in text
+    assert "demo-ready    no" in text                                  # a run that ended early vouches for nothing
+    code, text = deployed.run("apply", "--approve", digest, ROLES)   # the line is back: nothing is done again
+    assert code == 0 and "provisioned   yes" in text and "unseen" not in deployed.state["steps"]["p1.resource_group"]
+    assert deployed.world.writes == before and deployed.world.shell_calls == calls
+
+
+def test_a_step_that_is_not_complete_and_cannot_be_looked_at_is_blocked_as_before(bench):
+    digest = bench.plan(ROLES)
+    bench.world.no_answer[("resource", "list")] = 1
+    code, text = bench.run("apply", "--approve", digest, ROLES, "--confirm", SETTINGS)
+    assert code == core.EXIT_BLOCKED and bench.state["steps"]["p1.resource_group"]["status"] == "blocked"
+    assert "unseen" not in bench.state["steps"]["p1.resource_group"]
+
+
+def test_fabric_not_reached_is_called_the_connection_and_not_the_sign_in(bench):
+    bench.run("plan", ROLES)
+    bench.world.no_answer["fabric"] = 1
+    code, text = bench.run("preflight")
+    row = next(r for r in text.splitlines() if "pre.fabric" in r and "BLOCKED" in r)
+    assert "could not be reached from this computer" in text and "handshake operation timed out" in text, row
+    assert "This is the connection, not your sign-in" in text and "time_appconnect" in text
+    assert "az login   (in a session" not in text
+    bench.world.no_answer["fabric refuses"] = 1                        # an answer, and it is a refusal: that is the sign-in
+    code, text = bench.run("preflight")
+    assert "did not answer the signed-in user" in text and "TokenExpired" in text and "az login   (in a session" in text
+    assert "not your sign-in" not in text

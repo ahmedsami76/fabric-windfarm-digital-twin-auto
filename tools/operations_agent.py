@@ -49,6 +49,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import remediation_spec as spec  # noqa: E402
 
 DEFAULT_API = "https://api.fabric.microsoft.com/v1"
+UNREACHED_TRIES = 3
+UNREACHED = "NotReached"         # FabricError.code when no answer came: the connection, not a refusal      # a connection that cannot be made, or a read that gets no answer, is tried this many times
 # As the portal writes them for an action that runs a notebook (read back on 24 November 2026). Microsoft's
 # article gives "Notebook" as its example of an item type; the update that carried that word was refused.
 ITEM_TYPE, JOB_TYPE = "SynapseNotebook", "RunNotebook"
@@ -104,7 +106,8 @@ class Fabric:
     def call(self, method: str, path: str, body=None):
         """One request. Returns (status, headers, parsed body or None). Waits and repeats on 429."""
         data = None if body is None else json.dumps(body).encode("utf-8")
-        for attempt in range(4):
+        lost = 0
+        for attempt in range(4 + UNREACHED_TRIES):
             request = urllib.request.Request(self._url(path), data=data, method=method)
             request.add_header("Authorization", f"Bearer {self._token}")
             if data is not None:
@@ -112,17 +115,33 @@ class Fabric:
             elif method == "POST":
                 request.add_header("Content-Length", "0")
             try:
-                with urllib.request.urlopen(request, timeout=60) as response:
+                # A read is given less time at first: a connection that hangs is given up sooner and made anew.
+                with urllib.request.urlopen(request, timeout=20 if method == "GET" and lost < UNREACHED_TRIES - 1 else 60) as response:
                     return response.status, dict(response.headers.items()), _parse(response.read())
             except urllib.error.HTTPError as error:
                 payload = _parse(error.read())
-                if error.code == 429 and attempt < 3:
+                if error.code == 429 and attempt < 3 + lost:
                     self._sleep(min(float(error.headers.get("Retry-After") or 5), 60.0))
                     continue
                 raise FabricError(_said(error.code, payload), status=error.code,
                                   code=(payload or {}).get("errorCode", "") if isinstance(payload, dict) else "") from None
             except urllib.error.URLError as error:
-                raise FabricError(f"Could not reach the Fabric API at {self.api}: {error.reason}") from None
+                # Raised while the connection was made or the request sent: Fabric has not acted on anything. On
+                # 26 November 2026 one connection in some dozens hung in its TLS handshake on a workstation whose other
+                # connections, seconds before and after, took a fifth of a second. So any request is made again.
+                lost += 1
+                if lost < UNREACHED_TRIES:
+                    self._sleep(2.0 * lost)
+                    continue
+                raise FabricError(f"Could not reach the Fabric API at {self.api}, in {lost} tries: {error.reason}", code=UNREACHED) from None
+            except OSError as error:
+                # Raised while waiting for the answer: the request went out. Only a read is asked again.
+                lost += 1
+                if method == "GET" and lost < UNREACHED_TRIES:
+                    self._sleep(2.0 * lost)
+                    continue
+                raise FabricError(f"The Fabric API at {self.api} did not answer a request it was sent ({method}): {error}",
+                                  code=UNREACHED) from None
         raise FabricError("The Fabric API kept answering 429 (too many requests). Try again in a few minutes.")
 
     def get(self, path: str):

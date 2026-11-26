@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,7 +19,7 @@ from .core import Blocked, Redactor, StepFailed, StillRunning
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from operations_agent import DEFAULT_API, Fabric, FabricError, api_address  # noqa: E402  (the client of Phase 5b: 429, long-running calls, one origin)
+from operations_agent import DEFAULT_API, UNREACHED, Fabric, FabricError, api_address  # noqa: E402  (the client of Phase 5b: 429, long-running calls, one origin)
 
 FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
 STORAGE_RESOURCE = "https://storage.azure.com"
@@ -65,6 +66,10 @@ class RunnerFabric(Fabric):
 # Command groups that take no --subscription: seen with Azure CLI 2.93.0, where `az extension list --subscription X` and
 # `az config get --subscription X` end with "unrecognized arguments", and the help of `az ad ...` does not list the option.
 NO_SUBSCRIPTION = ("ad", "extension", "config", "version", "login", "logout")
+TRIES = 3            # how often a read that gets no answer, or a connection that cannot be made, is tried
+SHARES = (1 / 6, 1 / 3, 1 / 2)      # of an `az` read's time, per try
+SPLIT_FROM = 120     # seconds: a read with less time than this is asked once (its first try would have under 20 s)
+READ_WORDS = ("show", "list", "list-usage", "list-skus", "check-name", "exists", "get-access-token")
 
 
 class Az:
@@ -87,15 +92,33 @@ class Az:
             args += ["--subscription", self.subscription]
         return args
 
+    @staticmethod
+    def reads(args) -> bool:
+        """A call that changes nothing, and so can be made again when it gets no answer."""
+        args = [str(arg) for arg in args]
+        if args[:1] == ["rest"]:
+            return "--method" in args and args[args.index("--method") + 1].lower() == "get"
+        words = args[:next((n for n, arg in enumerate(args) if arg.startswith("-")), len(args))]       # the command, no values
+        return any(word in READ_WORDS for word in words)
+
     def _call(self, args, timeout):
-        try:
-            # No keyboard for the CLI: with its output captured, a question it asked (to install an extension, say)
-            # would be seen by nobody, and it would wait for an answer until the time limit.
-            return self._run(["az", *self.pinned(args)], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        except FileNotFoundError:
-            raise CloudError("The Azure CLI (az) is not installed on this computer.") from None
-        except subprocess.TimeoutExpired:
-            raise CloudError(f"az {' '.join(args[:3])} did not answer within {timeout} seconds.") from None
+        # A read is asked up to TRIES times within its time, each try with more of it (a sixth, a third, a half): on
+        # 26 November 2026 `az resource list` for one resource group stood for 180 seconds on a workstation where the
+        # same question, asked again, took two. A read that is slow and not stuck still has half of the time in one
+        # piece. A call that changes something is made once, with all of its time.
+        shares = SHARES if self.reads(args) and timeout >= SPLIT_FROM else (1.0,)
+        for attempt, share in enumerate(shares, start=1):
+            try:
+                # No keyboard for the CLI: with its output captured, a question it asked (to install an extension, say)
+                # would be seen by nobody, and it would wait for an answer until the time limit.
+                return self._run(["az", *self.pinned(args)], capture_output=True, text=True, timeout=max(1, round(timeout * share)),
+                                 stdin=subprocess.DEVNULL)
+            except FileNotFoundError:
+                raise CloudError("The Azure CLI (az) is not installed on this computer.") from None
+            except subprocess.TimeoutExpired:
+                if attempt == len(shares):
+                    tries = f", asked {attempt} times" if attempt > 1 else ""
+                    raise CloudError(f"az {' '.join(args[:3])} did not answer within {timeout} seconds{tries}.") from None
 
     def json(self, *args, timeout: int = 180):
         """The parsed answer. Raises when the CLI fails."""
@@ -264,24 +287,34 @@ class Shell:
         return text
 
 
-def http(method: str, url: str, token: str, body=None, headers: dict | None = None, timeout: int = 60):
+def http(method: str, url: str, token: str, body=None, headers: dict | None = None, timeout: int = 60, read: bool = False,
+         sleep=time.sleep):
     """One request outside the Fabric API. Returns (status, parsed body or text). The token goes over https only."""
     if urllib.parse.urlsplit(url).scheme != "https":
         raise CloudError(f"Refused to send a token to {url}: not https.")
     data = None if body is None else json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(url, data=data, method=method)
-    request.add_header("Authorization", f"Bearer {token}")
-    if data is not None:
-        request.add_header("Content-Type", "application/json; charset=utf-8")
-    for name, value in (headers or {}).items():
-        request.add_header(name, value)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
-    except urllib.error.URLError as error:
-        raise CloudError(f"Could not reach {urllib.parse.urlsplit(url).netloc}: {error.reason}") from None
+    host, read = urllib.parse.urlsplit(url).netloc, read or method == "GET"
+    for attempt in range(1, TRIES + 1):
+        request = urllib.request.Request(url, data=data, method=method)
+        request.add_header("Authorization", f"Bearer {token}")
+        if data is not None:
+            request.add_header("Content-Type", "application/json; charset=utf-8")
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+        except urllib.error.URLError as error:
+            # While the connection was made or the request sent: nothing has been acted on, so any request is made again.
+            if attempt == TRIES:
+                raise CloudError(f"Could not reach {host}, in {TRIES} tries: {error.reason}", code=UNREACHED) from None
+        except OSError as error:
+            # While waiting for the answer: the request went out. Only a read is asked again.
+            if not read or attempt == TRIES:
+                raise CloudError(f"{host} did not answer a request it was sent ({method}): {error}", code=UNREACHED) from None
+        sleep(2.0 * attempt)
 
 
 class Kusto:
@@ -306,8 +339,9 @@ class Kusto:
         return self._az.token(self._audience[uri])
 
     def rows(self, uri: str, database: str, csl: str, mgmt: bool = False) -> list[dict]:
+        # A query changes nothing and is asked again when no answer comes; a management command is not.
         status, raw = self._request("POST", f"{uri.rstrip('/')}/v1/rest/{'mgmt' if mgmt else 'query'}", self._token(uri),
-                                    {"db": database, "csl": csl}, timeout=180)
+                                    {"db": database, "csl": csl}, timeout=180, **({} if mgmt else {"read": True}))
         if status in (401, 403):
             raise Blocked(f"The Eventhouse answered {status} to the signed-in user.",
                           "Check that you are the owner of the KQL database or have a role in the workspace, then run apply again.")

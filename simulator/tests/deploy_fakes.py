@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from deployer import names  # noqa: E402
-from deployer.cloud import NO_SUBSCRIPTION, Az, CloudError  # noqa: E402
+from deployer.cloud import NO_SUBSCRIPTION, UNREACHED, Az, CloudError  # noqa: E402
 from deployer.steps import ROLE_IDS  # noqa: E402
 
 API = "https://api.fabric.microsoft.com/v1"
@@ -49,6 +49,7 @@ class World:
         self.role_assignments: list = []
         self.role_lag, self.role_reads_empty = 0, 0      # reads after a new assignment that do not show it yet
         self.slow_line, self.large_answers = False, 0    # a computer that large answers from Azure do not reach in time
+        self.no_answer: dict = {}                        # ("resource", "list") or "fabric" -> calls that get no answer
         self.capacities = [{"id": "cap-0001", "displayName": "demo-capacity", "sku": "F64", "region": "South Central US", "state": "Active"}]
         self.workspaces: list = []
         self.items: dict = {}
@@ -259,6 +260,9 @@ class FakeAz:
         if args[:2] == ("group", "show"):
             return w.groups.get(opt(args, "--name"))
         if args[:2] == ("resource", "list"):
+            if w.no_answer.get(args[:2], 0) > 0:
+                w.no_answer[args[:2]] -= 1
+                raise CloudError(f"az resource list --resource-group did not answer within {timeout} seconds, asked 3 times.")
             return list(w.resources)
         if args[:2] == ("vm", "show"):
             return w.vm
@@ -347,6 +351,14 @@ class FakeFabric:
         assert not path.startswith("http") or path.startswith(API + "/"), f"the token was sent to another address: {path}"
         path = path.replace(API + "/", "").lstrip("/")
         route = f"{method} {path}"
+        if w.no_answer.get("fabric refuses", 0) > 0:
+            w.no_answer["fabric refuses"] -= 1
+            raise CloudError("Fabric answered 401 (TokenExpired): Access token has expired, resubmit with a new access token",
+                             401, "TokenExpired")
+        if w.no_answer.get("fabric", 0) > 0:
+            w.no_answer["fabric"] -= 1
+            raise CloudError(f"Could not reach the Fabric API at {API}, in 3 tries: _ssl.c:1063: The handshake operation timed out",
+                             code=UNREACHED)
         if route == "GET workspaces":
             return 200, {}, {"value": list(w.workspaces)}
         if route == "GET capacities":

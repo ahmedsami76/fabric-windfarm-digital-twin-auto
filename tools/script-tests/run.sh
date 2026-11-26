@@ -75,6 +75,11 @@ same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes)"
 check "push, port 22 closed by policy, the VM has this folder's files: nothing copied, settings written through the VM agent" 0 \
   "Nothing to copy" "written through the VM agent" "same:yes" "vm run-command invoke" "!nsg rule create" "!Cannot open SSH"
 
+# What step 6 renders on the workstation is no difference between the two copies (26 November 2026: it stopped the next step).
+mkdir -p "$REPO/edge/dataflows/rendered"; echo '{}' > "$REPO/edge/dataflows/rendered/windfarm-to-fabric.json"; rm -f "$STUB_DIR"/calls.log
+run bash "$REPO"/infra/vm.sh push; rm -rf "$REPO/edge/dataflows/rendered"
+check "push, port 22 closed by policy, a data flow rendered here since the last copy: still nothing to copy" 0 "Nothing to copy" "!is not the one in this folder"
+
 echo "# changed on the VM" >> "$H/edge/scripts/05-deploy-simulator.sh"; echo stale > "$H/config/demo.env"; rm -f "$STUB_DIR"/calls.log
 run bash "$REPO"/infra/vm.sh push
 OUT="$OUT
