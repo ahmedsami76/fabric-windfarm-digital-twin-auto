@@ -62,17 +62,36 @@ class RunnerFabric(Fabric):
             raise CloudError(str(error), error.status, error.code) from None
 
 
-class Az:
-    """The Azure CLI, with the sign-in the operator made. Read with show and list, write only inside apply."""
+# Command groups that take no --subscription: seen with Azure CLI 2.93.0, where `az extension list --subscription X` and
+# `az config get --subscription X` end with "unrecognized arguments", and the help of `az ad ...` does not list the option.
+NO_SUBSCRIPTION = ("ad", "extension", "config", "version", "login", "logout")
 
-    def __init__(self, redact: Redactor, run=subprocess.run):
-        self._redact, self._run = redact, run
+
+class Az:
+    """The Azure CLI, with the sign-in the operator made. Read with show and list, write only inside apply.
+
+    Once a deployment is known, every call names the deployment's subscription itself (pin). The CLI's active
+    subscription, which another terminal can change at any moment, then no longer decides where a call goes or which
+    tenant a token is for."""
+
+    def __init__(self, redact: Redactor, run=subprocess.run, request=None):
+        self._redact, self._run, self._request = redact, run, request
+        self.subscription = ""
+
+    def pin(self, subscription_id: str) -> None:
+        self.subscription = subscription_id or ""
+
+    def pinned(self, args) -> list:
+        args = list(args)
+        if self.subscription and args and args[0] not in NO_SUBSCRIPTION and "--subscription" not in args:
+            args += ["--subscription", self.subscription]
+        return args
 
     def _call(self, args, timeout):
         try:
             # No keyboard for the CLI: with its output captured, a question it asked (to install an extension, say)
             # would be seen by nobody, and it would wait for an answer until the time limit.
-            return self._run(["az", *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            return self._run(["az", *self.pinned(args)], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         except FileNotFoundError:
             raise CloudError("The Azure CLI (az) is not installed on this computer.") from None
         except subprocess.TimeoutExpired:
@@ -110,6 +129,21 @@ class Az:
         self._redact.learn(token)
         return token
 
+    def graph(self, path: str):
+        """One read of Microsoft Graph, with a token for the tenant of the pinned subscription. None when Graph has no
+        such object. (`az ad` follows the CLI's active subscription and takes no --subscription, so it is not used.)"""
+        result = self._call(["account", "get-access-token", "--resource-type", "ms-graph", "--query", "accessToken", "--output", "tsv"], 120)
+        token = result.stdout.strip()
+        if result.returncode != 0 or not token:
+            raise CloudError(self._redact(f"The Azure CLI gave no token for Microsoft Graph: {_tail(result.stderr)}"))
+        self._redact.learn(token)
+        status, body = (self._request or http)("GET", "https://graph.microsoft.com/v1.0/" + path.lstrip("/"), token, timeout=60)
+        if status == 404:
+            return None
+        if status != 200:
+            raise CloudError(self._redact(f"Microsoft Graph answered {status} to {path.split('?')[0]}: {bytes(body)[:300]!r}"))
+        return json.loads(body)
+
 
 def _tail(text: str, lines: int = 6) -> str:
     rows = [row for row in (text or "").strip().splitlines() if row.strip()]
@@ -119,29 +153,90 @@ def _tail(text: str, lines: int = 6) -> str:
 class Shell:
     """The repository's own scripts, started through bash, their output shown through the redactor."""
 
+    QUIET_NOTE = 60          # seconds without a line of output after which the runner says that it is still waiting
+
     def __init__(self, root: Path, redact: Redactor, out=None, popen=subprocess.Popen):
         self.root, self._redact, self._out, self._popen = Path(root), redact, out, popen
 
-    def run(self, argv: list[str], env: dict | None = None, cwd: Path | None = None, timeout: int = 5400) -> tuple[int, str]:
+    @staticmethod
+    def _stop(process) -> None:
+        """Ends a command and everything it started: they run in a session of their own, which is ended as a whole."""
         import os
+        import signal
+        for sign, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+            try:
+                os.killpg(process.pid, sign)
+            except (ProcessLookupError, PermissionError, AttributeError, TypeError, OSError):
+                try:
+                    process.terminate() if sign == signal.SIGTERM else process.kill()
+                except Exception:      # noqa: BLE001  it has ended by itself
+                    return
+            try:
+                process.wait(timeout=grace)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+
+    def run(self, argv: list[str], env: dict | None = None, cwd: Path | None = None, timeout: int = 5400) -> tuple[int, str]:
+        """Runs a command, shows its output as it comes, and holds it to a time limit by the clock.
+
+        The limit also ends a command that prints nothing: its output is read by a thread of its own, so that waiting
+        for a line never keeps the runner from looking at the clock. On the limit, and on Ctrl+C, the command and
+        whatever it started on this computer are stopped. What it began in Azure or Fabric goes on there; the step
+        looks at that before anything is tried again."""
+        import os
+        import queue
+        import threading
+        import time
         full = dict(os.environ)
         full.update(env or {})
         try:
             process = self._popen(argv, cwd=str(cwd or self.root), env=full, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                  stdin=subprocess.DEVNULL, text=True)
+                                  stdin=subprocess.DEVNULL, text=True, start_new_session=True)
         except FileNotFoundError as error:
             raise CloudError(f"{argv[0]} is not installed on this computer ({error}).") from None
+        rows: queue.Queue = queue.Queue()
+
+        def read() -> None:
+            try:
+                for row in process.stdout:
+                    rows.put(row)
+            finally:
+                rows.put(None)
+        threading.Thread(target=read, daemon=True).start()
         kept: list[str] = []
-        for row in process.stdout:
-            row = self._redact(row.rstrip("\n"))
-            kept.append(row)
-            del kept[:-60]
-            print(f"      | {row}", file=self._out, flush=True)
+        started = last = time.monotonic()
+        late = CloudError(f"{' '.join(argv[:3])} did not finish within {timeout} seconds. The runner stopped it and what it had "
+                          "started on this computer. Run the same apply again: it looks at what is there before it does anything.")
         try:
-            code = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            raise CloudError(f"{' '.join(argv[:3])} did not finish within {timeout} seconds.") from None
+            while True:
+                left = started + timeout - time.monotonic()
+                if left <= 0:
+                    self._stop(process)
+                    raise late
+                try:
+                    row = rows.get(timeout=min(left, self.QUIET_NOTE))
+                except queue.Empty:
+                    now = time.monotonic()
+                    if now - started < timeout:
+                        print(f"      . still running after {now - started:.0f} s; no line for {now - last:.0f} s (limit {timeout} s)",
+                              file=self._out, flush=True)
+                    continue
+                if row is None:
+                    break
+                last = time.monotonic()
+                row = self._redact(row.rstrip("\n"))
+                kept.append(row)
+                del kept[:-60]
+                print(f"      | {row}", file=self._out, flush=True)
+            try:
+                code = process.wait(timeout=max(1.0, started + timeout - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                self._stop(process)
+                raise late from None
+        except KeyboardInterrupt:
+            self._stop(process)
+            raise
         return code, "\n".join(kept)
 
     def which(self, tool: str) -> bool:
@@ -287,32 +382,70 @@ def operation(ctx, key: str, start):
 NEVER_RUN = ("12_", "13_")     # the notebooks that send commands to the edge. The runner has no way to start them.
 
 
+def _runs(instances: list) -> str:
+    return "; ".join(f"{one.get('id')} ({one.get('status')}, started {one.get('startTimeUtc') or 'not yet'})" for one in instances) or "none"
+
+
 def run_notebook(ctx, workspace_id: str, notebook_id: str, name: str, parameters: dict | None = None) -> dict:
     """Runs a notebook as a job and waits for it, within a limit. Returns the finished job.
 
-    One run for one step: a job that is recorded as started, or that Fabric shows as queued or running for this
-    notebook, is waited for. A second one is never started beside it.
+    One run for one step, and only a run the runner knows to be its own:
+
+    - Before the request leaves, the intent is written to the checkpoint. When Fabric answers, the run's ID replaces it.
+    - A run whose ID is in the checkpoint is asked about, also after it has finished: its result is taken, and no
+      second run is started.
+    - An intent without an ID means an earlier apply ended between the request and the answer. Whether Fabric took the
+      request is then not known, and Fabric offers no key by which a run could be matched to a request (Run On Demand
+      Item Job documents none). The notebooks write data, so the runner neither starts another run nor takes one it
+      finds: it lists the runs since, and a person says which it was (--adopt-job) or that there was none (--resubmit).
+    - A run in progress that the checkpoint knows nothing of is somebody's, not the runner's. It is not waited for as
+      if it were this step's.
     """
     if name.startswith(NEVER_RUN):
         raise CloudError(f"The runner does not run {name}: it sends a command to the edge. That stays with a person.")
     step, fabric = ctx.current, ctx.fabric
     base = f"workspaces/{workspace_id}/items/{notebook_id}/jobs/instances"
-    job = (ctx.state.pending(step).get("job") or {}).get("id")
+    pending = ctx.state.pending(step).get("job") or {}
+    job, adopt, again = pending.get("id"), ctx.offered.get("adopt", {}).get(step), step in ctx.offered.get("resubmit", ())
+    apply_again = "Then run the same apply again, with that option added."
     try:
+        if not job and adopt:
+            try:
+                known = fabric.get(f"{base}/{adopt}")
+            except FabricError as error:
+                if error.status != 404:
+                    raise
+                known = None
+            if not known:
+                raise Blocked(f"--adopt-job {step}={adopt}: Fabric has no run of {name} with that ID.",
+                              f"Runs it lists: {_runs(list(fabric.listing(base)))}")
+            job = adopt
+            ctx.say(f"      taking run {job} of {name} for this step, as you said")
+        elif not job and pending.get("intent") and not again:
+            since = [one for one in fabric.listing(base) if (one.get("startTimeUtc") or "9") >= pending.get("at", "")[:19]]
+            raise Blocked(f"An earlier apply set out to run {name} at {pending.get('at')} and ended before it learned whether Fabric "
+                          f"took the request. Runs of the notebook that Fabric lists since then: {_runs(since)}.",
+                          f"If one of them is that run:   --adopt-job {step}=ID   (the runner waits for it, or takes its result)\n"
+                          f"If the request never arrived:  --resubmit {step}\n{apply_again}\n"
+                          f"The runner does neither by itself: {name} writes data, and Fabric gives a request no key by which its "
+                          "run could be recognised.")
+        elif not job and not again:
+            active = [one for one in fabric.listing(base) if one.get("status") in ("NotStarted", "InProgress")]
+            if active:
+                raise Blocked(f"A run of {name} is under way in Fabric that this deployment has no record of: {_runs(active)}.",
+                              "Wait for it to end, or cancel it in Fabric (the notebook, Run history), and run the same apply again.\n"
+                              f"If it is a run an apply of yours started:   --adopt-job {step}={active[0].get('id')}\n"
+                              "The runner does not take a run it did not start for this step's.")
         if not job:
-            for instance in fabric.listing(base):
-                if instance.get("status") in ("NotStarted", "InProgress"):
-                    job = instance["id"]           # started by an apply that did not live to write it down
-                    ctx.say(f"      a run of {name} is already under way ({job}); waiting for that one")
-                    break
-        if not job:
+            # The intent first: if this process ends before Fabric's answer is written down, the next apply knows.
+            ctx.state.set_pending(step, "job", {"intent": "run", "notebook": name, "at": ctx.state.stamp()})
             body = {"executionData": {"parameters": parameters}} if parameters else None
             status, headers, _ = fabric.call("POST", f"{base}?jobType=RunNotebook", body)
             location = next((value for key, value in headers.items() if key.lower() == "location"), "")
             job = location.rstrip("/").rsplit("/", 1)[-1]
             if status != 202 or not job:
                 raise CloudError(f"Fabric answered {status} to the request to run {name}, without a job to ask about.")
-        ctx.state.set_pending(step, "job", {"id": job, "notebook": name})
+        ctx.state.set_pending(step, "job", {"id": job, "notebook": name, "at": pending.get("at") or ctx.state.stamp()})
         deadline = ctx.clock() + ctx.options.limits["job"]
         while True:
             instance = fabric.get(f"{base}/{job}") or {}

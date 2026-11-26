@@ -11,6 +11,8 @@
 #   bash infra/99-cleanup.sh --fabric-workspace  delete the whole Fabric workspace instead
 #   bash infra/99-cleanup.sh --all               --fabric, then --azure
 #
+#   --deployment SUFFIX   the deployment of tools/deploy.py to act on: its settings, .deploy/SUFFIX/demo.env.
+#                         Needed to remove anything when this folder holds more than one deployment.
 #   --yes        do not ask for confirmation
 #   --no-wait    start the deletion of the resource group and return at once
 #
@@ -32,28 +34,46 @@ usage() { sed -n '2,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" | grep '^#' | sed
 value() { if [[ "${1:-}" == "None" ]]; then printf ''; else printf '%s' "${1:-}"; fi; }
 
 # ---- arguments ---------------------------------------------------------------------------
-DO_AZURE=""; DO_FABRIC=""; DO_WORKSPACE=""; ASSUME_YES=""; NO_WAIT=""
-for arg in "$@"; do
-  case "$arg" in
+DO_AZURE=""; DO_FABRIC=""; DO_WORKSPACE=""; ASSUME_YES=""; NO_WAIT=""; DEPLOYMENT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --azure)            DO_AZURE=yes ;;
     --fabric)           DO_FABRIC=yes ;;
     --fabric-workspace) DO_WORKSPACE=yes ;;
     --all)              DO_AZURE=yes; DO_FABRIC=yes ;;
+    --deployment)       [[ $# -ge 2 ]] || die "--deployment takes the suffix of a deployment, for example --deployment 3x9."
+                        DEPLOYMENT="$2"; shift ;;
     --yes|-y)           ASSUME_YES=yes ;;
     --no-wait)          NO_WAIT=yes ;;
     -h|--help)          usage; exit 0 ;;
     *)                  usage; exit 2 ;;
   esac
+  shift
 done
 [[ -z "$DO_FABRIC" || -z "$DO_WORKSPACE" ]] || die "Give --fabric (the demo's items) or --fabric-workspace (the whole workspace), not both."
 
 # ---- settings ----------------------------------------------------------------------------
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -z "${ENV_FILE:-}" ]]; then
+# Which deployment: the one named with --deployment; else the file ENV_FILE names; else config/demo.env, which a
+# deployment by hand has; else the deployment tools/deploy.py is working on. Removing is never done on a guess: when
+# this folder holds several deployments of the runner and none was named, the script shows and removes nothing.
+NAMED=""
+if [[ -n "$DEPLOYMENT" ]]; then
+  [[ -z "${ENV_FILE:-}" ]] || die "Give --deployment or ENV_FILE, not both."
+  ENV_FILE="$HERE/../.deploy/$DEPLOYMENT/demo.env"; NAMED=yes
+  [[ -f "$ENV_FILE" ]] || die "This folder has no deployment $DEPLOYMENT: $ENV_FILE not found. python3 tools/deploy.py status lists them."
+elif [[ -n "${ENV_FILE:-}" ]]; then
+  NAMED=yes
+else
   ENV_FILE="$HERE/../config/demo.env"
-  # A deployment made by tools/deploy.py keeps its settings beside its checkpoint; .deploy/current names the one in use.
-  if [[ ! -f "$ENV_FILE" && -f "$HERE/../.deploy/current" ]]; then
+  if [[ -f "$ENV_FILE" ]]; then
+    NAMED=yes
+  elif [[ -f "$HERE/../.deploy/current" ]]; then
     ENV_FILE="$HERE/../.deploy/$(tr -d '[:space:]' < "$HERE/../.deploy/current")/demo.env"
+    SEVERAL="$(find "$HERE/../.deploy" -mindepth 2 -maxdepth 2 -name demo.env 2>/dev/null | grep -c . || true)"
+    if [[ "${SEVERAL:-0}" -gt 1 && -n "$DO_AZURE$DO_FABRIC$DO_WORKSPACE" ]]; then
+      die "This folder holds $SEVERAL deployments. Name the one to remove: --deployment SUFFIX (python3 tools/deploy.py status lists them). Nothing was removed."
+    fi
   fi
 fi
 if [[ -f "$ENV_FILE" ]]; then
@@ -99,6 +119,36 @@ if [[ "$LOGIN_TYPE" != "user" && -z "${ALLOW_NON_USER_LOGIN:-}" ]]; then
   die "The Azure CLI is signed in as a $LOGIN_TYPE. Sign in as yourself: az login"
 fi
 az account set --subscription "$SUBSCRIPTION_ID"
+info "Acting on: resource group $RESOURCE_GROUP, workspace $FABRIC_WORKSPACE_NAME, subscription $SUBSCRIPTION_ID"
+info "Settings:  ${ENV_FILE}$([[ -n "$NAMED" ]] || echo "   (the current deployment of this folder; name another with --deployment SUFFIX)")"
+
+# The Fabric capacity, of which there are two kinds, and they end differently.
+#   One this deployment had made (tools/deploy.py, on request) is a resource of the demo's group: it is deleted with
+#   the group, and that ends its billing.
+#   One that existed before is shared: it is not in the group, no option of this script touches it, and it goes on
+#   billing as before.
+OWN_CAPACITY=""; CAPACITY_DELETED=""
+own_capacity() {      # the capacities in the resource group, from the list of its resources ($1), one name per line
+  grep -E "^Microsoft\.Fabric/capacities"$'\t' <<< "$1" | cut -f2 || true
+}
+shared_capacity() {   # what is known of a capacity outside the group: its ID from the settings, or nothing
+  if [[ -z "${FABRIC_CAPACITY_CREATE_SKU:-}" ]]; then echo "${FABRIC_CAPACITY_ID:-}"; fi
+}
+describe_capacity() { # describe_capacity RESOURCES: the two kinds, for the preview
+  local name shared
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    info "Fabric capacity $name: made for this deployment, in the resource group."
+    info "  --azure would delete it with the group, which ends its billing."
+  done <<< "$(own_capacity "$1")"
+  shared="$(shared_capacity)"
+  if [[ -n "$shared" ]]; then
+    info "Fabric capacity $shared: existed before this deployment and is shared."
+    info "  It is not in the resource group. No option of this script touches it; it is retained and goes on billing as before."
+  elif [[ -z "$(own_capacity "$1")" ]]; then
+    info "Fabric capacity: the workspace's capacity is not in the resource group and is retained; no option of this script touches it."
+  fi
+}
 
 # confirm PROMPT EXPECTED: asks the user to type EXPECTED, unless --yes was given.
 confirm() {
@@ -181,6 +231,7 @@ describe_azure() {
     info "Role assignments of the VM identity:"
     while IFS=$'\t' read -r _ role scope; do info "  $role on $scope"; done <<< "$roles"
   fi
+  describe_capacity "$resources"
   info "--azure would: uninstall Azure IoT Operations (starting the VM first if it is stopped), remove these"
   info "role assignments, and delete the resource group with everything in it."
 }
@@ -292,8 +343,13 @@ azure_cleanup() {
     die "Resource group $RESOURCE_GROUP holds $(grep -c . <<< "$resources") resources, but neither the VM $VM_NAME, the cluster $CLUSTER_NAME nor the demo's storage account. It does not look like this demo's group; not deleting it. Check RESOURCE_GROUP in $ENV_FILE."
   fi
   info "$(grep -c . <<< "$resources" || true) resources will be deleted, among them:"
-  grep -E "virtualMachines|connectedClusters|IoTOperations/instances|storageAccounts|schemaRegistries|DeviceRegistry/namespaces|customLocations" <<< "$resources" \
+  grep -E "virtualMachines|connectedClusters|IoTOperations/instances|storageAccounts|schemaRegistries|DeviceRegistry/namespaces|customLocations|Fabric/capacities" <<< "$resources" \
     | while IFS=$'\t' read -r type name; do info "  $name  ($type)"; done || true
+  OWN_CAPACITY="$(own_capacity "$resources" | paste -sd, -)"
+  if [[ -n "$OWN_CAPACITY" ]]; then
+    info "Among them the Fabric capacity $OWN_CAPACITY, which this deployment had made: it is deleted with the group."
+    info "Delete the workspace first (--fabric-workspace, or --all), or its items are left on a capacity that is gone."
+  fi
   confirm "Type the name of the resource group to delete it with everything in it" "$RESOURCE_GROUP"
 
   read_identities
@@ -304,6 +360,7 @@ azure_cleanup() {
   log "Deleting resource group $RESOURCE_GROUP"
   if [[ -n "$NO_WAIT" ]]; then
     az group delete --name "$RESOURCE_GROUP" --yes --no-wait
+    CAPACITY_DELETED="$OWN_CAPACITY"
     info "Deletion started. Check later with: az group exists --name $RESOURCE_GROUP"
     return 0
   fi
@@ -319,6 +376,7 @@ azure_cleanup() {
     warn "The resource group still exists."
     LEFT_TO_DO+=("Check the resource group $RESOURCE_GROUP in the Azure portal.")
   else
+    CAPACITY_DELETED="$OWN_CAPACITY"
     info "Deleted. Nothing of this deployment is left in Azure."
   fi
 }
@@ -581,7 +639,21 @@ if [[ ${#LEFT_TO_DO[@]} -gt 0 ]]; then
   info "Left for you to do:"
   for item in "${LEFT_TO_DO[@]}"; do info "  - $item"; done
 fi
-info "Not touched: files on this machine, your SSH key, resource provider registrations, the Fabric capacity."
-info "Before you deploy again, in config/demo.env: keep CUSTOM_LOCATIONS_OID (it belongs to the tenant);"
-info "empty EVENTSTREAM_BOOTSTRAP_SERVER and EVENTSTREAM_TOPIC (they belonged to the deleted eventstream)."
+info "Not touched: files on this machine, your SSH key, resource provider registrations."
+if [[ -n "$CAPACITY_DELETED" ]]; then
+  info "Fabric capacity $CAPACITY_DELETED: it was this deployment's own, in the resource group, and is deleted with it. Its billing ends with it."
+elif [[ -n "$OWN_CAPACITY" ]]; then
+  info "Fabric capacity $OWN_CAPACITY: it is this deployment's own and is still there, because the resource group was not deleted. It goes on billing until the group is gone."
+fi
+if [[ -n "$(shared_capacity)" ]]; then
+  info "Fabric capacity $(shared_capacity): retained. It existed before this deployment, is shared, and goes on billing as before."
+elif [[ -z "$OWN_CAPACITY" ]]; then
+  info "Fabric capacity: retained. The capacity the workspace ran on is not in the resource group and was not touched."
+fi
+if [[ "$ENV_FILE" == *"/.deploy/"* ]]; then
+  info "The next deployment from this folder: python3 tools/deploy.py plan --new   (new names; this one's record stays in .deploy/)."
+else
+  info "Before you deploy again, in config/demo.env: keep CUSTOM_LOCATIONS_OID (it belongs to the tenant);"
+  info "empty EVENTSTREAM_BOOTSTRAP_SERVER and EVENTSTREAM_TOPIC (they belonged to the deleted eventstream)."
+fi
 if [[ ${#LEFT_TO_DO[@]} -gt 0 ]]; then exit 3; fi

@@ -19,7 +19,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP="$HERE/windfarm-twin"
+# The app's folder: APP_DIR when it is given; else the one beside this script, which a deployment by hand has; else the
+# folder of the deployment tools/deploy.py is working on, .deploy/<suffix>/app/windfarm-twin.
+APP="${APP_DIR:-$HERE/windfarm-twin}"
+if [[ -z "${APP_DIR:-}" && ! -d "$APP" && -f "$HERE/../.deploy/current" ]]; then
+  APP="$HERE/../.deploy/$(tr -d '[:space:]' < "$HERE/../.deploy/current")/app/windfarm-twin"
+fi
 NAME="${PRINCIPAL_NAME:-windfarm-twin-eventhouse-reader}"
 # The workspace's name: FABRIC_WORKSPACE_NAME when it is given, else what the settings file says (the one ENV_FILE names,
 # else config/demo.env, else the settings of the deployment tools/deploy.py is working on), else the name of the guides.

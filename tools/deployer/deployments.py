@@ -9,8 +9,12 @@ checkpoint:
     .deploy/current                the suffix of the deployment that commands work on
 
 So one folder can hold many deployments, one after the other or side by side, in one tenant or in several. A new one
-is started with `plan --new`; `--deployment SUFFIX` goes back to an earlier one. The scripts the runner starts are
-handed the settings file by name (ENV_FILE); a script started by hand finds it through .deploy/current.
+is started with `plan --new`; `--deployment SUFFIX` names one. An apply always names its deployment: it does not go
+by .deploy/current, which another terminal may have moved. The scripts the runner starts are handed the settings
+file by name (ENV_FILE); a script started by hand finds it through .deploy/current.
+
+A deployment belongs to one subscription, written into its settings when it is started: the one --subscription names,
+or the one the Azure CLI is on at that moment. From then on every call of the runner names that subscription itself.
 
 config/demo.env belongs to a deployment made by hand, from the guides. The runner does not use it.
 """
@@ -20,10 +24,6 @@ from pathlib import Path
 
 from . import names
 from .core import Redactor, Refused, State
-
-# What a person has settled once and would settle the same way again: taken over into the next deployment in the
-# same subscription. Names are never taken over.
-PREFERENCES = ("LOCATION", "VM_SIZE", "VM_AUTO_SHUTDOWN_UTC", "CUSTOM_LOCATIONS_OID")
 
 
 def home(root: Path) -> Path:
@@ -104,77 +104,62 @@ def adopt_old_settings(root: Path, say) -> None:
         "config/ holds no settings of the runner.")
 
 
-def start(root: Path, account: dict, say, like: str = "") -> str:
-    """A new deployment: a suffix chosen now, the names made from it, its settings written. Changes nothing in Azure or Fabric."""
+def start(root: Path, account: dict, say) -> str:
+    """A new deployment: a suffix chosen now, the names made from it, its settings written. Changes nothing in Azure or Fabric.
+
+    No region and no capacity are written: those are choices, settled by an option, the profile of the subscription,
+    what the cloud shows, or a question (resolve.py). The template's region is the guides' and is not taken over."""
     taken = {entry.name for entry in home(root).glob("*")}
     suffix = names.new_suffix()
     while suffix in taken:
         suffix = names.new_suffix()
-    values = {**names.generated(suffix), "SUBSCRIPTION_ID": account["id"], "FABRIC_CAPACITY_ID": ""}
-    carried = []
-    if like:
-        before = names.read_env(env_of(root, like))
-        if before.get("SUBSCRIPTION_ID") == account["id"]:
-            carried = [key for key in PREFERENCES if before.get(key)]
-            values.update({key: before[key] for key in carried})
+    values = {**names.generated(suffix), "SUBSCRIPTION_ID": account["id"], "FABRIC_CAPACITY_ID": "", "LOCATION": ""}
     env_of(root, suffix).parent.mkdir(parents=True, exist_ok=True)
     names.write_env(env_of(root, suffix), values, template=Path(root) / "config" / "demo.env.example")
     head(env_of(root, suffix), suffix)
     set_current(root, suffix)
-    say(f"New deployment {suffix}: every name ends in -{suffix}, for subscription {account.get('name')}. Its settings are in "
-        f"{label(root, suffix)}. Nothing was changed in Azure or Fabric."
-        + (f" Taken over from deployment {like}: {', '.join(carried)}." if carried else ""))
+    say(f"New deployment {suffix}: every name ends in -{suffix}, for subscription {account.get('name')} ({account['id']}). Its "
+        f"settings are in {label(root, suffix)}. Nothing was changed in Azure or Fabric.")
     return suffix
 
 
-def choose(args, root: Path, az, say, ask) -> str:
-    """The deployment this command works on. Starts one when the folder has none, or when asked to."""
+def signed_in(az, subscription: str = "") -> dict:
+    """The subscription a new deployment is for: the one named, or the one the Azure CLI is on now."""
+    return az.json("account", "show", *(("--subscription", subscription) if subscription else ()))
+
+
+def choose(args, root: Path, az, say) -> str:
+    """The deployment this command works on. Starts one when the folder has none, or when asked to. Asks nothing."""
     root = Path(root)
     adopt_old_settings(root, say)
     have, now = listed(root), current(root)
     reading_only = args.mode in ("apply", "status")
+    known = "; ".join(describe(root, entry) for entry in have)
     if args.new and args.deployment:
         raise Refused("--new starts a deployment and --deployment names one that exists. Give one of them.")
     if args.new:
         if reading_only:
             raise Refused("--new goes with preflight or plan: a deployment starts with a plan.")
-        return start(root, az.json("account", "show"), say, like=now)
+        return start(root, signed_in(az, args.subscription), say)
+    if args.mode == "apply" and not args.deployment:
+        # .deploy/current can be moved by a plan in another terminal between a plan and its apply.
+        raise Refused("apply names its deployment: add --deployment SUFFIX, as in the line the plan printed. "
+                      + ("This folder has: " + known if have else "This folder has no deployment yet: run plan first."))
     if args.deployment:
         if args.deployment not in have:
-            raise Refused(f"This folder has no deployment {args.deployment}. "
-                          + ("It has: " + "; ".join(describe(root, entry) for entry in have) if have else "It has none yet."))
-        set_current(root, args.deployment)
+            raise Refused(f"This folder has no deployment {args.deployment}. " + ("It has: " + known if have else "It has none yet."))
+        if args.mode != "apply":
+            set_current(root, args.deployment)
         return args.deployment
     if not now and len(have) == 1:
         now = have[0]
         set_current(root, now)
     if not now:
         if have:
-            raise Refused("This folder holds several deployments and none is the current one. Name one with --deployment: "
-                          + "; ".join(describe(root, entry) for entry in have))
+            raise Refused("This folder holds several deployments and none is the current one. Name one with --deployment: " + known)
         if reading_only:
             raise Refused("This folder has no deployment yet. Run plan first: it starts one, with names of its own.")
-        return start(root, az.json("account", "show"), say)
-    if reading_only:
-        return now
-    # Two reasons to start another deployment instead of going on with this one. Asked in a terminal; otherwise said.
-    account = az.json("account", "show")
-    settings = names.read_env(env_of(root, now))
-    elsewhere = settings.get("SUBSCRIPTION_ID") and settings["SUBSCRIPTION_ID"] != account.get("id")
-    if elsewhere:
-        said = (f"Deployment {now} is in subscription {settings['SUBSCRIPTION_ID']}. The Azure CLI is on "
-                f"{account.get('name')} ({account.get('id')}).")
-        if ask:
-            ask.say(said)
-            if ask.yes("Start a new deployment here, with names of its own?", default=True):
-                return start(root, account, say)
-        raise Refused(f"{said} Nothing was changed. Sign in to the subscription of deployment {now}, or start a deployment "
-                      "here: python3 tools/deploy.py plan --new")
-    group_id = made(root, now).get("resource_group_id")
-    if group_id and ask and az.maybe("group", "show", "--name", settings.get("RESOURCE_GROUP", "")) is None:
-        ask.say(f"Deployment {now} made the resource group {settings.get('RESOURCE_GROUP')}, and that group no longer exists.")
-        if ask.yes("Start a new deployment, with new names?", default=True):
-            return start(root, account, say, like=now)
+        return start(root, signed_in(az, args.subscription), say)
     return now
 
 

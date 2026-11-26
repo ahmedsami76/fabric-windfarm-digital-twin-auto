@@ -90,6 +90,11 @@ class State:
         # True while another process applies to this deployment: this run then reads the checkpoint and writes nothing
         # to it, because its copy is older than the one the apply keeps writing.
         self.frozen = False
+        self.reload()
+
+    def reload(self) -> None:
+        """Reads the checkpoint from disk again. An apply does this once it holds the lock: what was read before the
+        lock may be older than what another apply wrote in the meantime."""
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -262,6 +267,8 @@ class Options:
 class Context:
     """What a step is handed: the settings, the adapters, the checkpoint, and a way to speak."""
 
+    offered: dict = {"confirmed": {}, "acknowledged": []}       # replaced per apply; see confirmed()
+
     def __init__(self, *, root: Path, cfg: dict, env_file: Path, state: State, options: Options, redact: Redactor,
                  az=None, fabric=None, kusto=None, shell=None, onelake=None, out=None,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
@@ -295,7 +302,12 @@ class Context:
         return self.cache[key]
 
     def confirmed(self, step_id: str) -> dict | None:
-        return self.state.data["confirmed"].get(step_id)
+        """A confirmation in the checkpoint, or one offered with this apply. An offered one is written to the checkpoint
+        only once the plan and its target have been accepted (cli.run_apply)."""
+        return self.state.data["confirmed"].get(step_id) or self.offered["confirmed"].get(step_id)
+
+    def acknowledged(self, thing_id: str) -> bool:
+        return thing_id in self.state.data["acknowledged"] or thing_id in self.offered["acknowledged"]
 
     def target(self, key: str, default=None):
         return self.state.data["target"].get(key, default)
@@ -405,31 +417,122 @@ def make_plan(ctx: Context, steps: list[Step]) -> list[Line]:
     return [decide(ctx, step, look(ctx, step)) for step in steps]
 
 
+SKIPPED_IN_A_FOLDER = ("__pycache__", "node_modules", ".pytest_cache", ".git")
+
+
 def file_digest(root: Path, relative: str) -> str:
+    """The content of a file, or of every file under a folder with its place in it, as a short digest."""
     path = Path(root) / relative
     if not path.exists():
         return "missing"
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    whole = hashlib.sha256()
+    for item in sorted(entry for entry in path.rglob("*") if entry.is_file() and not set(entry.parts) & set(SKIPPED_IN_A_FOLDER)):
+        whole.update(item.relative_to(path).as_posix().encode("utf-8") + b"\0" + hashlib.sha256(item.read_bytes()).digest())
+    return whole.hexdigest()[:16]
 
 
-TARGET_KEYS = ("tenant_id", "subscription_id", "resource_group", "location", "workspace_name", "workspace_chosen", "capacity_id",
-               "suffix")
+# What a script reads or ships besides itself. A change in one of these changes what the step does, so it is part of
+# what an approval covers, like the script. A key that ends in "/" stands for every input under that folder.
+TRANSITIVE = {
+    "infra/": ("config/load-env.sh",),
+    "app/": ("config/load-env.sh",),
+    "edge/scripts/": ("config/load-env.sh", "infra/vm.sh"),
+    "edge/scripts/05-deploy-simulator.sh": ("simulator/Dockerfile", "simulator/pyproject.toml", "simulator/requirements.txt",
+                                            "simulator/windfarm_sim", "edge/k8s", "data/reference"),
+    "edge/scripts/07-sync-reference-data.sh": ("edge/reference-sync", "data/reference", "data/sop"),
+    "app/create-app.sh": ("app/overlay",),
+}
 
 
-def plan_hash(ctx: Context, lines: list[Line], target: dict) -> str:
-    """What an approval covers: the target, the options, every step with the files it uses, and any drift.
+def all_inputs(inputs: tuple) -> list[str]:
+    """A step's inputs with what they read or ship, each once, in a fixed order."""
+    found = list(inputs)
+    for name in inputs:
+        for key, more in TRANSITIVE.items():
+            if name == key or (key.endswith("/") and name.startswith(key)):
+                found.extend(more)
+    return sorted(set(found))
 
-    Whether a step is done already is not part of it, so the same approval resumes an interrupted apply.
-    Drift is part of it: when the cloud no longer matches the checkpoint, the old approval is void.
-    """
-    body = {
-        "target": {key: target.get(key) for key in TARGET_KEYS},
-        "up_to": ctx.options.up_to, "phase5a": ctx.options.phase5a,
-        "granted": sorted(ctx.options.granted), "regenerate_history": ctx.options.regenerate_history,
-        "steps": [[line.step.id, [file_digest(ctx.root, name) for name in line.step.inputs]] for line in lines],
+
+# Settings the runner itself writes while it applies. Expected progress of an apply is not a change of the plan.
+WRITTEN_BY_APPLY = ("EVENTSTREAM_BOOTSTRAP_SERVER", "EVENTSTREAM_TOPIC")
+PUBLIC_ADDRESS = "the public address of the computer that runs the apply, as a /32"
+
+
+def plan_record(ctx: Context, lines: list[Line], target: dict) -> dict:
+    """What an approval covers, written out: who, where, with which choices and approvals, and every file that
+    changes what a step does. It is saved beside the checkpoint, so a refused apply can say what differs.
+
+    Whether a step is done already is not part of it, so the same approval resumes an interrupted apply. Drift is
+    part of it: when the cloud no longer matches the checkpoint, the old approval is void. So is everything a person
+    could change between plan and apply: a setting, a file, the sign-in, an option."""
+    cfg = ctx.cfg
+    making = bool(cfg.get("FABRIC_CAPACITY_CREATE_SKU"))
+    apart = set(WRITTEN_BY_APPLY) | ({"FABRIC_CAPACITY_ID"} if making else set())
+    return {
+        "format": 2,
+        "deployment": target.get("suffix"), "operator": target.get("user"),
+        "tenant_id": target.get("tenant_id"), "subscription_id": target.get("subscription_id"),
+        "resource_group": target.get("resource_group"),
+        "regions": {"edge": cfg.get("LOCATION", ""), "new_capacity": cfg.get("FABRIC_CAPACITY_REGION", "") if making else ""},
+        "workspace": {"name": target.get("workspace_name"), "existing_id": target.get("workspace_chosen", "")},
+        "capacity": target.get("capacity_id"),
+        "vm_sizes": cfg.get("VM_SIZE", "").split(),
+        "ssh_scope": cfg.get("SSH_SOURCE_CIDR") or PUBLIC_ADDRESS,
+        "role_grants": [[line.step.id, line.step.writes] for line in lines if "roles" in line.step.needs],
+        "approvals_and_opt_ins": sorted(ctx.options.granted), "up_to": ctx.options.up_to, "phase5a": ctx.options.phase5a,
+        "regenerate_history": ctx.options.regenerate_history,
+        "settings": {key: cfg[key] for key in sorted(cfg) if key not in apart},
+        "runner": file_digest(ctx.root, "tools/deployer"),
+        "steps": [[line.step.id, {name: file_digest(ctx.root, name) for name in all_inputs(line.step.inputs)}] for line in lines],
         "drift": sorted(line.step.id for line in lines if line.decision == "drift"),
     }
-    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
+def plan_digest(record: dict) -> str:
+    return hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
+def plan_file(ctx: Context, digest: str) -> Path:
+    return ctx.state.folder / "plans" / f"{digest}.json"
+
+
+def save_plan(ctx: Context, record: dict, digest: str) -> None:
+    """The plan as it was shown, kept without secrets beside the checkpoint. Written in one move."""
+    if ctx.state.frozen:
+        return
+    path = plan_file(ctx, digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = ctx.redact(json.dumps({"plan": digest, "made_at": ctx.state.stamp(), "covers": record}, indent=2, sort_keys=True)) + "\n"
+    temporary = Path(str(path) + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _flat(value, prefix: str = "") -> dict:
+    if isinstance(value, dict):
+        return {key: text for name, part in value.items() for key, text in _flat(part, f"{prefix}{name}.").items()}
+    if isinstance(value, list) and all(isinstance(part, list) and len(part) == 2 and isinstance(part[0], str) for part in value) and value:
+        return {key: text for name, part in value for key, text in _flat(part, f"{prefix}{name}.").items()}
+    return {prefix.rstrip("."): json.dumps(value, sort_keys=True)}
+
+
+def plan_differences(ctx: Context, approved: str, now: dict, most: int = 8) -> list[str]:
+    """What differs between the plan that was approved and what an apply would do now, in words. Empty when the
+    approved plan is not on this computer."""
+    path = plan_file(ctx, approved)
+    if not path.is_file():
+        return []
+    try:
+        before = _flat(json.loads(path.read_text(encoding="utf-8")).get("covers") or {})
+    except ValueError:
+        return []
+    after = _flat(now)
+    rows = [f"{key}: was {before.get(key, 'not there')}, is now {after.get(key, 'not there')}"
+            for key in sorted(set(before) | set(after)) if before.get(key) != after.get(key)]
+    return [ctx.redact(row)[:300] for row in rows[:most]] + ([f"and {len(rows) - most} more"] if len(rows) > most else [])
 
 
 WORDS = {"done": "done", "confirmed": "confirmed by you", "unchecked": "NOT CHECKED", "run": "will run",

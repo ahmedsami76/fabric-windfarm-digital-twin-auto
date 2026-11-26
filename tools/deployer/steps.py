@@ -178,7 +178,10 @@ def confirmation(ctx, step_id: str, what: str) -> Probe:
 
 
 def script(ctx, *argv: str, env: dict | None = None) -> str:
-    return ctx.shell.must(["bash", *argv], env={"ENV_FILE": str(ctx.env_file), **(env or {})})
+    # The settings by name, and the subscription by name: a script started by the runner does not go by .deploy/current
+    # or by the Azure CLI's active subscription, either of which another terminal can change while it runs.
+    return ctx.shell.must(["bash", *argv], env={"ENV_FILE": str(ctx.env_file), "AZ_SUBSCRIPTION_PIN": ctx.cfg.get("SUBSCRIPTION_ID", ""),
+                                                **(env or {})})
 
 
 def on_vm(ctx, *argv: str) -> str:
@@ -265,7 +268,9 @@ def pre_rights(ctx) -> Probe:
     needed = ("Needed: Contributor or Owner on the subscription to create the resource group, and for the role steps a role "
               "that assigns roles")
     try:
-        myself = ctx.az.json("ad", "signed-in-user", "show", "--query", "id", timeout=QUICK)
+        myself = (ctx.az.graph("me?$select=id") or {}).get("id")
+        if not myself:
+            raise CloudError("Microsoft Graph did not say who is signed in")
         # at the subscription or above it, and through the groups you are in: assignedTo() follows groups
         held = role_assignments(ctx, f"/subscriptions/{me['id']}", f"atScope() and assignedTo('{myself}')")
     except CloudError as error:
@@ -290,6 +295,11 @@ def pre_rights(ctx) -> Probe:
 
 def pre_region(ctx) -> Probe:
     location = ctx.cfg.get("LOCATION", "")
+    if not location:
+        return blocked("No Azure region has been chosen for the edge: the VM and Azure IoT Operations. The runner chooses no "
+                       "geography by itself, and the settings, the profile of the subscription and the options of this run name none.",
+                       f"python3 tools/deploy.py plan --edge-region REGION     one of: {', '.join(IOT_OPERATIONS_REGIONS)}\n"
+                       "Add --save-profile to have the next deployments in this subscription take the same region without being asked.")
     if location not in IOT_OPERATIONS_REGIONS:
         return blocked(f"LOCATION is {location}. Azure IoT Operations supports Arc clusters in: {', '.join(IOT_OPERATIONS_REGIONS)}.",
                        f"Set LOCATION in {ctx.env_label} to one of these.")
@@ -348,6 +358,8 @@ def pre_quota(ctx) -> Probe:
     location, sizes = ctx.cfg.get("LOCATION", ""), ctx.cfg.get("VM_SIZE", "").split()
     if ctx.state.step("p1.edge_vm").get("status") == "complete":
         return done("the VM exists")
+    if not location:
+        return blocked("The quota is a region's: no region has been chosen for the edge yet.", "See pre.region.")
     told = vm_family(sizes[0]) if sizes else None
     if not told:
         return unverified(f"the size family of {sizes[0] if sizes else 'nothing'} cannot be told from its name")
@@ -389,7 +401,7 @@ def pre_custom_locations(ctx) -> Probe:
     value = ctx.cfg.get("CUSTOM_LOCATIONS_OID", "")
     if re.fullmatch(r"[0-9a-fA-F-]{36}", value) and value.lower() != CUSTOM_LOCATIONS_APP:
         return done("Custom Locations object ID is in the settings")
-    found = ctx.az.maybe("ad", "sp", "show", "--id", CUSTOM_LOCATIONS_APP, "--query", "id")
+    found = (ctx.az.graph(f"servicePrincipals(appId='{CUSTOM_LOCATIONS_APP}')?$select=id") or {}).get("id")
     if not found:
         return blocked("The object ID of the Custom Locations service in your tenant is not in the settings, and the Azure CLI "
                        "could not read it. Reading it needs a person who may read service principals in Microsoft Entra ID.",
@@ -690,9 +702,11 @@ def some(texts: list, most: int = 4) -> str:
 
 def capacity_choices(ctx) -> str:
     """What a person needs to choose a capacity: what Fabric lists for them, with what each can hold, and where their workspaces run."""
-    rows = ["Run plan in a terminal: it lists them and asks, and can make a new one if you say so. Or put the ID of a capacity "
-            f"that can hold the demo into FABRIC_CAPACITY_ID in {ctx.env_label}. The runner does not choose between "
-            "capacities by itself.",
+    rows = ["The runner takes a capacity by itself only when exactly one that can hold the demo is in sight. Name the one to use:",
+            "  python3 tools/deploy.py plan --capacity ID",
+            "or have one made for this deployment, which costs money for as long as it runs:",
+            "  python3 tools/deploy.py plan --new-capacity --capacity-region REGION --approve-capacity-creation",
+            "In a terminal, plan also asks. Add --save-profile to keep an existing capacity for the next deployments here.",
             "Capacities Fabric lists for you (those you administer or contribute to):"]
     for entry in capacities(ctx):
         kind = capacity_kind(entry.get("sku"))
@@ -791,7 +805,7 @@ def p1_resource_group(ctx) -> Probe:
     strangers = []
     for resource in ctx.az.json("resource", "list", "--resource-group", group_name, "--query", "[].{id:id, type:type}") or []:
         provider = resource.get("type", "").split("/")[0].lower()
-        if provider not in RG_PROVIDERS and resource["id"] not in ctx.state.data["acknowledged"]:
+        if provider not in RG_PROVIDERS and not ctx.acknowledged(resource["id"]):
             strangers.append(f"{resource['type']}  {resource['id']}")
     if strangers:
         return blocked(f"{group_name} holds resources of a kind this demo does not create:\n  " + "\n  ".join(strangers),
@@ -969,7 +983,7 @@ def p1_workspace(ctx) -> Probe:
         return blocked(f"The workspace is on capacity {mine.get('capacityId')}, not on the one in the settings ({wanted}).",
                        "Someone moved it. Move it back, or set FABRIC_CAPACITY_ID to where it is now and plan again.")
     strangers = [f"{entry.get('type')} {entry.get('displayName')}  ({entry.get('id')})" for entry in items(ctx)
-                 if not expected_item(ctx, entry) and entry.get("id") not in ctx.state.data["acknowledged"]]
+                 if not expected_item(ctx, entry) and not ctx.acknowledged(entry.get("id"))]
     if strangers:
         return blocked(f"{workspace_name} holds items this demo does not create:\n  " + "\n  ".join(strangers),
                        "Move or delete them. If one belongs here after all, name it: apply ... --acknowledge <its item ID>")
@@ -1483,7 +1497,7 @@ def phase1() -> list[Step]:
              basis="az account show"),
         Step("pre.extensions", "preflight", "Azure CLI extension on this computer", pre_extensions, basis="az extension list"),
         Step("pre.rights", "preflight", "Your roles on the subscription", PRE_RIGHTS,
-             basis="Role Assignments - List For Scope, filter atScope() and assignedTo(); az ad signed-in-user show"),
+             basis="Role Assignments - List For Scope, filter atScope() and assignedTo(); Microsoft Graph, GET /me"),
         Step("pre.providers", "preflight", "Resource providers registered", PRE_PROVIDERS, basis="az provider show",
              manual="Register the providers the plan names."),
         Step("pre.region", "preflight", "Region and VM size", PRE_REGION,

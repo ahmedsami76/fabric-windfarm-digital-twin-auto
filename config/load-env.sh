@@ -22,6 +22,20 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Under the deployment runner every call of the Azure CLI names the deployment's subscription itself, and the CLI's
+# active subscription is neither changed nor relied on: another terminal can change it while a script runs.
+# By hand nothing changes: the scripts select the subscription of the settings with `az account set`, as before.
+# `az ad`, `az extension`, `az config`, `az version`, `az login` and `az logout` take no --subscription (Azure CLI 2.93.0).
+if [[ -n "${AZ_SUBSCRIPTION_PIN:-}" ]]; then
+  az() {
+    case "${1:-}" in
+      ad|extension|config|version|login|logout) command az "$@" ;;
+      account) if [[ "${2:-}" == "set" ]]; then return 0; fi; command az "$@" --subscription "$AZ_SUBSCRIPTION_PIN" ;;
+      *) command az "$@" --subscription "$AZ_SUBSCRIPTION_PIN" ;;
+    esac
+  }
+fi
+
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33mWARNING: %s\033[0m\n' "$*" >&2; }

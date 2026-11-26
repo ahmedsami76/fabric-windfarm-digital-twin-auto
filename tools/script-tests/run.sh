@@ -89,6 +89,30 @@ echo k3f > "$POINTED/.deploy/current"; reset
 run env -u ENV_FILE bash "$POINTED"/infra/99-cleanup.sh
 check "clean-up without ENV_FILE and without config/demo.env: reports on the current deployment" 0 "rg-windfarm-edge-k3f" "!rg-by-hand"
 
+# Several deployments in one folder: nothing is removed on a guess, and --deployment names the one.
+mkdir -p "$POINTED/.deploy/q7m"; sed -e 's/k3f/q7m/g' "$POINTED/.deploy/k3f/demo.env" > "$POINTED/.deploy/q7m/demo.env"; reset; touch "$STUB_DIR/rg"
+run env -u ENV_FILE bash "$POINTED"/infra/99-cleanup.sh --azure --yes
+check "clean-up, two deployments and none named: refuses to remove, and says how to name one" 1 "holds 2 deployments" "--deployment SUFFIX" "Nothing was removed" "!group delete"
+run env -u ENV_FILE bash "$POINTED"/infra/99-cleanup.sh
+check "clean-up, two deployments and none named: the preview shows the current one and says so" 0 "Acting on: resource group rg-windfarm-edge-k3f" "the current deployment of this folder"
+run env -u ENV_FILE bash "$POINTED"/infra/99-cleanup.sh --deployment q7m
+check "clean-up --deployment: acts on that deployment's settings" 0 "Acting on: resource group rg-windfarm-edge-q7m" ".deploy/q7m/demo.env" "!current deployment of this folder"
+run env -u ENV_FILE bash "$POINTED"/infra/99-cleanup.sh --deployment zzz --azure
+check "clean-up --deployment, a suffix the folder does not have: stops" 1 "has no deployment zzz" "!group delete"
+rm -rf "$POINTED/.deploy/q7m"
+
+# Under the deployment runner every call of the Azure CLI names the subscription itself (config/load-env.sh).
+reset; touch "$STUB_DIR"/port_open
+run env AZ_SUBSCRIPTION_PIN=11111111-pin bash "$REPO"/infra/vm.sh status
+OUT="$OUT
+pinned:$(grep -c -- '--subscription 11111111-pin' "$STUB_DIR/calls.log") set:$(grep -c '^az account set' "$STUB_DIR/calls.log") bare:$(grep '^az ' "$STUB_DIR/calls.log" | grep -v -E '^az (extension|ad|config|version|login) ' | grep -c -v -- '--subscription 11111111-pin')"
+check "scripts under the runner: every az call names the pinned subscription, and the active one is not changed" 0 "pinned:[1-9]" "set:0" "bare:0"
+reset; touch "$STUB_DIR"/port_open
+run bash "$REPO"/infra/vm.sh status
+OUT="$OUT
+pinned:$(grep -c -- '--subscription 11111111-pin' "$STUB_DIR/calls.log") set:$(grep -c '^az account set' "$STUB_DIR/calls.log")"
+check "scripts by hand: the subscription of the settings is selected as before" 0 "pinned:0" "set:[1-9]"
+
 reset; HOME_BACKUP="$HOME"; export HOME="$STUB_DIR/fakehome"; mkdir -p "$HOME"
 run bash "$REPO"/infra/vm.sh reset-key;                 check "reset-key without a key: creates one and installs it" 0 "ssh-keygen" "vm user update .*--username azureuser --ssh-key-value ssh-rsa AAAATESTKEY"
 run bash "$REPO"/infra/vm.sh reset-key /nonexistent.pub; check "reset-key with a missing file: stops" 1 "not found"
@@ -195,6 +219,15 @@ azure_state() {       # a complete deployment in Azure
   printf '%s\t%s\t%s\n' /subscriptions/s/providers/Microsoft.Authorization/roleAssignments/sub-reader Reader /subscriptions/s \
     /subscriptions/s/resourceGroups/rg-windfarm-edge/providers/Microsoft.Authorization/roleAssignments/rg-onboard "Kubernetes Cluster - Azure Arc Onboarding" /subscriptions/s/resourceGroups/rg-windfarm-edge > "$STUB_DIR/roles"
 }
+capacity_env() {      # capacity_env own|shared: the settings of a deployment of the runner with that kind of capacity
+  CAP_ENV="$SCRATCH/capacity.env"
+  if [[ "$1" == own ]]; then
+    sed -e 's/^FABRIC_CAPACITY_CREATE_SKU=.*/FABRIC_CAPACITY_CREATE_SKU="F16"/' -e 's/^FABRIC_CAPACITY_NAME=.*/FABRIC_CAPACITY_NAME="fabwindfarmk3f"/' "$ENV_FILE" > "$CAP_ENV"
+    printf '%s\t%s\n' Microsoft.Fabric/capacities fabwindfarmk3f >> "$STUB_DIR/resources"; sort -o "$STUB_DIR/resources" "$STUB_DIR/resources"
+  else
+    sed -e 's/^FABRIC_CAPACITY_ID=.*/FABRIC_CAPACITY_ID="d21d9da9-shared"/' "$ENV_FILE" > "$CAP_ENV"
+  fi
+}
 fabric_state() {      # the demo's workspace, on the second page of the workspace list, with items that are not the demo's
   mkdir -p "$STUB_DIR/fabric"
   echo '{"value":[{"id":"ws-other","displayName":"Sales"}],"continuationUri":"https://api.fabric.microsoft.com/v1/workspaces?continuationToken=abc"}' > "$STUB_DIR/fabric/workspaces.json"
@@ -229,6 +262,26 @@ order() {             # order A B: true when the first call matching A comes bef
 azure_state; fabric_state
 run bash "$CLEAN"
 check "clean-up without options: shows what exists and changes nothing" 0 "Nothing was changed" "VM running" "Connected" "aio-windfarm" "Reader on /subscriptions/s" "Eventstream es-windfarm-edge" "Notebook My own analysis" "!group delete" "!iot ops delete" "!--method delete" "!role assignment delete" "!vm start"
+
+# The Fabric capacity: one the deployment had made is deleted with its group; one that existed before is retained.
+azure_state; capacity_env own
+run env ENV_FILE="$CAP_ENV" bash "$CLEAN"
+check "clean-up preview, a capacity the deployment made: in the group, and --azure would delete it" 0 "Fabric capacity fabwindfarmk3f: made for this deployment, in the resource group" "would delete it with the group, which ends its billing" "!retained" "!group delete"
+azure_state; capacity_env shared
+run env ENV_FILE="$CAP_ENV" bash "$CLEAN"
+check "clean-up preview, a capacity that existed before: shared, not in the group, retained" 0 "Fabric capacity d21d9da9-shared: existed before this deployment and is shared" "it is retained and goes on billing as before" "!would delete it with the group" "!group delete"
+azure_state
+run bash "$CLEAN"
+check "clean-up preview, a deployment by hand: the workspace's capacity is not the group's and is retained" 0 "Fabric capacity: the workspace's capacity is not in the resource group and is retained"
+azure_state; capacity_env own
+run env ENV_FILE="$CAP_ENV" bash "$CLEAN" --azure --yes
+check "--azure, a capacity the deployment made: listed before the deletion, and reported as deleted with the group" 0 "Among them the Fabric capacity fabwindfarmk3f, which this deployment had made" "Delete the workspace first" "group delete --name rg-windfarm-edge" "Fabric capacity fabwindfarmk3f: it was this deployment's own, in the resource group, and is deleted with it. Its billing ends" "!retained" "!Not touched.*capacity"
+azure_state; capacity_env shared
+run env ENV_FILE="$CAP_ENV" bash "$CLEAN" --azure --yes
+check "--azure, a capacity that existed before: reported as retained, and billing as before" 0 "group delete --name rg-windfarm-edge" "Fabric capacity d21d9da9-shared: retained. It existed before this deployment, is shared, and goes on billing as before" "!is deleted with it"
+azure_state; capacity_env own; touch "$STUB_DIR/group_delete_fails"
+run env ENV_FILE="$CAP_ENV" bash "$CLEAN" --azure --yes
+check "--azure, the group is not deleted: the deployment's own capacity is said to be still there and billing" 3 "it is this deployment's own and is still there" "goes on billing until the group is gone" "!is deleted with it"
 
 azure_state
 run bash "$CLEAN" --azure --yes
@@ -419,6 +472,13 @@ OUT="$(env -u ENV_FILE PATH="$HERE/stubs-app:$PATH" bash "$CREATE" 2>&1)"; RC=$?
 OUT="$OUT
 named:$(grep -c "^export const WORKSPACE_NAME = 'WindFarmDigitalTwin-m2p';" "$W/packages/functions/src/config.ts")"
 check "create-app by hand beside a deployment of the runner: the workspace is the current deployment's" 0 "named:1" "The app looks for the workspace WindFarmDigitalTwin-m2p"
+rm -rf "$SCRATCH/.deploy"
+
+: > "$STUB_DIR/calls.log"; OWN="$SCRATCH/.deploy/m2p/app/windfarm-twin"
+OUT="$(PATH="$HERE/stubs-app:$PATH" APP_DIR="$OWN" FABRIC_WORKSPACE_NAME="WindFarmDigitalTwin-x4z" bash "$CREATE" 2>&1)"; RC=$?
+OUT="$OUT
+own:$(grep -c "^export const WORKSPACE_NAME = 'WindFarmDigitalTwin-x4z';" "$OWN/packages/functions/src/config.ts" 2>/dev/null) other:$(grep -c "WindFarmDigitalTwin-x4z" "$W/packages/functions/src/config.ts")"
+check "create-app with APP_DIR: the app is built in the folder it is given, and the one beside the script is left alone" 0 "own:1" "other:0" "create-rayfin@2.0.1 --project-name windfarm-twin"
 rm -rf "$SCRATCH/.deploy"
 
 : > "$STUB_DIR/calls.log"; OUT="$(PATH="$HERE/stubs-app:$PATH" FABRIC_WORKSPACE_NAME="Wind'Farm" bash "$CREATE" 2>&1)"; RC=$?

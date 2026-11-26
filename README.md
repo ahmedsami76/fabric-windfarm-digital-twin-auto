@@ -22,18 +22,27 @@ The site, Northwind Ridge Wind Farm, is fictional: 12 turbines of 4.2 MW on proc
 This is the version with a deployment runner. It holds everything of the consolidated version of 25 November 2026 (every phase as built and run on a tenant between 19 and 25 November, deployed by hand from the guides in `docs/`), and adds `tools/deploy.py`, which carries out the supported steps of Phases 1 to 4 itself and tells you exactly what to do where a person has to act.
 
 ```bash
-python3 tools/deploy.py preflight --up-to phase4      # what stands in the way; changes nothing
-python3 tools/deploy.py plan --approve-role-changes   # asks what is yours to choose, then shows every step; changes nothing in Azure or Fabric
-python3 tools/deploy.py apply --approve <plan> --approve-role-changes --confirm phase1.tenant_settings   # the plan prints this line
-python3 tools/deploy.py status                        # the checkpoint, and how fresh the data is now
-python3 tools/deploy.py plan --new --approve-role-changes   # the next build from this folder: a new suffix and new names; the earlier one stays as it is
+# the first deployment in a subscription: the choices as options, saved as the subscription's profile
+python3 tools/deploy.py plan --edge-region southcentralus --approve-role-changes --save-profile
+# the line the plan prints: it names the deployment and carries the approvals you gave
+python3 tools/deploy.py apply --deployment <suffix> --approve <plan> --approve-role-changes --confirm phase1.tenant_settings
+# every later deployment there: no option for a choice, no question
+python3 tools/deploy.py plan --new --approve-role-changes
+# provisioned, blocked or demo-ready
+python3 tools/deploy.py status --deployment <suffix>
 ```
 
-Nothing is filled in beforehand. The first plan starts a deployment: it draws three random characters, makes every name from them, and keeps the settings in `.deploy/<suffix>/` beside the checkpoint. One folder holds as many deployments as you start, in one tenant or in several.
+Nothing is filled in beforehand, and no settings file is prepared. A deployment gets three random characters when it is started and keeps its settings, checkpoint, plans and app build in `.deploy/<suffix>/`. One folder holds as many deployments as you start, in one tenant or in several.
 
-In a terminal, `plan` asks its questions itself: the region of the edge, a Fabric capacity that exists or a new F16, a new workspace or an existing empty one. Run the same `apply` again to resume: it looks before it does anything, and makes nothing twice. [docs/15-deployment-runner.md](docs/15-deployment-runner.md) has every step with who does it, the handoffs, and what has been proven where.
+**How a choice is settled**, in this order: an option of the run (`--edge-region`, `--capacity`, `--new-capacity --capacity-region`, `--workspace-id`, `--vm-size`, `--ssh-source`); the deployment's settings; the profile saved for the tenant and subscription (`--save-profile`); a default the cloud establishes as the only one, which is a single capacity that can hold the demo. A value that is not valid is refused; nothing else is put in its place. What is left is asked together in a terminal, or blocks the plan with the candidates and the option that settles it. A paid capacity is made only on `--new-capacity` with `--approve-capacity-creation`, for one deployment.
 
-**Of the runner, only `preflight` and the first questions of `plan` have run against Azure and Fabric** (25 November; what the runs found is in [docs/runner-validation-log.md](docs/runner-validation-log.md)). A plan to its end and `apply` have not. The runner was exercised against stand-ins: 100 tests, and 151 planted faults that the tests caught. The scripts and notebooks it starts ran on a tenant, started by hand. The guides remain the way to deploy by hand; the runner generates its own names, keeps its settings apart from the `config/demo.env` of a deployment by hand, and never works in what such a deployment made.
+**To resume**, run the same apply line again: it looks before it does anything and makes nothing twice. Exit code 3 names what is yours to do, 4 means something is still running. After an apply that ended before Fabric answered a request to run a notebook, the runner lists the runs and takes `--adopt-job STEP=ID` or `--resubmit STEP`. A refused apply says what differs from the plan that was approved.
+
+**Three words, kept apart**: *provisioned* (the things exist), *blocked* (a step waits, failed or still runs), *demo-ready* (fresh telemetry measured now, usable Lakehouse data, and for the twin the deployed app's own connection check, given with `--app-check`).
+
+[docs/15-deployment-runner.md](docs/15-deployment-runner.md) has every step with who does it, the handoffs, what an approval covers, and what has been proven where. [docs/16-runner-pilot-checklist.md](docs/16-runner-pilot-checklist.md) is the first run on a tenant, step by step, for a person to carry out.
+
+**Of the runner, only `preflight` and `plan` have run against Azure and Fabric** (25 November; what the runs found is in [docs/runner-validation-log.md](docs/runner-validation-log.md)). `apply` has not: the runner has made nothing on a tenant yet, and nothing of the seventh issue (the hardening of 25 November, 18:08) has run there. The runner was exercised against stand-ins: 111 tests, and 195 planted faults that the tests caught. The scripts and notebooks it starts ran on a tenant, started by hand. The guides remain the way to deploy by hand; the runner generates its own names, keeps its settings apart from the `config/demo.env` of a deployment by hand, and never works in what such a deployment made.
 
 What has not run on a tenant, besides the runner: step 6 of Phase 5c (the story through the agent with the record), the script route of Phase 5b's step 4 (the way by hand was used), the clean-up of the items of Phases 2 to 5 (scenario-tested), and the second build of the twin of Phase 5c (`455aa9777780`).
 
@@ -45,9 +54,9 @@ What has not run on a tenant, besides the runner: step 6 of Phase 5c (the story 
 | Simulator, history generator, site generator | 57 automated tests at the time of Phase 1, with simulator 1.1.0, which ran live in the second deployment. The simulator is 1.2.0 since Phase 5c: it reports the commands it is given. The test suite of all phases has 218 tests |
 | Notebooks 01 to 04 and the question bank | Run in local Spark sessions on the versions of both Fabric runtimes, and in Fabric in the second deployment, where the checks matched the guide (reported by the user) |
 | KQL added since the first run (`ActiveAlarms()`, four live questions) | Syntax-checked; a run in the Eventhouse is not confirmed |
-| `infra/vm.sh`, `infra/rebuild-env.sh` | 31 scenario tests against stand-in commands, and 4 for where a script finds its settings. Live: `run` works; `ssh` found no way in when the SSH rule had been removed, cause open |
-| `tools/deploy.py`, the deployment runner | 100 tests against a pretend Azure and Fabric; 151 planted faults, all caught. On a tenant: `preflight`, and the questions of `plan` up to the capacity, on 25 November; what the runs found is corrected. **A plan to its end and `apply` have not run against Azure or Fabric.** [docs/15-deployment-runner.md](docs/15-deployment-runner.md) |
-| `infra/99-cleanup.sh` | 32 scenario tests. Run live once, in its first version: Fabric items and resource group removed; the uninstall step failed and now retries. Since 25 November `--fabric` also knows the items of Phases 2 to 5 (the notebooks 05 to 13, the semantic model, the report, the data agent, the ontology, the operations agent, the app, the command eventstream): scenario-tested, not run |
+| `infra/vm.sh`, `infra/rebuild-env.sh` | 31 scenario tests against stand-in commands, 4 for where a script finds its settings, and 2 for the subscription the runner names for it. Live: `run` works; `ssh` found no way in when the SSH rule had been removed, cause open |
+| `tools/deploy.py`, the deployment runner | 111 tests against a pretend Azure and Fabric; 195 planted faults, all caught. On a tenant: `preflight` and `plan`, on 25 November; what the runs found is corrected. **`apply` has not run against Azure or Fabric.** [docs/15-deployment-runner.md](docs/15-deployment-runner.md) |
+| `infra/99-cleanup.sh` | 42 scenario tests, 10 of them new on 25 November: the deployment named with `--deployment`, and a shared capacity told from one the deployment made. Run live once, in its first version: Fabric items and resource group removed; the uninstall step failed and now retries. Since 25 November `--fabric` also knows the items of Phases 2 to 5 (the notebooks 05 to 13, the semantic model, the report, the data agent, the ontology, the operations agent, the app, the command eventstream): scenario-tested, not run |
 | Checks added after the second deployment (object ID format, step 3 feature check, longer health wait in step 4, `ssh` falling back to `run`) | Scenario tests and ShellCheck; not yet run against Azure |
 | Phase 2: prepared views, model tables, semantic model, acceptance test, report | Deployed once, on 20 November 2026; three obstacles, all fixed. The user reported every step as done; the outputs of the acceptance test and of the report were not sent, so the measures and the report count as run, not as verified. See [docs/phase2-validation-log.md](docs/phase2-validation-log.md) |
 | Phase 3: data agent, its test, ontology, operations agent | Deployed on the user's tenant on 21 November 2026. The data agent was built and tested six times: about 39 of 52 test questions pass by the judge of the SDK. The ontology was created, and measured to make the agent worse, so the agent runs without it. The operations agent was set up; its playbook and its Teams message were reported, not seen. Seven obstacles, all in [docs/phase3-validation-log.md](docs/phase3-validation-log.md) |
@@ -118,7 +127,7 @@ In Fabric, the validation queries show WT-07's gearbox vibration and oil tempera
 ```bash
 cd simulator
 pip install -r requirements-dev.txt
-python -m pytest                                                              # 318 tests
+python -m pytest                                                              # 329 tests
 SITE_FILE=../data/reference/site.json SINK=stdout python -m windfarm_sim | head -n 20   # live messages
 python -m windfarm_sim.history --site ../data/reference/site.json --out /tmp/history    # two years of history as CSV
 cd .. && bash tools/script-tests/run.sh                                       # the shell scripts against stand-in commands

@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from deployer import names  # noqa: E402
-from deployer.cloud import CloudError  # noqa: E402
+from deployer.cloud import NO_SUBSCRIPTION, Az, CloudError  # noqa: E402
 from deployer.steps import ROLE_IDS  # noqa: E402
 
 API = "https://api.fabric.microsoft.com/v1"
@@ -62,6 +62,11 @@ class World:
         self.tokens: list = []
         self.counter = 0
         # switches a test sets
+        self.others: dict = {}               # further subscriptions the sign-in reaches, by ID: what `az account show --subscription` answers
+        self.named: set = set()              # the subscriptions that calls were sent to by name
+        self.graph_closed = False
+        self.die_after_post = ""             # a notebook: the request to run it is taken by Fabric, and its answer never read
+        self.app_builds: list = []           # the folders the app was built in
         self.slow: set = set()              # kinds of item whose creation answers 202 and stays running
         self.polls_per_job = 1
         self.failing_notebooks: set = set()
@@ -78,9 +83,12 @@ class World:
         self.closed_capacities: set = set()   # capacities a workspace cannot be put on by this person
         # Microsoft.Fabric in Azure: capacities by name as Azure has them, where a SKU is offered, names taken by others
         self.arm_capacities: dict = {}
+        # As Azure answered on 25 November 2026: one entry for each SKU and region, in the order of the regions' names, some
+        # regions twice. (Each entry also had locationInfo and an empty restrictions; the runner asks for name and locations.)
         self.fabric_offers = {"F8": ["West Europe"], "F64": ["Central US"],
-                              "F16": ["West Europe", "East US 2", "Central US", "West US 2", "South Central US"]}
-        self.skus_by_region = True            # the list of SKUs has one entry for each SKU and region, each with one region
+                              "F16": ["Australia East", "Brazil South", "Brazil South", "Central US", "East US 2", "South Central US",
+                                      "West Europe", "West US 2", "West US 2"]}
+        self.skus_by_region = True
         self.taken_capacity_names: set = set()
         self.fabric_quota = True
         self.capacity_state = "Active"        # the state a capacity is in right after it was made
@@ -110,11 +118,55 @@ def opt(args, flag):
     return args[args.index(flag) + 1] if flag in args else None
 
 
+def _signed_in(self) -> dict:
+    return {self.account["id"]: self.account, **self.others}
+
+
+World.signed_in = _signed_in
+
+
 class FakeAz:
+    """The Azure CLI of the tests. It pins its calls with the real adapter's own rule, and then holds every call to it:
+    once a deployment is known, a call without the deployment's subscription fails the test."""
+
     def __init__(self, world: World, redact=None):
-        self.w, self._redact = world, redact
+        self.w, self._redact, self.subscription = world, redact, ""
+
+    def pin(self, subscription_id: str) -> None:
+        self.subscription = subscription_id or ""
+
+    def _named(self, args) -> tuple:
+        """The call as the real adapter sends it, checked, and without the option again. Sets who answers."""
+        w, sent = self.w, Az.pinned(self, args)
+        self.answers = w.account
+        if "--subscription" in sent:
+            at = sent.index("--subscription")
+            named = sent[at + 1]
+            del sent[at:at + 2]
+            assert sent[0] not in NO_SUBSCRIPTION, f"az {sent[0]} takes no --subscription"
+            if named not in w.signed_in():
+                raise CloudError(f"az {' '.join(sent[:2])} failed: ERROR: The subscription of '{named}' doesn't exist in cloud "
+                                 "'AzureCloud'. Please run 'az login' to setup account.")
+            self.answers = w.signed_in()[named]
+            w.named.add(named)
+        else:
+            assert not self.subscription or sent[0] in NO_SUBSCRIPTION, f"az {' '.join(sent[:3])} went out without the deployment's subscription"
+        assert sent[0] != "ad", "the runner used `az ad`, which follows the CLI's active subscription and cannot be pinned"
+        return tuple(sent)
+
+    def graph(self, path: str):
+        w = self.w
+        self._named(("account", "get-access-token", "--resource-type", "ms-graph"))
+        if w.graph_closed:
+            raise CloudError("Microsoft Graph answered 403 to me: Insufficient privileges")
+        if path == "me?$select=id":
+            return {"id": w.my_object_id}
+        found = re.fullmatch(r"servicePrincipals\(appId='([0-9a-f-]{36})'\)\?\$select=id", path)
+        assert found, f"a Graph request the fake does not know: {path}"
+        return {"id": w.custom_locations} if w.custom_locations else None
 
     def token(self, resource: str) -> str:
+        self._named(("account", "get-access-token", "--resource", resource))
         token = "eyJ0eXAiOiJKV1Qi." + base64.b64encode(resource.encode()).decode().rstrip("=") + ".c2lnbmF0dXJlLW9mLXRoZS10b2tlbg"
         self.w.tokens.append(token)
         if self._redact:
@@ -125,7 +177,7 @@ class FakeAz:
         return self.maybe(*args, timeout=timeout)
 
     def run(self, *args, timeout=0):
-        w = self.w
+        w, args = self.w, self._named(args)
         if args[:2] == ("group", "create"):
             tags = dict(pair.split("=", 1) for pair in args[args.index("--tags") + 1:] if "=" in pair)
             name = opt(args, "--name")
@@ -161,9 +213,9 @@ class FakeAz:
             raise AssertionError(f"the fake does not know az {' '.join(args)}")
 
     def maybe(self, *args, timeout=0):
-        w = self.w
+        w, args = self.w, self._named(args)
         if args[:2] == ("account", "show"):
-            return w.account
+            return self.answers
         if args[:2] == ("provider", "show"):
             assert opt(args, "--query") == "registrationState"
             return "NotRegistered" if opt(args, "--namespace") in w.unregistered else "Registered"
@@ -175,9 +227,6 @@ class FakeAz:
         if args[:3] == ("role", "assignment", "list"):
             raise AssertionError("the runner asked `az role assignment list`, which fetches every role definition to print names "
                                  "and stood for three minutes on a workstation")
-        if args[:3] == ("ad", "signed-in-user", "show"):
-            assert opt(args, "--query") == "id" and timeout and timeout <= 60
-            return w.my_object_id
         if args[:1] == ("rest",) and "Microsoft.Authorization/roleAssignments" in opt(args, "--url"):
             assert "api-version=2022-04-01" in args and timeout and timeout <= 60
             w.role_calls += 1
@@ -185,7 +234,7 @@ class FakeAz:
             asked = next(arg for arg in args if arg.startswith("$filter="))[len("$filter="):]
             definition = "/subscriptions/sub-1111/providers/Microsoft.Authorization/roleDefinitions/"
             if asked == f"atScope() and assignedTo('{w.my_object_id}')":
-                assert scope == f"/subscriptions/{w.account['id']}"
+                assert scope == f"/subscriptions/{self.answers['id']}"
                 return [{"role": definition + ROLE_IDS.get(role, "0c0c0c0c-aaaa-bbbb-cccc-" + f"{index:012d}"), "scope": scope}
                         for index, role in enumerate(w.my_roles)]
             principal = re.fullmatch(r"principalId eq '([^']+)'", asked)
@@ -199,8 +248,6 @@ class FakeAz:
             raise AssertionError("the runner asked `az vm list-skus`, which fetches every region and stood for five minutes on a workstation")
         if args[:3] == ("storage", "account", "check-name"):
             return {"nameAvailable": w.storage_free, "reason": None if w.storage_free else "AlreadyExists"}
-        if args[:3] == ("ad", "sp", "show"):
-            return w.custom_locations
         if args[:2] == ("group", "show"):
             return w.groups.get(opt(args, "--name"))
         if args[:2] == ("resource", "list"):
@@ -365,10 +412,15 @@ class FakeFabric:
                    "parameters": ((body or {}).get("executionData") or {}).get("parameters")}
             w.jobs.setdefault(found[1], []).append(job)
             w.wrote(f"POST job {name}")
+            if w.die_after_post == name:               # Fabric took the request; the computer went down before its answer was read
+                w.die_after_post = ""
+                raise KeyboardInterrupt
             return 202, {"Location": f"{API}/workspaces/{ws}/items/{found[1]}/jobs/instances/{job['id']}", "Retry-After": "30"}, None
         found = re.fullmatch(r"items/([^/]+)/jobs/instances/([^/]+)", rest)
         if found:
-            job = next(j for j in w.jobs[found[1]] if j["id"] == found[2])
+            job = next((j for j in w.jobs.get(found[1], []) if j["id"] == found[2]), None)
+            if job is None:           # as the real client: a refusal by Fabric is an error with its status
+                raise CloudError("Fabric answered 404: EntityNotFound. The requested job instance was not found", 404, "EntityNotFound")
             if job["status"] in ("NotStarted", "InProgress"):
                 job["polls"] += 1
                 job["status"] = "InProgress"
@@ -472,6 +524,8 @@ class FakeShell:
             assert settings.is_file() and settings.parent.parent.name == ".deploy", f"a script was started without its deployment's settings: {env}"
             self.w.env_files.append(str(settings))
             named = names.read_env(settings).get("FABRIC_WORKSPACE_NAME")      # as the scripts find it
+            # ... and the subscription of its deployment by name: no script goes by the CLI's active subscription
+            assert env.get("AZ_SUBSCRIPTION_PIN") == names.read_env(settings).get("SUBSCRIPTION_ID"), "a script was started unpinned"
         ws = next((entry["id"] for entry in w.workspaces if entry.get("displayName") == named), None)
         if "01-create-edge-vm.sh" in command:
             assert env.get("DEPLOY_RUNNER") == "1", "the VM script was started without DEPLOY_RUNNER"
@@ -502,11 +556,17 @@ class FakeShell:
                 w.add_item(ws, "Eventstream", "WindFarmCommands")
         elif "create-app.sh" in command:
             source = self.root / "app" / "overlay" / "packages" / "functions" / "src"
-            target = self.root / "app" / "windfarm-twin" / "packages" / "functions" / "src"
+            # each deployment builds in a folder of its own, beside its settings
+            assert Path(env.get("APP_DIR", "")) == settings.parent / "app" / "windfarm-twin", f"the app was built in {env.get('APP_DIR')}"
+            target = Path(env["APP_DIR"]) / "packages" / "functions" / "src"
             target.mkdir(parents=True, exist_ok=True)
+            w.app_builds.append(str(env["APP_DIR"]))
             (target / "build.ts").write_text((source / "build.ts").read_text())
             (target / "config.ts").write_text(f"export const WORKSPACE_NAME = '{env['FABRIC_WORKSPACE_NAME']}';\n")
         elif command.startswith("npx rayfin up"):
+            built_for = (Path(cwd) / "packages" / "functions" / "src" / "config.ts").read_text()
+            assert Path(cwd).parent.parent.parent.name == ".deploy" and f"'{named}'" in built_for, \
+                f"the app deployed to {named} was built in {cwd}, for: {built_for.strip()}"
             if not w.rayfin_signed_in:
                 w.writes.pop()
                 return 1, "Error: You are not signed in. Run `rayfin login`."

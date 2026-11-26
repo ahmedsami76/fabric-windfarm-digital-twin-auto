@@ -15,7 +15,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP="$HERE/windfarm-twin"
+# Where the app is built. By hand: beside this script. The deployment runner gives every deployment a folder of its
+# own (APP_DIR), so that two deployments never build in one folder: the app's copy of config.ts names one workspace.
+APP="${APP_DIR:-$HERE/windfarm-twin}"
 RAYFIN_VERSION="${RAYFIN_VERSION:-2.0.1}"   # the version the overlay was written and checked against
 THREE_VERSION="0.187.0"
 MSSQL_VERSION="12.8.1"         # Rayfin's guide asks for 12.6.0 or newer: older ones fail against Fabric endpoints
@@ -98,7 +100,8 @@ else
   [[ ! -e "$APP" ]] || stop "$APP exists but is not a Rayfin project. Move it away, then run this again."
   say "Creating the app from the Rayfin template (create-rayfin $RAYFIN_VERSION)"
   echo "If it asks a question, accept what it proposes."
-  (cd "$HERE" && npx -y "@microsoft/create-rayfin@$RAYFIN_VERSION" --project-name windfarm-twin --template blankapp)
+  mkdir -p "$(dirname "$APP")"
+  (cd "$(dirname "$APP")" && npx -y "@microsoft/create-rayfin@$RAYFIN_VERSION" --project-name "$(basename "$APP")" --template blankapp)
   [[ -f "$APP/rayfin/rayfin.yml" ]] || stop "The scaffolder ended without creating $APP/rayfin/rayfin.yml. Send me what it printed."
 fi
 

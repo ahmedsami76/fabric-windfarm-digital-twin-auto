@@ -80,8 +80,9 @@ def _set(ctx: Context, **values) -> None:
     ctx.cache.clear()
 
 
-def _record(ctx: Context, key: str, answer: str) -> None:
-    ctx.state.data["choices"][key] = {"answer": answer, "at": ctx.state.stamp(),
+def _record(ctx: Context, key: str, answer: str, source: str = "asked") -> None:
+    """What was chosen, when, by whom, and where the answer came from: a question, an option, the profile, discovery."""
+    ctx.state.data["choices"][key] = {"answer": answer, "at": ctx.state.stamp(), "source": source,
                                       "by": (account(ctx).get("user") or {}).get("name")}
     ctx.state.save()
 
@@ -89,10 +90,13 @@ def _record(ctx: Context, key: str, answer: str) -> None:
 # ---------------------------------------------------------------------------------------------- the region of the edge
 def ask_region(ctx: Context, ask: Asker) -> None:
     current = ctx.cfg.get("LOCATION", "")
+    # With no region chosen yet the question proposes the region of the guides. A proposal is not a choice: it is
+    # taken only when the person presses Enter on it.
+    proposed = current or names.read_env(ctx.root / "config" / "demo.env.example").get("LOCATION", "")
     ask.topic("Azure region of the edge: the VM and Azure IoT Operations")
     for index, region in enumerate(IOT_OPERATIONS_REGIONS, 1):
-        ask.say(f"    {index}. {region}{'   (now)' if region == current else ''}")
-    default = IOT_OPERATIONS_REGIONS.index(current) + 1 if current in IOT_OPERATIONS_REGIONS else None
+        ask.say(f"    {index}. {region}{'   (now)' if region == current else '   (the region of the guides)' if region == proposed else ''}")
+    default = IOT_OPERATIONS_REGIONS.index(proposed) + 1 if proposed in IOT_OPERATIONS_REGIONS else None
     picked = ask.pick("Region", len(IOT_OPERATIONS_REGIONS), default,
                       {region: index for index, region in enumerate(IOT_OPERATIONS_REGIONS, 1)})
     if picked is None:
@@ -321,5 +325,5 @@ def summary(ctx: Context) -> str:
     capacity_text = (new_capacity_label(ctx) + ", to be made" if creating(ctx) else
                      capacity_label(listed) if listed else ctx.cfg.get("FABRIC_CAPACITY_ID") or "none yet")
     workspace_text = ctx.cfg["FABRIC_WORKSPACE_NAME"] + (", which exists" if ctx.cfg.get("FABRIC_WORKSPACE_ID") else ", to be made")
-    return (f"Chosen: edge in {ctx.cfg.get('LOCATION')}; capacity {capacity_text}; workspace {workspace_text}. Written to "
+    return (f"Chosen: edge in {ctx.cfg.get('LOCATION') or 'a region not chosen yet'}; capacity {capacity_text}; workspace {workspace_text}. Written to "
             f"{ctx.env_label}. Nothing was changed in Azure or Fabric.")

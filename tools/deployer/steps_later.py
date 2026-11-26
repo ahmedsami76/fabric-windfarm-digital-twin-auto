@@ -10,6 +10,8 @@ Three kinds of step appear here that Phase 1 does not have:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import re
 
@@ -184,7 +186,8 @@ def phase3(options: Options) -> list[Step]:
              writes="descriptions of the columns, and the table GearboxVsFleetLive with its update policy",
              basis="Kusto REST API, .execute database script"),
         Step("p3.operations_agent", "phase3", "Operations agent set up and started, Teams app installed",
-             lambda ctx: (done(f"operations agent {OPERATIONS_AGENT} exists; that it runs and that Teams is set up, the runner cannot see")
+             lambda ctx: (done(f"an item {OPERATIONS_AGENT} exists. That is not proof that the agent is configured, running or "
+                               "delivering to Teams: the runner cannot read any of that")
                           if item(ctx, "OperationsAgent", OPERATIONS_AGENT) else todo()) if workspace_id(ctx) else after("p1.workspace"),
              manual=OPERATIONS_AGENT_STEPS, basis="none: portal only (preview)", proof="live"),
     ]
@@ -205,17 +208,28 @@ def p4_node(ctx) -> Probe:
     return done(f"Node.js {text.strip()}")
 
 
+def app_dir(ctx) -> Path:
+    """Where this deployment's app is built: a folder of its own beside its checkpoint. Two deployments of one folder
+    never share a build: the app's copy of config.ts names one workspace, and the app's tool keeps its own state there."""
+    return ctx.state.folder / "app" / "windfarm-twin"
+
+
+def app_label(ctx) -> str:
+    return f".deploy/{ctx.cfg['DEPLOYMENT_SUFFIX']}/app/windfarm-twin"
+
+
 def p4_scaffold(ctx) -> Probe:
     ours = build_stamp(ctx, "app/overlay/packages/functions/src/build.ts")
-    theirs = build_stamp(ctx, "app/windfarm-twin/packages/functions/src/build.ts")
-    config = ctx.root / "app/windfarm-twin/packages/functions/src/config.ts"
+    stamp, config = app_dir(ctx) / "packages/functions/src/build.ts", app_dir(ctx) / "packages/functions/src/config.ts"
+    found = re.search(r"'([0-9a-f]{12})'", stamp.read_text(encoding="utf-8")) if stamp.exists() else None
+    theirs = found.group(1) if found else ""
     if not theirs:
         return todo()
     if theirs != ours:
         return todo(f"the app holds build {theirs}; the repository is at {ours}")
     if f"WORKSPACE_NAME = '{ctx.cfg['FABRIC_WORKSPACE_NAME']}'" not in config.read_text(encoding="utf-8"):
         return todo("the app names another workspace")
-    return done(f"app scaffolded in app/windfarm-twin, build {ours}, looking for workspace {ctx.cfg['FABRIC_WORKSPACE_NAME']}")
+    return done(f"app scaffolded in {app_label(ctx)}, build {ours}, looking for workspace {ctx.cfg['FABRIC_WORKSPACE_NAME']}")
 
 
 def app_item(ctx) -> dict | None:
@@ -224,7 +238,7 @@ def app_item(ctx) -> dict | None:
     return found[0] if len(found) == 1 else None
 
 
-SIGN_IN = ("cd app/windfarm-twin && export RAYFIN_ENCRYPTION_FALLBACK_ENABLED=true && npx rayfin login\n"
+SIGN_IN = ("cd {app} && export RAYFIN_ENCRYPTION_FALLBACK_ENABLED=true && npx rayfin login\n"
            "(The export is for WSL, which has no keychain; it lets the tool keep your sign-in unencrypted under ~/.rayfin. "
            "The runner does not set it for you. On WSL no browser opens by itself: step 4 of docs/11-deployment-guide-phase4.md.)")
 
@@ -236,10 +250,10 @@ def act_deploy_app(ctx) -> None:
         raise Blocked(f"The app's tool takes the workspace by name, and the name {workspace_name} stands for {len(same)} "
                       "workspaces you can see, or for another one than this deployment's.", "Rename or remove the other workspace.")
     code, text = ctx.shell.run(["npx", "rayfin", "up", "--workspace", workspace_name, "--item-name", name(ctx, "APP_NAME")],
-                               cwd=ctx.root / "app" / "windfarm-twin")
+                               cwd=app_dir(ctx))
     if code != 0:
         if re.search(r"(?i)sign[ -]?in|log ?in|keychain|unauthor|401", text):
-            raise Blocked("The app's tool is not signed in. Signing in opens a browser and is yours to do.", SIGN_IN)
+            raise Blocked("The app's tool is not signed in. Signing in opens a browser and is yours to do.", SIGN_IN.format(app=app_label(ctx)))
         raise CloudError(f"npx rayfin up ended with exit code {code}. Its last lines are above; it names a diagnostic log.")
 
 
@@ -268,9 +282,10 @@ def gate_route_act(ctx) -> None:
                       "7,548 rows three and a half minutes later.")
     live = freshness(ctx) if data_flow(ctx) else {}
     ctx.state.note("p4.gate_data_route", passed=(
-        f"Lakehouse route PASS: {seen['rows']} rows from {seen.get('turbines')} turbines in the last 60 minutes, the newest "
-        f"{seen.get('newest_minutes')} min old. Eventhouse: newest reading {live.get('age_seconds', '?')} s old; the app's Eventhouse "
-        "route needs the optional service principal and was not asked for"), route="lakehouse", figures=seen)
+        f"SQL probe with the operator's token: {seen['rows']} rows from {seen.get('turbines')} turbines in the last 60 minutes, the "
+        f"newest {seen.get('newest_minutes')} min old. It asks what the twin's Lakehouse route asks, as you and not as the app: "
+        f"it shows the data is there, not that the deployed app reads it. Eventhouse: newest reading {live.get('age_seconds', '?')} s old"),
+        route="lakehouse", figures=seen)
 
 
 def gate_route_probe(ctx) -> Probe:
@@ -287,26 +302,32 @@ def phase4(options: Options) -> list[Step]:
              observable=False, basis="Fabric admin portal", proof="none"),
         Step("p4.node", "phase4", "Node.js on this computer", p4_node, basis="node --version"),
         Step("p4.scaffold", "phase4", "App created from Microsoft's template, with the twin laid over it", p4_scaffold,
-             lambda ctx: script(ctx, "app/create-app.sh", env={"FABRIC_WORKSPACE_NAME": ctx.cfg["FABRIC_WORKSPACE_NAME"]}),
+             lambda ctx: script(ctx, "app/create-app.sh", env={"FABRIC_WORKSPACE_NAME": ctx.cfg["FABRIC_WORKSPACE_NAME"],
+                                                              "APP_DIR": str(app_dir(ctx))}),
              inputs=("app/create-app.sh", "app/overlay/packages/functions/src/build.ts"),
-             writes="the folder app/windfarm-twin on this computer; nothing in Fabric", basis="app/create-app.sh", proof="live"),
+             writes="the app's folder of this deployment on this computer, .deploy/<suffix>/app/windfarm-twin; nothing in Fabric",
+             basis="app/create-app.sh", proof="live"),
         Step("p4.deploy", "phase4", "App deployed to the workspace",
              lambda ctx: (done(f"app item {name(ctx, 'APP_NAME')} is in the workspace") if app_item(ctx) else todo())
-             if workspace_id(ctx) else after("p1.workspace"), act_deploy_app, wait_seconds=120,
+             if workspace_id(ctx) else after("p1.workspace"), act_deploy_app, wait_seconds=120, inputs=("app/overlay",),
              writes="the Fabric app item WindFarmTwin, its page and its seven functions",
              basis="npx rayfin up --workspace NAME --item-name NAME (Rayfin 2.0.1)", proof="live"),
-        Step("p4.gate_data_route", "phase4", "GATE: a data route of the twin answers", gate_route_probe, gate_route_act,
+        Step("p4.gate_data_route", "phase4", "GATE: the Lakehouse answers the twin's query (asked with the operator's token)", gate_route_probe, gate_route_act,
              observable=False, writes="nothing; one query against the SQL endpoint of the Lakehouse",
              basis="SQL analytics endpoint, with a token for https://database.windows.net", proof="offline"),
         Step("p4.eventhouse_principal", "phase4", "Real-time values: the service principal (optional)",
              lambda ctx: todo("not looked at: optional, and the runner neither creates an app registration nor grants it a role"),
              optional=True, observable=False, manual="When you want the twin 40 seconds behind the turbines instead of minutes:\n"
-             "bash app/create-principal.sh\nIt finds the workspace of this deployment by itself, creates an app registration with a secret and gives "
+             "bash app/create-principal.sh\nIt finds the workspace and the app folder of the current deployment by itself, creates an app registration with a secret and gives "
              "it Viewer in the workspace; step 7 of docs/11-deployment-guide-phase4.md. Without it the twin runs on the Lakehouse route.",
              basis="app/create-principal.sh", proof="live"),
-        Step("p4.connection_check", "phase4", "The app's own connection check (optional)",
-             lambda ctx: todo("yours to look at"), optional=True, observable=False,
-             manual="Open the app in the workspace and select the badge at the top right. Every line of the Lakehouse route says PASS.",
+        Step("p4.connection_check", "phase4", "The app's own connection check: what makes the twin demo-ready",
+             lambda ctx: todo("yours to read, once: the runner has no documented way to ask the deployed app"), optional=True,
+             observable=False,
+             manual="Open the app in the workspace and select the badge at the top right. Read three things off the check: the "
+             "build it names, the route that says PASS (Lakehouse, or Eventhouse with the service principal), and how old the "
+             "newest reading is.\nThen tell the runner, with the next apply: --app-check BUILD,ROUTE,SECONDS   for example "
+             "--app-check 455aa9777780,lakehouse,120\nstatus calls the twin demo-ready only with that, for the build that is deployed.",
              basis="the app", proof="live"),
     ]
 
