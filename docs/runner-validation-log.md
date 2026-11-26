@@ -200,6 +200,19 @@ What that run proved: a plan runs to its end on a tenant and prints its identifi
 |---|---|---|---|---|
 | R50 | The list has what the reference shows: name, locations, resource type | Each entry also carries `restrictions` (and `locationInfo` with zones). Empty for every region on this subscription. The reference does not describe the field for this provider; for virtual machine sizes the like-named field is where Azure says that a subscription may not use a size in a region | The user's output | Nothing in the runner: it does not read a field whose meaning is not written. Noted as unproven. The stand-in's list now has the layout that was seen, with regions twice |
 
+## The offline checks on the workstation of the tenant runs
+
+| When | Step | Result |
+|---|---|---|
+| 25 November 2026, 23:09 Houston | `cd simulator && python3 -m pytest -q tests/test_deploy_runner.py && cd .. && bash tools/script-tests/run.sh`, in `~/fabric-windfarm-digital-twin-auto` on `sami-imhotep`, with the 21 files of the seventh issue copied in | **Seen**, pasted in full, without a word. `111 passed in 9.84s`. Then 165 lines of scenarios: `passed 164, failed 1`. The failure: `FAIL check-scripts, a script starts another one directly: rule 2 still fails (exit 0)`, with ``awk: warning: escape sequence `\$' treated as plain `$'`` (and the same for `\{`, `\}` and `\.`) for every script, and `ok   infra/caller.sh` for the script that breaks the rule. Beside six `PASS` lines the harness printed `run.sh: line 533: …/state/secrets_received: No such file or directory` and the like for `applied.json` |
+
+What that run proved: the files of the seventh issue arrived whole; the runner's 111 tests pass on a second computer, with its Python; 164 scenarios of the scripts pass there under GNU awk, the clean-up's and the pinned subscription's among them. It is the first time the scenarios ran anywhere but on the computer they were written on. Nothing of it touches a tenant.
+
+| # | What I assumed | What is true | Source | Changed |
+|---|---|---|---|---|
+| R64 | The script scenarios, and `tools/check-scripts.sh`, behave the same wherever bash runs | Both had only run where `awk` is mawk. On the workstation `awk` is GNU awk. Rule 2 of the check (a script starts another one through `bash`, never directly) handed its pattern to awk as a variable. Awk reads such a value as awk text before it is a pattern: mawk keeps `\$` as it is, a dollar sign; GNU awk takes it for `$`, the end of a line, and says so in a warning. Under GNU awk the rule still saw `./other.sh` and no longer saw `"$DIR/other.sh"`, `"${DIR}/other.sh"` or `exec "$DIR/other.sh"`, which are the forms a script of this repository would use. So on that workstation `bash tools/check-scripts.sh` has passed rule 2 without testing those forms for as long as the rule exists, with the warnings on the screen. No script breaks the rule: the check passes here under both awks, with the same 52 lines | The user's output; reproduced here with GNU Awk 5.2.1, where the same scenario fails the same way, and the three forms were put to the old line under each awk | Rule 2 uses `grep -E`, as rule 1 always did; awk has no part in the check any more. Two scenarios: each direct form is named with its line, and `bash`, `source`, `.` and a mere mention pass. The scenarios run here under both awks from now on. The consolidated version that was set aside (`fabric-windfarm-digital-twin-v1.zip`) has the old line |
+| R65 | A scenario that passes prints its `PASS` line and nothing else | Six passing scenarios printed a shell error beside it, from the harness reading a file that the scenario rightly never made: the redirection failed before its `2>/dev/null` was reached. And in a folder without scripts the check took the unmatched pattern `edge/scripts/*.sh` for a file, printed `No such file` three times and then `ok   edge/scripts/*.sh`. Neither changed a verdict; both stood next to the one real failure and looked like more of it | The same output | The harness reads those files with `cat … 2>/dev/null`; the check skips a pattern that matched nothing. The new scenario for the allowed forms fails when either message comes back |
+
 ## Found while building the seventh issue
 
 | # | What I assumed | What is true | Source | Changed |
@@ -231,16 +244,18 @@ What that run proved: a plan runs to its end on a tenant and prints its identifi
 | 44 faults planted for the seventh issue: 37 in the runner (the pin, how a choice is settled, the saved plan, the journal of a notebook run, the script's limit, readiness), 7 in the scripts (the subscription named for them, the clean-up, the app's folder) | 42 failed a test or a scenario at once, one of them planted by hand because the fault script had not found its line; 2 after a test was added or extended (R62) |
 | The questions played through as text, for the tenant as it was at 15:40 | Read, and reworded twice |
 | Azure CLI 2.93.0, installed here, asked without a sign-in which commands take `--subscription` | Six command groups do not (R51) |
+| 5 faults planted in `tools/check-scripts.sh` for the eighth issue: the old line with awk, a rule that never reports, a folder without scripts, `exec`, a variable in braces | Each failed a scenario at once, under the awk it was run with |
+| `bash tools/check-scripts.sh` on the repository, with mawk and with GNU awk | The same 52 `ok` lines, exit code 0, no warning |
 | His question of 17:17 played through with the list laid out three ways: one entry for each region, Central US missing, the SKU missing | Read: Central US is proposed and taken; the missing region is said with the list and taken on a yes; the missing SKU is said and left to Azure |
 | His folder as it is today (`config/demo.env` with the suffix 064 and a Premium Per User capacity in it, `.deploy/064/`), played through against the stand-ins, and a second build after it | The settings are moved once; the capacity is asked for again because the one in the settings cannot hold the demo; `--new` gives other names and leaves 064 as it was |
-| `bash tools/script-tests/run.sh` | 165 scenarios; 13 new at the seventh issue: the clean-up with `--deployment` (4) and with a shared and an own capacity (6), a script with the subscription named by the runner and by hand (2), the app built in a folder it is given (1). Before that 152. 6 new at the fourth issue (144), for the app's workspace name, the command path created switched off, step 1 handed sizes that were checked, and step 1 told to ask nothing. 8 new at the fifth: the settings found through `.deploy/current`, `config/demo.env` before that, `ENV_FILE` before both, a current deployment without settings, `push` with the settings elsewhere, the clean-up and the two app scripts beside a deployment of the runner |
+| `bash tools/script-tests/run.sh` | 167 scenarios, run with mawk and with GNU awk as `awk`; nothing but `PASS` lines. 2 new at the eighth issue, for rule 2 of the check of the scripts. 165 at the seventh; 13 were new then: the clean-up with `--deployment` (4) and with a shared and an own capacity (6), a script with the subscription named by the runner and by hand (2), the app built in a folder it is given (1). Before that 152. 6 new at the fourth issue (144), for the app's workspace name, the command path created switched off, step 1 handed sizes that were checked, and step 1 told to ask nothing. 8 new at the fifth: the settings found through `.deploy/current`, `config/demo.env` before that, `ENV_FILE` before both, a current deployment without settings, `push` with the settings elsewhere, the clean-up and the two app scripts beside a deployment of the runner |
 | `python3 tools/build-deploy-gate.py --check`, `python3 tools/build-runner-docs.py --check` | The gate notebook and the table of steps are what their generators write |
 | The whole gate of the repository | Passes; see the README |
 | `python3 tools/deploy.py plan` on a computer without the Azure CLI | Says so and ends with exit code 1; writes nothing |
 
 ## Not run
 
-`apply` and `status` on a tenant: nothing has been made by the runner yet. Nothing of the seventh issue. The pilot checklist, [16-runner-pilot-checklist.md](16-runner-pilot-checklist.md), is the order in which to find out. The twenty-two points of [15-deployment-runner.md](15-deployment-runner.md), "Unproven on a tenant", in the order a first run meets them.
+`apply` and `status` on a tenant: nothing has been made by the runner yet. Nothing of the seventh issue. The pilot checklist, [16-runner-pilot-checklist.md](16-runner-pilot-checklist.md), is the order in which to find out. The twenty-nine points of [15-deployment-runner.md](15-deployment-runner.md), "Unproven on a tenant", in the order a first run meets them.
 
 ## Files
 
@@ -374,4 +389,16 @@ Three new files and 18 changed ones against the sixth issue; 275 files. They can
 | `simulator/tests/test_deploy_runner.py`, `simulator/tests/deploy_fakes.py` | Eleven tests more (111), 22 changed and 4 replaced; the pretend CLI holds every call to the pin and knows several subscriptions; Graph; a run request that is taken and never answered |
 | `docs/03-roadmap.md` | What has run on a tenant, and the pilot checklist as the next thing |
 | `docs/15-deployment-runner.md`, `docs/runner-validation-log.md`, `README.md` | The shortest way, how a choice is settled, what an approval covers, one subscription for a deployment, the three words, the Environment finding; the specification of 18:08, findings R50 to R63 |
+
+### Eighth issue, 25 November 2026, after the offline checks on the workstation
+
+Five files differ from the seventh issue; 275 files. No file of the runner is among them: `tools/deployer/` is that of the seventh issue, and so are its tests. They can be copied over a folder that holds the seventh issue; `.deploy/` stays as it is, and a plan made with the seventh issue is still accepted.
+
+| File | What changed |
+|---|---|
+| `tools/check-scripts.sh` | Rule 2 with `grep -E` instead of awk (R64); a folder without scripts is skipped (R65) |
+| `tools/script-tests/run.sh` | Two scenarios more (167); the harness prints nothing beside a `PASS` line (R65) |
+| `docs/16-runner-pilot-checklist.md` | What the offline checks print when they pass, and what they printed on the workstation |
+| `docs/15-deployment-runner.md` | The status: the tests also passed on the workstation |
+| `docs/runner-validation-log.md` | The run of 23:09, findings R64 and R65 |
 

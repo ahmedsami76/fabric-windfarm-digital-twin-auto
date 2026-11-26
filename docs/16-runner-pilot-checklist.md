@@ -12,7 +12,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 |---|---|---|---|
 | `preflight` | yes | yes: four runs on 25 November, second to third issue | the same with every call pinned to the subscription, and the two directory reads through Microsoft Graph |
 | `plan` | yes | the sixth issue's plan ran to its end on 25 November (plan `f3cdc565c27f`, questions answered in a terminal) | a plan settled from options and a profile with no question; the saved plan file |
-| `apply` | yes: 111 tests | **nothing**: the runner has made nothing in Azure or Fabric | everything below |
+| `apply` | yes: 111 tests, which also passed on the workstation of the tenant runs | **nothing**: the runner has made nothing in Azure or Fabric | everything below |
 | Interrupted notebook run, resumed | yes | no | step 4 |
 | Second apply adds nothing | yes | no | step 5 |
 | Scripts under the runner, pinned | yes, against a stand-in `az` | no. The scripts themselves ran by hand, 19 to 25 November | that `az iot ops` and `az connectedk8s` accept `--subscription` (they are extension commands and could not be tried here) |
@@ -27,6 +27,8 @@ No time is promised for any step. Note the clock at each one: those are the firs
 ```bash
 cd simulator && python3 -m pytest -q tests/test_deploy_runner.py && cd .. && bash tools/script-tests/run.sh
 ```
+
+  It ends with `111 passed` and with `passed 167, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
 
 - [ ] `az login` as yourself, and `az extension add --name azure-iot-ops --yes` if preflight ever said it is missing.
 - [ ] The capacity to reuse is **Active** in the Azure portal: `fabcentralussm01` (ID `d21d9da9-4054-4790-bc82-71aad3a91152`). The runner resumes none.

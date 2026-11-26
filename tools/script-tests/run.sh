@@ -286,7 +286,7 @@ check "--azure, the group is not deleted: the deployment's own capacity is said 
 azure_state
 run bash "$CLEAN" --azure --yes
 order "iot ops delete" "group delete" && order "role assignment delete" "group delete" && OUT="$OUT ORDER-OK"
-OUT="$OUT note:$(tr '\n' ' ' < "$CLEANUP_STATE_FILE" 2>/dev/null)"
+OUT="$OUT note:$(cat "$CLEANUP_STATE_FILE" 2>/dev/null | tr '\n' ' ')"
 check "--azure: uninstalls, removes both role assignments, deletes the group, in that order" 0 "iot ops delete --name aio-windfarm --resource-group rg-windfarm-edge --include-deps --yes$" "role assignment delete --ids /subscriptions/s/providers/Microsoft.Authorization/roleAssignments/sub-reader" "role assignment delete --ids .*rg-onboard" "group delete --name rg-windfarm-edge --yes$" "Nothing of this deployment is left in Azure" "ORDER-OK" "note:VM_PRINCIPAL_ID=11111111-2222-3333-4444-555555555555 AIO_EXTENSION_NAME=azure-iot-operations-ab1cd AIO_EXTENSION_PRINCIPAL_ID=aaaaaaaa-0000-0000-0000-00000000e0e0" "!vm start" "!--force" "!extension add"
 
 azure_state; echo "VM deallocated" > "$STUB_DIR/power"; echo Offline > "$STUB_DIR/cluster"; touch "$STUB_DIR/connect_on_start"
@@ -530,7 +530,7 @@ PRDIR="$SCRATCH/principal"; PRINCIPAL="$PRDIR/create-principal.sh"
 pr_reset() { reset; rm -rf "$PRDIR"; mkdir -p "$PRDIR/windfarm-twin/rayfin"; echo "id: windfarm-twin" > "$PRDIR/windfarm-twin/rayfin/rayfin.yml"; cp "$REPO/app/create-principal.sh" "$PRINCIPAL"; }
 pr_run() { OUT="$(PATH="$HERE/stubs-principal:$PATH" bash "$PRINCIPAL" "$@" 2>&1)"; RC=$?; }
 pr_facts() { OUT="$OUT
-received:$(tr '\n' ' ' < "$STUB_DIR/secrets_received" 2>/dev/null) file:$([[ -e "$PRDIR/windfarm-twin/rayfin/.env.secrets" ]] && echo left || echo gone) role:$(grep -o '"role": "[A-Za-z]*"' "$STUB_DIR/roles.json" 2>/dev/null)"; }
+received:$(cat "$STUB_DIR/secrets_received" 2>/dev/null | tr '\n' ' ') file:$([[ -e "$PRDIR/windfarm-twin/rayfin/.env.secrets" ]] && echo left || echo gone) role:$(grep -o '"role": "[A-Za-z]*"' "$STUB_DIR/roles.json" 2>/dev/null)"; }
 
 pr_reset; pr_run; pr_facts
 check "create-principal, first run: registration, principal, Viewer role, secret, three secrets to the app" 0 \
@@ -628,13 +628,22 @@ check "check-scripts, a validation log is a record and is not checked" 0 "!valid
 ck_reset; printf '"$REPO_ROOT/infra/good.sh" status\n' > "$CKDIR"/infra/caller.sh; ck_run
 check "check-scripts, a script starts another one directly: rule 2 still fails" 1 "FAIL rule 2: infra/caller.sh"
 
+# Every way a script is started directly, one to a line. The rule once read its pattern through awk, and under GNU awk
+# it saw the last of these and none of the first three (first run of these scenarios on a workstation, 25 November 2026).
+ck_reset; printf '%s\n' '#!/usr/bin/env bash' '"$HERE/good.sh" status' '  "${HERE}/good.sh"' 'exec "$REPO_ROOT/infra/good.sh" start' './good.sh' > "$CKDIR"/infra/caller.sh; ck_run
+check "check-scripts, started through a variable, a variable in braces, exec, and ./: rule 2 names each line" 1 "FAIL rule 2: infra/caller.sh" \
+  '2: "$HERE/good.sh" status' '3:   "${HERE}/good.sh"' '4: exec "$REPO_ROOT/infra/good.sh" start' "5: ./good.sh" "!awk:"
+
+ck_reset; printf '%s\n' '#!/usr/bin/env bash' 'bash "$HERE/good.sh" status' 'source "$HERE/good.sh"' '. "$HERE/good.sh"' 'exec bash "$HERE/good.sh"' 'echo "$HERE/good.sh"' 'x="$HERE/good.sh"' > "$CKDIR"/infra/caller.sh; ck_run
+check "check-scripts, started through bash, read with source, or only named: rule 2 passes, and awk has no part in it" 0 "ok   infra/caller.sh" "!FAIL" "!awk:" "!No such file"
+
 # ---- infra/08-create-command-path.sh: the path for commands from Fabric to the edge (Phase 5a). az is a
 # stand-in (stubs-commands) for the Fabric API and for the data flow commands of Azure IoT Operations.
 chmod +x "$HERE"/stubs-commands/*
 cp_reset() { reset; rm -rf "$REPO/edge/dataflows/rendered"; }
 cp_run() { OUT="$(PATH="$HERE/stubs-commands:$PATH" bash "$REPO"/infra/08-create-command-path.sh "$@" 2>&1)"; RC=$?; }
 cp_facts() { OUT="$OUT
-applied:$(tr -d ' \n' < "$STUB_DIR/applied.json" 2>/dev/null) definition:$(python3 -c 'import base64, json, sys
+applied:$(cat "$STUB_DIR/applied.json" 2>/dev/null | tr -d ' \n') definition:$(python3 -c 'import base64, json, sys
 body = json.load(open(sys.argv[1])); part = body["definition"]["parts"][0]
 print(body["displayName"], part["path"], part["payloadType"], json.dumps(json.loads(base64.b64decode(part["payload"])), separators=(",", ":")))' "$STUB_DIR/posted.json" 2>/dev/null)"; }
 
@@ -694,7 +703,7 @@ ENV6="$SCRATCH/demo6.env"
 sed -e 's/^EVENTSTREAM_BOOTSTRAP_SERVER=""/EVENTSTREAM_BOOTSTRAP_SERVER="esehtelemetry1.servicebus.windows.net:9093"/' -e 's/^EVENTSTREAM_TOPIC=""/EVENTSTREAM_TOPIC="esehtelemetry1_eh"/' "$ENV_FILE" > "$ENV6"
 c6_run() { OUT="$(PATH="$HERE/stubs-commands:$PATH" ENV_FILE="$ENV6" bash "$REPO"/infra/06-connect-edge-to-fabric.sh "$@" 2>&1)"; RC=$?
   OUT="$OUT
-applied:$(tr -d ' \n' < "$STUB_DIR/applied.json" 2>/dev/null) calls:$(grep -c "" "$STUB_DIR/calls.log" 2>/dev/null) installs:$(grep -c "extension add" "$STUB_DIR/calls.log" 2>/dev/null)"; }
+applied:$(cat "$STUB_DIR/applied.json" 2>/dev/null | tr -d ' \n') calls:$(grep -c "" "$STUB_DIR/calls.log" 2>/dev/null) installs:$(grep -c "extension add" "$STUB_DIR/calls.log" 2>/dev/null)"; }
 c6_deployed() { echo "$1" > "$STUB_DIR/telemetry_topic"; echo "$2" > "$STUB_DIR/telemetry_host"; }
 
 cp_reset; c6_run

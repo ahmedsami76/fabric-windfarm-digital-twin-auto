@@ -36,13 +36,17 @@ direct_starts() {  # direct_starts FILE: numbered lines that show a script start
     | grep -n -E "(^|[^A-Za-z0-9_}\"/.~-])${SCRIPT_PATH}" || true
 }
 for script in "$REPO_ROOT"/infra/*.sh "$REPO_ROOT"/edge/scripts/*.sh "$REPO_ROOT"/tools/*.sh "$REPO_ROOT"/app/*.sh "$REPO_ROOT"/config/*.sh; do
+  [[ -e "$script" ]] || continue   # a folder without scripts leaves its pattern as it was written
   # Comment lines may mention the commands; only executable lines count for rules 1 and 2.
   code="$(grep -n -v -E '^[[:space:]]*#' "$script" || true)"
   ok=yes
   if [[ "$script" == "$REPO_ROOT"/infra/* ]]; then
     if hits="$(grep -E "^[0-9]+:.*($FORBIDDEN|$FORBIDDEN_ADD)" <<< "$code")"; then report 1 "$script" "$hits"; ok=""; fi
   fi
-  if hits="$(sed -E 's/^([0-9]+):/\1\t/' <<< "$code" | awk -F'\t' -v re="$DIRECT_CALL" '$2 ~ re {print $1 ": " $2}')" && [[ -n "$hits" ]]; then
+  # With grep, as rule 1, and not with awk: a pattern handed to awk as a variable is read as awk
+  # text first, and GNU awk then takes "\$" for the end of a line (with a warning) where mawk takes
+  # it for a dollar sign. Under GNU awk this rule did not see "$DIR/other.sh" at all.
+  if hits="$(grep -E "^[0-9]+:${DIRECT_CALL#^}" <<< "$code" | sed -E 's/^([0-9]+):/\1: /')" && [[ -n "$hits" ]]; then
     report 2 "$script" "$hits"; ok=""
   fi
   # Rule 3 counts comment lines too: the header of a script is its usage text.
