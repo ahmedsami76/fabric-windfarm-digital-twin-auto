@@ -64,6 +64,9 @@ def parser() -> argparse.ArgumentParser:
                      help="pip-jobs: try the notebooks that use %%pip as jobs (not documented for jobs started through the API)")
     top.add_argument("--enable-phase5a-isolated-simulator", action="store_true",
                      help="also provision the command path of Phase 5a, switched off. For an edge that is this demo's simulator only")
+    top.add_argument("--lakehouse-only", action="store_true",
+                     help="Phase 4 without the service principal for the Eventhouse: no app registration is made, and the twin "
+                          "shows the Lakehouse's copy, minutes behind. For a tenant that does not let you create one")
     top.add_argument("--regenerate-history", metavar="LABEL", default="",
                      help="run notebook 02 again, once for this label (for example a date)")
     top.add_argument("--confirm", metavar="STEP", action="append", default=[], help="apply: you confirm a step the runner cannot read")
@@ -85,7 +88,7 @@ def options_of(args) -> Options:
     if args.approve_capacity_creation:
         granted.add("capacity")
     return Options(up_to=args.up_to, granted=granted, phase5a=args.enable_phase5a_isolated_simulator,
-                   regenerate_history=args.regenerate_history)
+                   lakehouse_only=args.lakehouse_only, regenerate_history=args.regenerate_history)
 
 
 def target_of(ctx: Context, account: dict) -> dict:
@@ -304,6 +307,8 @@ def apply_command(ctx: Context, args, digest: str) -> str:
     words += [f"--opt-in {need.split(':', 1)[1]}" for need in sorted(granted) if need.startswith("optin:")]
     if ctx.options.phase5a:
         words.append("--enable-phase5a-isolated-simulator")
+    if ctx.options.lakehouse_only:
+        words.append("--lakehouse-only")
     if ctx.options.regenerate_history:
         words.append(f"--regenerate-history {ctx.options.regenerate_history}")
     return " ".join(words)

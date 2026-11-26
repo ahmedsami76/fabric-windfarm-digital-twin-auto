@@ -79,6 +79,12 @@ class World:
         self.ingestion_works = True
         self.fail_script = ""
         self.rayfin_signed_in = True
+        self.registrations: dict = {}        # app registrations in the directory, by name: appId, objectId, secrets
+        self.no_registrations = False        # a tenant that lets nobody register an application
+        self.secrets_in_app: dict = {}       # app folder -> the start of the secret the app's tool was handed
+        self.ups: list = []                  # each deployment of the app: (folder, the secret it had then)
+        self.made_secrets: list = []         # every secret made, by registration
+        self.directory_lag = 0               # after a secret is made: reads of the registration that still show the one before
         self.sql_route = {"rows": 7548, "turbines": 12, "newest_minutes": 2.0}
         self.gate_file = True
         self.node = "v22.23.5"
@@ -166,8 +172,22 @@ class FakeAz:
             raise CloudError("Microsoft Graph answered 403 to me: Insufficient privileges")
         if path == "me?$select=id":
             return {"id": w.my_object_id}
+        listed = re.fullmatch(r"applications\?\$filter=displayName%20eq%20'([A-Za-z0-9-]+)'&\$select=appId,passwordCredentials", path)
+        if listed:
+            entry = w.registrations.get(listed[1])
+            if not entry:
+                return {"value": []}
+            secrets = entry["secrets"]
+            if entry.get("lag", 0) > 0:          # the directory still shows what was there before the newest secret was made
+                entry["lag"] -= 1
+                secrets = entry["before"]
+            return {"value": [{"appId": entry["appId"], "passwordCredentials": [
+                {"keyId": f"key-{n}", "startDateTime": start, "endDateTime": end} for n, (start, end) in enumerate(secrets)]}] * entry.get("copies", 1)}
         found = re.fullmatch(r"servicePrincipals\(appId='([0-9a-f-]{36})'\)\?\$select=id", path)
         assert found, f"a Graph request the fake does not know: {path}"
+        ours = next((entry for entry in w.registrations.values() if entry["appId"] == found[1]), None)
+        if ours:
+            return {"id": ours["objectId"]}
         return {"id": w.custom_locations} if w.custom_locations else None
 
     def token(self, resource: str) -> str:
@@ -626,7 +646,34 @@ class FakeShell:
             if not w.rayfin_signed_in:
                 w.writes.pop()
                 return 1, "Error: You are not signed in. Run `rayfin login`."
-            w.add_item(ws, "FabricApp", "WindFarmTwin")
+            if not w.find(ws, "FabricApp", "WindFarmTwin"):
+                w.add_item(ws, "FabricApp", "WindFarmTwin")
+            w.ups.append((str(cwd), w.secrets_in_app.get(str(cwd))))
+        elif "create-principal.sh" in command:
+            suffix = names.read_env(settings)["DEPLOYMENT_SUFFIX"]
+            # a registration of the deployment's own, the app's folder of the deployment, the workspace by name
+            assert env.get("PRINCIPAL_NAME") == f"windfarm-twin-eventhouse-reader-{suffix}", f"the registration was named {env.get('PRINCIPAL_NAME')}"
+            assert Path(env.get("APP_DIR", "")) == settings.parent / "app" / "windfarm-twin" and env.get("FABRIC_WORKSPACE_NAME") == named
+            assert w.find(ws, "FabricApp", "WindFarmTwin"), "the principal's script was started before the app was deployed"
+            entry = w.registrations.get(env["PRINCIPAL_NAME"])
+            if not entry:
+                if w.no_registrations:
+                    w.writes.pop()
+                    return 1, ("STOP: The app registration was not created: ERROR: Insufficient privileges to complete the operation. "
+                               "If your tenant does not let you create one, the twin stays on the Lakehouse.")
+                number = len(w.registrations) + 1
+                entry = w.registrations[env["PRINCIPAL_NAME"]] = {"appId": f"aaaaaaaa-0000-4000-8000-{number:012d}",
+                                                                  "objectId": f"principal-reader-{number}", "secrets": []}
+            w.access.setdefault(ws, {}).setdefault(entry["objectId"], "Viewer")
+            made = len(w.made_secrets) + 1
+            w.made_secrets.append(env["PRINCIPAL_NAME"])
+            entry["before"], entry["lag"] = list(entry["secrets"]), w.directory_lag
+            entry["secrets"] = [(f"2026-11-26T23:{made:02d}:00Z", f"2027-11-26T23:{made:02d}:00Z")]      # a reset replaces what was there
+            (Path(env["APP_DIR"]) / "rayfin").mkdir(parents=True, exist_ok=True)
+            if not w.rayfin_signed_in:
+                (Path(env["APP_DIR"]) / "rayfin" / ".env.secrets").write_text(f"KUSTO_CLIENT_SECRET={KEY}\n")     # as a killed run would leave it
+                return 1, "STOP: Rayfin did not take the secrets. If it is not signed in: cd app, npx rayfin login, then run this script again (it makes a new secret)."
+            w.secrets_in_app[str(env["APP_DIR"])] = entry["secrets"][-1][0]
         elif "vm.sh push" in command:
             w.writes.pop()          # copies files to the VM: not a change worth counting in the tests
         else:

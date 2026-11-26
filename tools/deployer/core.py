@@ -102,6 +102,10 @@ class State:
                 raise Refused(f"The checkpoint {self.path} cannot be read ({error}). It is written in one move, so this is "
                               "not a half-written file: someone changed it. Restore it or move it away.") from None
 
+    def now(self) -> float:
+        """The time of day, in seconds: for waits that have to hold from one run to the next."""
+        return self._clock()
+
     def stamp(self) -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._clock()))
 
@@ -280,6 +284,7 @@ class Options:
     up_to: str = "phase1"
     granted: set = field(default_factory=set)      # "roles", "preview:ontology", "optin:pip-jobs", ...
     phase5a: bool = False
+    lakehouse_only: bool = False     # Phase 4 without the service principal for the Eventhouse: the twin on its Lakehouse route
     regenerate_history: str = ""     # a label; the history is generated again once for each new label
     limits: dict = field(default_factory=lambda: {"operation": 900, "job": 2700, "poll": 10})
 
@@ -503,6 +508,7 @@ def plan_record(ctx: Context, lines: list[Line], target: dict) -> dict:
         "ssh_scope": cfg.get("SSH_SOURCE_CIDR") or PUBLIC_ADDRESS,
         "role_grants": [[line.step.id, line.step.writes] for line in lines if "roles" in line.step.needs],
         "approvals_and_opt_ins": sorted(ctx.options.granted), "up_to": ctx.options.up_to, "phase5a": ctx.options.phase5a,
+        "lakehouse_only": ctx.options.lakehouse_only,
         "regenerate_history": ctx.options.regenerate_history,
         "settings": {key: cfg[key] for key in sorted(cfg) if key not in apart},
         "runner": file_digest(ctx.root, "tools/deployer"),

@@ -5,6 +5,7 @@ S="$STUB_DIR"; args="$*"
 echo "az $args" >> "$S/calls.log"
 WS="638251b5-0826-4632-b8f1-642e05d39629"
 case "$args" in
+  "account show --query tenantId"*"--subscription "*) cat "$S/pinned_tenant" 2>/dev/null || echo 11111111-2222-3333-4444-555555555555 ;;   # the tenant of the subscription that was named
   "account show --query tenantId"*)  [[ ! -f "$S/not_signed_in" ]] || { echo "ERROR: Please run 'az login' to setup account." >&2; exit 1; }; echo 11111111-2222-3333-4444-555555555555 ;;
   "account show --query user.name"*) echo sami@contoso.example ;;
   "rest --resource https://api.fabric.microsoft.com --method get --url https://api.fabric.microsoft.com/v1/workspaces --output json")
@@ -22,8 +23,8 @@ case "$args" in
       body="$(echo "$args" | sed -E 's/.*--body (.*) --output none/\1/')"
       python3 -c 'import json,sys; b=json.loads(sys.argv[1]); print(json.dumps({"value": [{"id": b["principal"]["id"], "principal": b["principal"], "role": b["role"]}]}))' "$body" > "$S/roles.json" ;;
   "rest --resource https://api.fabric.microsoft.com --method delete --url https://api.fabric.microsoft.com/v1/workspaces/$WS/roleAssignments/"*) rm -f "$S/roles.json" ;;
-  "ad app list --filter displayName eq 'windfarm-twin-eventhouse-reader'"*) cat "$S/appid" 2>/dev/null || true ;;   # no match: nothing, exit 0, as az does
-  "ad app create --display-name windfarm-twin-eventhouse-reader --sign-in-audience AzureADMyOrg"*)
+  "ad app list --filter displayName eq 'windfarm-twin-eventhouse-reader"*) cat "$S/appid" 2>/dev/null || true ;;   # no match: nothing, exit 0, as az does
+  "ad app create --display-name windfarm-twin-eventhouse-reader"*" --sign-in-audience AzureADMyOrg"*)
       [[ ! -f "$S/no_app_rights" ]] || { echo "ERROR: Insufficient privileges to complete the operation." >&2; exit 1; }
       echo aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee | tee "$S/appid" ;;
   "ad sp show --id "*)   [[ -s "$S/spid" ]] && cat "$S/spid" || { echo "ERROR: Resource does not exist" >&2; exit 3; } ;;

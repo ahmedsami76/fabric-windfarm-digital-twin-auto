@@ -15,7 +15,7 @@ from pathlib import Path
 import json
 import re
 
-from .cloud import SQL_RESOURCE, CloudError, run_notebook
+from .cloud import SQL_RESOURCE, UNREACHED, CloudError, run_notebook
 from .core import Blocked, Options, Probe, Step, blocked, done, todo, unverified
 from .steps import (DATA_AGENT, MODEL, NOTEBOOKS, ONTOLOGY, OPERATIONS_AGENT, REPORT, after, confirmation,
                     data_flow, freshness, gate_lakehouse, import_notebooks, instance, item, items, kql, kql_database, name,
@@ -255,6 +255,130 @@ def act_deploy_app(ctx) -> None:
         if re.search(r"(?i)sign[ -]?in|log ?in|keychain|unauthor|401", text):
             raise Blocked("The app's tool is not signed in. Signing in opens a browser and is yours to do.", SIGN_IN.format(app=app_label(ctx)))
         raise CloudError(f"npx rayfin up ended with exit code {code}. Its last lines are above; it names a diagnostic log.")
+    ctx.state.note("p4.deploy", up_at=ctx.state.now())
+
+
+# ------------------------------------------------------------------------------- the live route: a service principal
+# A Fabric app runs as its owner and gets no token the Eventhouse accepts (Phase 4, 23 November 2026). With a service
+# principal the twin reads the Eventhouse, seconds behind the turbines; without one it reads the Lakehouse's copy, minutes
+# behind. Asked for as a step of the runner on 26 November 2026: "I need the demo to run as in the previous run (live from
+# KQL and delayed with lakehouse)". The runner starts app/create-principal.sh, which ran on a tenant on 23 November.
+PRINCIPAL = "windfarm-twin-eventhouse-reader"
+REDEPLOY_GAP = 150       # seconds between two deployments of an app's functions (Rayfin's guide says two minutes)
+WITHOUT = ("To go on without the live route, with the twin on the Lakehouse's copy: make the plan again with --lakehouse-only.")
+
+
+def principal_name(ctx) -> str:
+    """A registration of the deployment's own. Making a secret replaces the one before it, so a registration shared with
+    another deployment would take that deployment's twin off its live route."""
+    return f"{PRINCIPAL}-{ctx.cfg['DEPLOYMENT_SUFFIX']}"
+
+
+def principal(ctx) -> dict:
+    """What Microsoft Entra ID holds under that name: read through Microsoft Graph, in the deployment's tenant."""
+    def read():
+        listed = ctx.az.graph(f"applications?$filter=displayName%20eq%20'{principal_name(ctx)}'&$select=appId,passwordCredentials")
+        found = (listed or {}).get("value") or []
+        if len(found) != 1:
+            return {"count": len(found)}
+        holder = ctx.az.graph(f"servicePrincipals(appId='{found[0]['appId']}')?$select=id") or {}
+        return {"count": 1, "app_id": found[0]["appId"], "object_id": holder.get("id", ""),
+                "secrets": sorted((key.get("startDateTime") or "", key.get("endDateTime") or "")
+                                  for key in found[0].get("passwordCredentials") or [])}
+    return ctx.remember("principal", read)
+
+
+def p4_principal(ctx) -> Probe:
+    if not workspace_id(ctx) or not app_item(ctx):
+        return after("p4.deploy")
+    label = principal_name(ctx)
+    try:
+        known = principal(ctx)
+    except CloudError as error:
+        if error.code == UNREACHED:
+            raise
+        return blocked(f"Microsoft Entra ID did not say whether the app registration {label} exists: {error}", WITHOUT)
+    if known["count"] > 1:
+        return blocked(f"{known['count']} app registrations are named {label}. The runner takes none of them for its own.",
+                       "Microsoft Entra admin center, App registrations: rename or delete the ones that are not this deployment's.")
+    if not known["count"]:
+        return todo(f"no app registration named {label} yet")
+    if not known["object_id"]:
+        return todo(f"the app registration {label} has no service principal yet")
+    roles = {(entry.get("principal") or {}).get("id"): entry.get("role") for entry in
+             ctx.remember("access", lambda: ctx.fabric.listing(f"workspaces/{workspace_id(ctx)}/roleAssignments"))}
+    if not roles.get(known["object_id"]):
+        return todo(f"the service principal {label} has no role in the workspace yet")
+    now = ctx.state.stamp()[:19]
+    if not [end for _start, end in known["secrets"] if end[:19] > now]:
+        return todo(f"the app registration {label} has no client secret that is still valid")
+    saved = ctx.state.step("p4.eventhouse_principal").get("evidence") or {}
+    if saved.get("secret_start") != known["secrets"][-1][0]:
+        # The runner never sees the secret. What it can compare is when the registration's newest secret was made.
+        return todo("the app has not been handed the registration's present secret by this deployment")
+    return done(f"service principal {label} ({known['app_id']}): {roles[known['object_id']]} in the workspace, its secret "
+                f"handed to the app on {saved.get('handed_at', 'an earlier run')}", app_id=known["app_id"])
+
+
+def act_principal(ctx) -> None:
+    label, leftover = principal_name(ctx), app_dir(ctx) / "rayfin" / ".env.secrets"
+    try:
+        before = (principal(ctx).get("secrets") or [("", "")])[-1][0]
+    except CloudError as error:
+        raise Blocked(f"Microsoft Entra ID did not answer about the app registration {label}: {error}", WITHOUT) from None
+    try:
+        code, text = ctx.shell.run(["bash", "app/create-principal.sh"], env={
+            "ENV_FILE": str(ctx.env_file), "AZ_SUBSCRIPTION_PIN": ctx.cfg.get("SUBSCRIPTION_ID", ""), "PRINCIPAL_NAME": label,
+            "FABRIC_WORKSPACE_NAME": ctx.cfg["FABRIC_WORKSPACE_NAME"], "APP_DIR": str(app_dir(ctx))})
+    finally:
+        if leftover.exists():       # the script removes the file it hands to the app's tool; a run that was stopped may not have
+            leftover.unlink()
+    if code != 0:
+        said = next((row.strip() for row in reversed(text.splitlines()) if row.strip().startswith("STOP:")), "")[6:300]
+        if "Rayfin did not take the secrets" in text:
+            raise Blocked("The app's tool did not take the secrets. Most likely it is not signed in.", SIGN_IN.format(app=app_label(ctx)))
+        if "active subscription is in tenant" in text:
+            raise Blocked(said, f"az account set --subscription {ctx.cfg.get('SUBSCRIPTION_ID', '')}")
+        if re.search(r"was not created|No secret was made|may not read app registrations", text):
+            raise Blocked(f"Microsoft Entra ID did not let you make the app registration or its secret. {said}",
+                          "Ask an administrator of the directory for the right to register applications (the role Application "
+                          "Developer), or for the registration itself.\n" + WITHOUT)
+        if "The role was not given" in text:
+            raise Blocked(said, "You need the Admin or Member role in the workspace. Then run apply again.")
+        raise CloudError(f"bash app/create-principal.sh ended with exit code {code}. Its last lines are above.")
+    # The script made a new secret and handed it to the app. Which one, the runner knows only by its time in the directory.
+    deadline = ctx.clock() + 120
+    while True:
+        ctx.cache.clear()
+        newest = (principal(ctx).get("secrets") or [("", "")])[-1][0]
+        if newest and newest != before:
+            break
+        if ctx.clock() >= deadline:
+            raise CloudError(f"The secret was made and handed to the app, and Microsoft Entra ID does not list it yet under {label}. "
+                             "Run apply again: it makes a new one and looks again.")
+        ctx.sleep(ctx.options.limits["poll"])
+    ctx.state.note("p4.eventhouse_principal", secret_start=newest, handed_at=ctx.state.stamp())
+
+
+def p4_redeploy(ctx) -> Probe:
+    handed = (ctx.state.step("p4.eventhouse_principal").get("evidence") or {}).get("secret_start")
+    if ctx.state.step("p4.eventhouse_principal").get("status") != "complete" or not handed:
+        return after("p4.eventhouse_principal")
+    mine = (ctx.state.step("p4.deploy_secrets").get("evidence") or {}).get("deployed_for")
+    if mine != handed:
+        return todo("the app has not been deployed since its secrets were set")
+    return done("the app was deployed again after its secrets were set")
+
+
+def act_redeploy(ctx) -> None:
+    handed = (ctx.state.step("p4.eventhouse_principal").get("evidence") or {}).get("secret_start")
+    last = (ctx.state.step("p4.deploy").get("evidence") or {}).get("up_at")
+    gap = REDEPLOY_GAP - (ctx.state.now() - last) if last else 0
+    if 0 < gap <= REDEPLOY_GAP:
+        ctx.say(f"      waiting {gap:.0f} s: an app's functions are not deployed twice within two minutes")
+        ctx.sleep(gap)
+    act_deploy_app(ctx)
+    ctx.state.note("p4.deploy_secrets", deployed_for=handed)
 
 
 def lakehouse_route(ctx) -> dict:
@@ -297,6 +421,42 @@ def gate_route_probe(ctx) -> Probe:
 
 def phase4(options: Options) -> list[Step]:
     settings_probe, settings_manual = tenant_settings("phase4")
+    check_lakehouse = Step("p4.connection_check", "phase4", "The app's own connection check: what makes the twin demo-ready",
+             lambda ctx: todo("yours to read, once: the runner has no documented way to ask the deployed app"), optional=True,
+             observable=False,
+             manual="Open the app in the workspace and select the badge at the top right. Read three things off the check: the "
+             "build it names, the route that says PASS (Lakehouse, or Eventhouse with the service principal), and how old the "
+             "newest reading is.\nThen tell the runner, with the next apply: --app-check BUILD,ROUTE,SECONDS   for example "
+             "--app-check 455aa9777780,lakehouse,120\nstatus calls the twin demo-ready only with that, for the build that is deployed.",
+             basis="the app", proof="live")
+    check_live = Step("p4.connection_check", "phase4", "The app's own connection check: what makes the twin demo-ready",
+             lambda ctx: todo("yours to read, once: the runner has no documented way to ask the deployed app"), optional=True,
+             observable=False,
+             manual="Open the app in the workspace and select the badge at the top right. Read three things off the check: the "
+             "build it names, the route that says PASS, and how old the newest reading is. With the service principal that is the "
+             "Eventhouse route; the Lakehouse route is what the twin falls back to.\nThen tell the runner, with the next apply: "
+             "--app-check BUILD,ROUTE,SECONDS   for example --app-check 455aa9777780,eventhouse,40\nstatus calls the twin demo-ready only with that, for the build that is deployed.",
+             basis="the app", proof="live")
+    live = [
+        Step("p4.eventhouse_principal", "phase4", "Real-time values: a service principal that reads the Eventhouse", p4_principal, act_principal,
+             needs=("roles",), wait_seconds=120, inputs=("app/create-principal.sh",),
+             writes="in Microsoft Entra ID: one app registration named windfarm-twin-eventhouse-reader-<suffix>, its service principal, and "
+                    "one client secret valid for a year, which replaces any earlier secret of that registration. In Fabric: the Viewer "
+                    "role for that principal in the demo's workspace, and three secrets of the app. The secret is never shown or stored",
+             basis="app/create-principal.sh (az ad app create, az ad sp create, az ad app credential reset; Workspaces - Add Workspace "
+                   "Role Assignment; npx rayfin secret set); read with Microsoft Graph, GET /applications", proof="live"),
+        Step("p4.deploy_secrets", "phase4", "App deployed again, so that its functions read the secrets", p4_redeploy, act_redeploy,
+             observable=False, writes="the app's page and functions, deployed a second time",
+             basis="npx rayfin up --workspace NAME --item-name NAME (Rayfin 2.0.1)", proof="live"),
+    ]
+    lakehouse_only = [
+        Step("p4.eventhouse_principal", "phase4", "Real-time values: the service principal (left out with --lakehouse-only)",
+             lambda ctx: todo("not looked at: optional, and the runner neither creates an app registration nor grants it a role"),
+             optional=True, observable=False, manual="When you want the twin 40 seconds behind the turbines instead of minutes:\n"
+             "bash app/create-principal.sh\nIt finds the workspace and the app folder of the current deployment by itself, creates an app registration with a secret and gives "
+             "it Viewer in the workspace; step 7 of docs/11-deployment-guide-phase4.md. Without it the twin runs on the Lakehouse route.",
+             basis="app/create-principal.sh", proof="live"),
+    ]
     return [
         Step("phase4.tenant_settings", "phase4", "Tenant setting Fabric Apps", settings_probe, manual=settings_manual,
              observable=False, basis="Fabric admin portal", proof="none"),
@@ -312,23 +472,12 @@ def phase4(options: Options) -> list[Step]:
              if workspace_id(ctx) else after("p1.workspace"), act_deploy_app, wait_seconds=120, inputs=("app/overlay",),
              writes="the Fabric app item WindFarmTwin, its page and its seven functions",
              basis="npx rayfin up --workspace NAME --item-name NAME (Rayfin 2.0.1)", proof="live"),
+        *([] if options.lakehouse_only else live),
         Step("p4.gate_data_route", "phase4", "GATE: the Lakehouse answers the twin's query (asked with the operator's token)", gate_route_probe, gate_route_act,
              observable=False, writes="nothing; one query against the SQL endpoint of the Lakehouse",
              basis="SQL analytics endpoint, with a token for https://database.windows.net", proof="offline"),
-        Step("p4.eventhouse_principal", "phase4", "Real-time values: the service principal (optional)",
-             lambda ctx: todo("not looked at: optional, and the runner neither creates an app registration nor grants it a role"),
-             optional=True, observable=False, manual="When you want the twin 40 seconds behind the turbines instead of minutes:\n"
-             "bash app/create-principal.sh\nIt finds the workspace and the app folder of the current deployment by itself, creates an app registration with a secret and gives "
-             "it Viewer in the workspace; step 7 of docs/11-deployment-guide-phase4.md. Without it the twin runs on the Lakehouse route.",
-             basis="app/create-principal.sh", proof="live"),
-        Step("p4.connection_check", "phase4", "The app's own connection check: what makes the twin demo-ready",
-             lambda ctx: todo("yours to read, once: the runner has no documented way to ask the deployed app"), optional=True,
-             observable=False,
-             manual="Open the app in the workspace and select the badge at the top right. Read three things off the check: the "
-             "build it names, the route that says PASS (Lakehouse, or Eventhouse with the service principal), and how old the "
-             "newest reading is.\nThen tell the runner, with the next apply: --app-check BUILD,ROUTE,SECONDS   for example "
-             "--app-check 455aa9777780,lakehouse,120\nstatus calls the twin demo-ready only with that, for the build that is deployed.",
-             basis="the app", proof="live"),
+        *(lakehouse_only if options.lakehouse_only else []),
+        check_lakehouse if options.lakehouse_only else check_live,
     ]
 
 

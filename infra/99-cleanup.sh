@@ -640,6 +640,13 @@ if [[ ${#LEFT_TO_DO[@]} -gt 0 ]]; then
   for item in "${LEFT_TO_DO[@]}"; do info "  - $item"; done
 fi
 info "Not touched: files on this machine, your SSH key, resource provider registrations."
+if [[ -n "${DEPLOYMENT_SUFFIX:-}" ]]; then
+  # tools/deploy.py makes one for the twin's live route (step p4.eventhouse_principal). It is in the directory, not in the
+  # resource group or the workspace, and it holds a client secret.
+  info "Not touched either: the app registration windfarm-twin-eventhouse-reader-${DEPLOYMENT_SUFFIX} in Microsoft Entra ID, if this deployment made one."
+  info "  It holds a client secret. To see it: az ad app list --filter \"displayName eq 'windfarm-twin-eventhouse-reader-${DEPLOYMENT_SUFFIX}'\" --query \"[].appId\" --output tsv"
+  info "  To delete it: az ad app delete --id <that application ID>   (or Microsoft Entra admin center, App registrations)."
+fi
 if [[ -n "$CAPACITY_DELETED" ]]; then
   info "Fabric capacity $CAPACITY_DELETED: it was this deployment's own, in the resource group, and is deleted with it. Its billing ends with it."
 elif [[ -n "$OWN_CAPACITY" ]]; then

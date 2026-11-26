@@ -335,6 +335,12 @@ check "--azure, a capacity the deployment made: listed before the deletion, and 
 azure_state; capacity_env shared
 run env ENV_FILE="$CAP_ENV" bash "$CLEAN" --azure --yes
 check "--azure, a capacity that existed before: reported as retained, and billing as before" 0 "group delete --name rg-windfarm-edge" "Fabric capacity d21d9da9-shared: retained. It existed before this deployment, is shared, and goes on billing as before" "!is deleted with it"
+# The app registration tools/deploy.py makes for the twin's live route is in the directory: no option removes it, and the last lines say so.
+azure_state; capacity_env shared; sed -i -e 's/^DEPLOYMENT_SUFFIX=.*/DEPLOYMENT_SUFFIX="k3f"/' "$CAP_ENV"
+run env ENV_FILE="$CAP_ENV" bash "$CLEAN" --azure --yes
+check "--azure for a deployment of the runner: says that its app registration is not touched, and how to delete it" 0 "the app registration windfarm-twin-eventhouse-reader-k3f in Microsoft Entra ID" "It holds a client secret" "az ad app delete --id" "!ad app delete --id a"
+azure_state; run bash "$CLEAN" --azure --yes
+check "--azure for a deployment by hand: no word of an app registration it never made" 0 "group delete" "!windfarm-twin-eventhouse-reader-"
 azure_state; capacity_env own; touch "$STUB_DIR/group_delete_fails"
 run env ENV_FILE="$CAP_ENV" bash "$CLEAN" --azure --yes
 check "--azure, the group is not deleted: the deployment's own capacity is said to be still there and billing" 3 "it is this deployment's own and is still there" "goes on billing until the group is gone" "!is deleted with it"
@@ -610,6 +616,22 @@ check "create-principal by hand beside a deployment of the runner: it looks for 
 
 pr_reset; touch "$STUB_DIR/no_workspace"; pr_run
 check "create-principal, the sign-in does not see the workspace: stops before anything is created" 1 "does not see a workspace named WindFarmDigitalTwin" "az login --tenant" "!ad app create"
+
+# A deployment of tools/deploy.py has a registration of its own: making a secret replaces the one before it, and the twin of
+# another deployment would lose its secret (26 November 2026, found before it happened).
+pr_reset; sed -e 's/^DEPLOYMENT_SUFFIX=.*/DEPLOYMENT_SUFFIX="m2p"/' "$ENV_FILE" > "$SCRATCH/suffixed.env"
+OUT="$(ENV_FILE="$SCRATCH/suffixed.env" PATH="$HERE/stubs-principal:$PATH" bash "$PRINCIPAL" 2>&1)"; RC=$?
+check "create-principal for a deployment with a suffix: the registration carries the suffix" 0 \
+  "ad app list --filter displayName eq 'windfarm-twin-eventhouse-reader-m2p'" "ad app create --display-name windfarm-twin-eventhouse-reader-m2p " "app registration   windfarm-twin-eventhouse-reader-m2p"
+pr_reset; OUT="$(PRINCIPAL_NAME=windfarm-twin-eventhouse-reader-mine ENV_FILE="$SCRATCH/suffixed.env" PATH="$HERE/stubs-principal:$PATH" bash "$PRINCIPAL" --show 2>&1)"; RC=$?
+check "create-principal, a name given by hand: that name, whatever the suffix" 0 "No app registration named windfarm-twin-eventhouse-reader-mine\." "!reader-m2p"
+# Under the runner the subscription is named; the directory commands cannot be told, so the active one has to be in the same tenant.
+pr_reset; OUT="$(AZ_SUBSCRIPTION_PIN=11111111-pin PATH="$HERE/stubs-principal:$PATH" bash "$PRINCIPAL" 2>&1)"; RC=$?
+check "create-principal under the runner, the active subscription in the deployment's tenant: goes on" 0 "account show --query tenantId --output tsv --subscription 11111111-pin" "ad app create" "does this itself"
+pr_reset; echo 99999999-other-tenant > "$STUB_DIR/pinned_tenant"; OUT="$(AZ_SUBSCRIPTION_PIN=11111111-pin PATH="$HERE/stubs-principal:$PATH" bash "$PRINCIPAL" 2>&1)"; RC=$?
+check "create-principal under the runner, the active subscription in another tenant: stops before anything is read or created" 1 \
+  "this deployment is in tenant 99999999-other-tenant" "az account set --subscription 11111111-pin" "Nothing was created" "!ad app" "!rest --resource"
+rm -f "$SCRATCH/suffixed.env"
 
 pr_reset; touch "$STUB_DIR/no_app_rights"; pr_run
 check "create-principal, the tenant does not allow app registrations: stops and names the Lakehouse" 1 "The app registration was not created" "Insufficient privileges" "stays on the Lakehouse" "!credential reset"

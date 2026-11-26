@@ -16,6 +16,11 @@
 # Entra ID: one app registration named windfarm-twin-eventhouse-reader with one client secret, valid
 # one year. It gives that principal the Viewer role on the workspace WindFarmDigitalTwin, and nothing
 # else anywhere. The secret is never printed and is not kept in a file.
+#
+# For a deployment of tools/deploy.py the registration carries the deployment's suffix, for example
+# windfarm-twin-eventhouse-reader-3x9: every deployment has a registration of its own, because making
+# a secret replaces the one before it (az ad app credential reset), and another deployment's twin
+# would lose its secret. The runner starts this script itself (step p4.eventhouse_principal).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +30,6 @@ APP="${APP_DIR:-$HERE/windfarm-twin}"
 if [[ -z "${APP_DIR:-}" && ! -d "$APP" && -f "$HERE/../.deploy/current" ]]; then
   APP="$HERE/../.deploy/$(tr -d '[:space:]' < "$HERE/../.deploy/current")/app/windfarm-twin"
 fi
-NAME="${PRINCIPAL_NAME:-windfarm-twin-eventhouse-reader}"
 # The workspace's name: FABRIC_WORKSPACE_NAME when it is given, else what the settings file says (the one ENV_FILE names,
 # else config/demo.env, else the settings of the deployment tools/deploy.py is working on), else the name of the guides.
 SETTINGS="${ENV_FILE:-$HERE/../config/demo.env}"
@@ -37,6 +41,11 @@ if [[ -z "$WORKSPACE_NAME" && -f "$SETTINGS" ]]; then
   WORKSPACE_NAME="$(sed -n 's/^FABRIC_WORKSPACE_NAME="\([^"]*\)".*/\1/p' "$SETTINGS" | head -n 1)"
 fi
 WORKSPACE_NAME="${WORKSPACE_NAME:-WindFarmDigitalTwin}"
+# The registration's name: PRINCIPAL_NAME when it is given; else the name of the guides, with the suffix of the
+# deployment when the settings have one.
+SUFFIX=""
+if [[ -f "$SETTINGS" ]]; then SUFFIX="$(sed -n 's/^DEPLOYMENT_SUFFIX="\([^"]*\)".*/\1/p' "$SETTINGS" | head -n 1)"; fi
+NAME="${PRINCIPAL_NAME:-windfarm-twin-eventhouse-reader${SUFFIX:+-$SUFFIX}}"
 DATABASE_NAME="WindFarmEH"
 FABRIC="https://api.fabric.microsoft.com"
 SECRETS_FILE="$APP/rayfin/.env.secrets"
@@ -57,6 +66,13 @@ trap cleanup EXIT
 TENANT_ID="$(az account show --query tenantId --output tsv 2>"$ERR")" || stop "Not signed in to Azure. Run: az login"
 SIGNED_IN="$(az account show --query user.name --output tsv 2>/dev/null || echo unknown)"
 echo "Signed in to Azure as $SIGNED_IN, tenant $TENANT_ID."
+# Under tools/deploy.py the deployment's subscription is named. The directory commands (az ad) take no --subscription
+# and follow the Azure CLI's active one, so this script goes on only when that one is in the deployment's tenant.
+if [[ -n "${AZ_SUBSCRIPTION_PIN:-}" ]]; then
+  PINNED_TENANT="$(az account show --query tenantId --output tsv --subscription "$AZ_SUBSCRIPTION_PIN" 2>"$ERR")" \
+    || stop "The Azure CLI cannot use subscription $AZ_SUBSCRIPTION_PIN: $(tr '\n' ' ' < "$ERR")"
+  [[ "$PINNED_TENANT" == "$TENANT_ID" ]] || stop "The Azure CLI's active subscription is in tenant $TENANT_ID, and this deployment is in tenant $PINNED_TENANT. The directory commands follow the active subscription. Nothing was created. Run: az account set --subscription $AZ_SUBSCRIPTION_PIN   and then the same command again."
+fi
 
 # On WSL Rayfin has no keychain for its sign-in (step 4 of the guide).
 if [[ -z "${RAYFIN_ENCRYPTION_FALLBACK_ENABLED:-}" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
@@ -191,7 +207,7 @@ The service principal is set up:
   tenant             $TENANT_ID
   access             Viewer on the workspace $WORKSPACE_NAME
 
-Next:
+Next (tools/deploy.py does this itself, as its next step):
   cd "$APP"
   npx rayfin up
 Then reload the app and open the connection check. The lines "Eventhouse route" say whether it works;

@@ -548,7 +548,15 @@ def test_phases_2_to_4_stop_at_each_thing_only_a_person_can_do_and_go_on_when_it
     assert code == 0, text
     assert "SQL probe with the operator's token: 7548 rows from 12 turbines in the last 60 minutes, the newest 2.0 min old" in text
     assert "as you and not as the app" in text
-    assert "optional p4.eventhouse_principal" in text and "create-principal" not in " ".join(world.shell_calls)
+    # the live route, as asked for on 26 November 2026: a service principal of the deployment's own, then the app once more
+    reader = f"windfarm-twin-eventhouse-reader-{deployed.suffix}"
+    assert f"done     p4.eventhouse_principal: service principal {reader}" in text and "Viewer in the workspace" in text
+    assert list(world.registrations) == [reader] and world.made_secrets == [reader]
+    assert world.access[ws][world.registrations[reader]["objectId"]] == "Viewer"
+    folder = str(deployed.root / ".deploy" / deployed.suffix / "app" / "windfarm-twin")
+    assert world.ups == [(folder, None), (folder, "2026-11-26T23:01:00Z")]            # deployed, handed its secrets, deployed again
+    assert "waiting 150 s: an app's functions are not deployed twice within two minutes" in text
+    assert KEY not in deployed.everything_written() and "KUSTO_CLIENT_SECRET" not in deployed.everything_written()
     config = (deployed.root / ".deploy" / deployed.suffix / "app/windfarm-twin/packages/functions/src/config.ts").read_text()
     assert deployed.cfg["FABRIC_WORKSPACE_NAME"] in config
     assert world.find(ws, "FabricApp", "WindFarmTwin")
@@ -558,14 +566,18 @@ def test_phases_2_to_4_stop_at_each_thing_only_a_person_can_do_and_go_on_when_it
     assert "provisioned   yes" in text and "demo-ready    no" in text
     assert "an item exists, which is not proof that it is configured, running or delivering to Teams" in text
     assert "the deployed app's own connection check has not been given" in text and "SQL probe with the operator's token passed (not the app's identity)" in text
-    build = re.search(r"--app-check ([0-9a-f]{12}),lakehouse,SECONDS", text)[1]
+    build = re.search(r"--app-check ([0-9a-f]{12}),eventhouse,SECONDS", text)[1]
     # what the app's own check shows, read by a person: another build, or data that is too old, is no pass
-    code, text = later(deployed, "--app-check", "000000000000,lakehouse,60", "--confirm", "p3.agent_message")
+    code, text = later(deployed, "--app-check", "000000000000,eventhouse,60", "--confirm", "p3.agent_message")
     assert "demo-ready    no" in text and f"named build 000000000000, and the repository is at {build}" in text
-    code, text = later(deployed, "--app-check", f"{build},lakehouse,4000")
-    assert "demo-ready    no" in text and "the newest reading was 4000 s old, more than 900 s" in text
+    code, text = later(deployed, "--app-check", f"{build},eventhouse,4000")
+    assert "demo-ready    no" in text and "the newest reading was 4000 s old, more than 120 s" in text
+    # a twin that passes on the Lakehouse route only has fallen back: not what this deployment is to show
     code, text = later(deployed, "--app-check", f"{build},lakehouse,120")
-    assert code == 0 and "demo-ready    yes" in text and f"the twin's own check: build {build}, lakehouse route, newest reading 120 s old" in text
+    assert "demo-ready    no" in text and "passed on the Lakehouse route" in text and "--lakehouse-only" in text
+    code, text = later(deployed, "--app-check", f"{build},eventhouse,40")
+    assert code == 0 and "demo-ready    yes" in text and f"the twin's own check: build {build}, eventhouse route, newest reading 40 s old" in text
+    assert world.made_secrets == [reader] and len(world.ups) == 2                    # and none of those applies made a secret or deployed again
     assert "a Teams message seen, confirmed by sami@contoso.example" in text
     assert "--app-check takes BUILD,ROUTE,SECONDS" in later(deployed, "--app-check", "looks fine")[1]
     # status says the same from the checkpoint, and a stopped edge takes the word back
@@ -2343,3 +2355,100 @@ def test_a_token_that_ended_during_a_long_apply_is_replaced_and_the_request_made
     with pytest.raises(CloudError, match="TokenExpired") as stop:
         fabric.get("workspaces")
     assert stop.value.status == 401 and len(sent) == 2 and len(asked) == 3
+
+
+# ------------------------------------------------------------------------------------------ the live route of the twin
+# 26 November 2026, 17:13: "I need the demo to run as in the previous run (live from KQL and delayed with lakehouse) please
+# update the runner to include that step". Until then the service principal was the operator's, optional, by a script.
+def through_phase3(bench):
+    """Everything a person does for Phases 2 and 3, done; and the tenant settings confirmed."""
+    ws = bench.world.workspaces[0]["id"]
+    for kind, display in (("SemanticModel", "WindFarm Operations"), ("Report", "WindFarm Operations Report"),
+                          ("DataAgent", "WindFarmDataAgent"), ("OperationsAgent", "WindFarmGearboxWatch")):
+        bench.world.add_item(ws, kind, display)
+    return ws, ["p2.acceptance", "phase3.tenant_settings", "phase4.tenant_settings"]
+
+
+def test_the_service_principal_waits_for_the_approval_of_role_changes_and_is_made_once(deployed):
+    world = deployed.world
+    ws, confirmed = through_phase3(deployed)
+    text = deployed.run("plan", "--up-to", "phase4")[1]
+    assert re.search(r"p4\.eventhouse_principal\s+needs approval", text) and "--approve-role-changes" in text
+    assert not world.registrations
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    assert "one client secret valid for a year, which replaces any earlier secret of that registration" in plan
+    assert "The secret is never shown or stored" in plan
+    code, text = later(deployed, confirm=confirmed)
+    reader = f"windfarm-twin-eventhouse-reader-{deployed.suffix}"
+    assert code == 0 and world.made_secrets == [reader] and len(world.ups) == 2, text[-1500:]
+    plans = [json.loads(saved.read_text())["covers"] for saved in (deployed.root / ".deploy" / deployed.suffix / "plans").glob("*.json")]
+    assert any("p4.eventhouse_principal" in [step for step, _ in covers["role_grants"]] for covers in plans)     # a role grant of the plan
+    # a second apply looks, and makes neither a secret nor a deployment
+    writes, calls = list(world.writes), list(world.shell_calls)
+    code, text = later(deployed)
+    assert code == 0 and world.writes == writes and world.shell_calls == calls and world.made_secrets == [reader]
+    # a secret somebody made since is not the one the app holds: the plan says so, and the approved apply hands over a new one
+    world.registrations[reader]["secrets"] = [("2026-11-27T09:00:00Z", "2027-11-27T09:00:00Z")]
+    text = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    assert re.search(r"p4\.eventhouse_principal\s+DRIFT", text) and "has not been handed the registration's present secret" in text
+    code, text = later(deployed)
+    assert code == 0 and world.made_secrets == [reader, reader] and len(world.ups) == 3 and world.ups[-1][1] == world.registrations[reader]["secrets"][-1][0]
+    # a secret that has ended, and a principal that lost its role, are seen too
+    start = world.registrations[reader]["secrets"][-1][0]
+    world.registrations[reader]["secrets"] = [(start, "2026-01-01T00:00:00Z")]
+    assert "has no client secret that is still valid" in deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    world.registrations[reader]["secrets"] = [(start, "2027-11-26T23:02:00Z")]
+    del world.access[ws][world.registrations[reader]["objectId"]]
+    assert "has no role in the workspace yet" in deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+
+
+def test_without_the_live_route_the_twin_is_deployed_on_its_lakehouse_route_and_nothing_is_registered(deployed):
+    world = deployed.world
+    ws, confirmed = through_phase3(deployed)
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4", "--lakehouse-only")[1]
+    assert plan.rstrip().splitlines()[-2].strip().endswith("--lakehouse-only") or "--lakehouse-only" in plan.split("To carry this plan out:")[1]
+    assert "p4.deploy_secrets" not in plan and re.search(r"p4\.eventhouse_principal\s+optional, yours", plan)
+    code, text = later(deployed, "--lakehouse-only", confirm=confirmed)
+    assert code == 0 and not world.registrations and len(world.ups) == 1 and "create-principal" not in " ".join(world.shell_calls)
+    build = re.search(r"--app-check ([0-9a-f]{12}),lakehouse,SECONDS", text)[1]
+    code, text = later(deployed, "--lakehouse-only", "--app-check", f"{build},lakehouse,120", "--confirm", "p3.agent_message")
+    assert code == 0 and "demo-ready    yes" in text and "lakehouse route" in text
+    # the option is part of what was approved: a plan made with it is not applied without it
+    digest = deployed.plan(ROLES, "--up-to", "phase4", "--lakehouse-only")
+    code, text = deployed.run("apply", "--approve", digest, ROLES, "--up-to", "phase4")
+    assert code == core.EXIT_REFUSED and not world.registrations
+
+
+def test_a_tenant_that_registers_no_applications_blocks_with_the_way_to_go_on_without(deployed):
+    world = deployed.world
+    ws, confirmed = through_phase3(deployed)
+    world.no_registrations = True
+    code, text = later(deployed, confirm=confirmed)
+    assert code == core.EXIT_BLOCKED and "blocked  p4.eventhouse_principal" in text, text[-1200:]
+    assert "did not let you make the app registration" in text and "Insufficient privileges" in text and "--lakehouse-only" in text
+    assert not world.registrations and not world.made_secrets and len(world.ups) == 1
+    assert "provisioned   no" in text
+
+
+def test_the_secret_never_stays_on_disk_and_a_directory_that_lags_is_waited_for(deployed):
+    world = deployed.world
+    ws, confirmed = through_phase3(deployed)
+    world.rayfin_signed_in = True
+    code, text = later(deployed, "--lakehouse-only", confirm=confirmed)          # the app is there, without the live route
+    assert code == 0
+    world.rayfin_signed_in = False                                             # the app's tool has lost its sign-in since
+    code, text = later(deployed)
+    assert code == core.EXIT_BLOCKED and "did not take the secrets" in text and "npx rayfin login" in text
+    leftover = deployed.root / ".deploy" / deployed.suffix / "app" / "windfarm-twin" / "rayfin" / ".env.secrets"
+    assert not leftover.exists() and KEY not in deployed.everything_written()
+    world.rayfin_signed_in, world.directory_lag = True, 3                      # signed in again; Graph shows the new secret a little later
+    code, text = later(deployed)
+    reader = f"windfarm-twin-eventhouse-reader-{deployed.suffix}"
+    assert code == 0 and f"done     p4.eventhouse_principal: service principal {reader}" in text, text[-1500:]
+    newest = world.registrations[reader]["secrets"][-1][0]
+    assert world.made_secrets == [reader, reader] and world.ups[-1][1] == newest         # the first try had made one, and it was replaced
+    assert deployed.state["steps"]["p4.eventhouse_principal"]["evidence"]["secret_start"] == newest      # not the one the directory showed at first
+    # two registrations of that name: the runner takes neither
+    world.registrations[reader]["copies"] = 2
+    text = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    assert "2 app registrations are named" in text and "takes none of them" in text

@@ -93,10 +93,17 @@ def report(ctx: Context, steps: list, code: int | None) -> list[str]:
             said.append("SQL probe with the operator's token passed (not the app's identity)")
         if not check:
             why.append(f"the twin: the deployed app's own connection check has not been given. Open the app, select the badge, and "
-                       f"pass what it shows with the next apply: --app-check {expected or 'BUILD'},lakehouse,SECONDS")
+                       f"pass what it shows with the next apply: --app-check {expected or 'BUILD'},{'lakehouse' if ctx.options.lakehouse_only else 'eventhouse'},SECONDS")
         elif check["build"] != expected:
             why.append(f"the twin: its connection check named build {check['build']}, and the repository is at {expected}. Deploy "
                        "the app again (apply), then read the check again")
+        elif check["route"] != "eventhouse" and not ctx.options.lakehouse_only:
+            # This deployment has the service principal: a twin that passes on the Lakehouse route only has fallen back to it.
+            why.append("the twin: its connection check passed on the Lakehouse route, and this deployment is to show the live "
+                       "values of the Eventhouse. The lines 'Eventhouse route' of the check say what fails: a principal that is "
+                       "minutes old, a tenant setting, or the right to read the database (bash app/create-principal.sh --show "
+                       "names what exists). Read the check again when they pass: --app-check BUILD,eventhouse,SECONDS. To accept "
+                       "the Lakehouse route for this deployment, plan again with --lakehouse-only")
         elif check["age_seconds"] > APP_MAX_AGE[check["route"]]:
             why.append(f"the twin: on its {check['route']} route the newest reading was {check['age_seconds']} s old, more than "
                        f"{APP_MAX_AGE[check['route']]} s. That is a failed connection for a demo: find where the data stops, then read "

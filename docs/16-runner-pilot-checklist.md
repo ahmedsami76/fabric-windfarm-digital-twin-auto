@@ -12,7 +12,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 |---|---|---|---|
 | `preflight` | yes | yes: four runs on 25 November, second to third issue | the same with every call pinned to the subscription, and the two directory reads through Microsoft Graph |
 | `plan` | yes | the sixth issue's plan ran to its end on 25 November (plan `f3cdc565c27f`, questions answered in a terminal) | a plan settled from options and a profile with no question; the saved plan file |
-| `apply` | yes: 127 tests | 25 and 26 November, deployment 66i: **Phase 1 to its end, 25 of 25 steps, at 16:50 on 26 November**. Everything made by the runner but Azure IoT Operations, which its script made from Cloud Shell. The telemetry gate passed at 14:03 (60 readings from 12 turbines), the Lakehouse gate at 16:50 (21 tables with rows) | steps 3 to 10 below |
+| `apply` | yes: 131 tests | 25 and 26 November, deployment 66i: **Phase 1 to its end, 25 of 25 steps, at 16:50 on 26 November**. Everything made by the runner but Azure IoT Operations, which its script made from Cloud Shell. The telemetry gate passed at 14:03 (60 readings from 12 turbines), the Lakehouse gate at 16:50 (21 tables with rows) | steps 3 to 10 below |
 | Interrupted notebook run, resumed | yes | no: Phase 1 went past its notebooks without a stop | step 4, at the first notebook of step 7 |
 | Second apply adds nothing | yes | no | step 5 |
 | Scripts under the runner, pinned | yes, against a stand-in `az` | no. The scripts themselves ran by hand, 19 to 25 November | that `az iot ops` and `az connectedk8s` accept `--subscription` (they are extension commands and could not be tried here) |
@@ -28,7 +28,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 cd simulator && python3 -m pytest -q tests/test_deploy_runner.py && cd .. && bash tools/script-tests/run.sh
 ```
 
-  It ends with `127 passed` and with `passed 176, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
+  It ends with `131 passed` and with `passed 182, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
 
 - [ ] `az login` as yourself, and `az extension add --name azure-iot-ops --yes` if preflight ever said it is missing.
 - [ ] The line from this computer to Azure carries a few megabytes in a few seconds. The first pilot, on 26 November, ran from a workstation under WSL that received 5 kB a second, and the Azure IoT Operations script could not finish there. This prints the rate, and shows nothing of the token:
@@ -160,6 +160,7 @@ Then the apply line it prints. It stops at each thing that is a person's, in thi
 - [ ] `--confirm phase3.tenant_settings`; notebook 09; the operations agent and Teams, by hand as in the Phase 3 guide.
 - [ ] `--confirm phase4.tenant_settings`.
 - [ ] The app's tool is not signed in: the block prints the line, which now names the app's own folder, `.deploy/XXX/app/windfarm-twin`.
+- [ ] `p4.eventhouse_principal`: the script's lines name the app registration `windfarm-twin-eventhouse-reader-XXX`, and no line shows a secret. Then `p4.deploy_secrets`: a line about waiting, and the app's tool a second time.
 - [ ] `app/windfarm-twin` beside the scripts was neither created nor changed.
 
 Send: every output.
@@ -169,15 +170,16 @@ Send: every output.
 The runner's own check at the end of Phase 4 is a query with **your** token. It shows that the data is there, not that the deployed app reads it.
 
 - [ ] Open the app `WindFarmTwin` in the workspace. Select the badge at the top right: the connection check.
-- [ ] Read three things: the **build** it names, the **route** whose lines say PASS (Lakehouse, unless you ran `app/create-principal.sh`), and the **age** of the newest reading.
+- [ ] Read three things: the **build** it names, the **route** whose lines say PASS (the Eventhouse route: the runner has set up its service principal; the Lakehouse route passes as well and is the fallback), and the **age** of the newest reading.
 - [ ] When the operations agent has sent a message to Teams and you have seen it, add `--confirm p3.agent_message`. Not before.
 
 ```bash
-python3 tools/deploy.py apply --deployment XXX --approve PLAN --up-to phase4 --approve-role-changes --app-check BUILD,lakehouse,SECONDS
+python3 tools/deploy.py apply --deployment XXX --approve PLAN --up-to phase4 --approve-role-changes --app-check BUILD,eventhouse,SECONDS
 ```
 
 - [ ] `demo-ready    yes`, naming the build, the route, the age, and that you read them.
-- [ ] Give a wrong build once, for example `--app-check 000000000000,lakehouse,60`: `demo-ready    no`, with the build the repository is at.
+- [ ] If the lines "Eventhouse route" of the check do not pass, send the check as it is. A new principal can need a few minutes; the script's last lines name the one command for the database, in case the workspace role is not enough.
+- [ ] Give a wrong build once, for example `--app-check 000000000000,eventhouse,60`: `demo-ready    no`, with the build the repository is at.
 
 Send: a picture of the connection check, and the two outputs.
 
