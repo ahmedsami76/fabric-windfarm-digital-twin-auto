@@ -175,9 +175,11 @@ point_rule_here() {
 run_without_ssh() {
   [[ "$*" != *"'"* ]] || die "The command must not contain single quotes; use double quotes inside it."
   log "Running on the VM as ${VM_ADMIN}, without SSH (takes at least 20 seconds; the output appears at the end)"
+  # Once, with no second try: the command may change something on the VM, and a try that got no answer may have run.
   az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --command-id RunShellScript \
     --scripts "sudo -u ${VM_ADMIN} -H bash -lc 'cd ~/${REMOTE_DIR} && $*'" \
-    --query "value[0].message" --output tsv
+    --query "value[0].message" --output tsv \
+    || die "Azure gave no result for the command. Whether it ran on the VM is not known: look before you run it again. A script of edge/scripts can be run again; each skips what is there."
 }
 
 # What the scripts on the VM use of this repository, as one command that prints a digest of it. It runs here and, through
@@ -185,6 +187,44 @@ run_without_ssh() {
 # Left out: what a run leaves behind here and the VM never needs. On 26 November 2026 the data flow rendered by step 6 on
 # the workstation (edge/dataflows/rendered, ignored by git) made the two copies "differ" and stopped the step after it.
 TREE_DIGEST='find edge simulator data config/load-env.sh -type f ! -path "*/__pycache__/*" ! -path "*/.pytest_cache/*" ! -path "*.egg-info/*" ! -path "simulator/tests/*" ! -path "edge/dataflows/rendered/*" -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64'
+
+# ask_agent SCRIPT: one question for the VM through the VM agent, for a script that can be run twice without harm. On
+# 26 November 2026 `az vm run-command invoke` stood for 300 seconds on a workstation that drops single connections, and
+# ended the step: "HTTPSConnectionPool(host='management.azure.com', port=443): Read timed out." So the question has
+# VM_AGENT_TRY_SECONDS (150) for an answer and is asked up to VM_AGENT_TRIES (3) times. It is asked again only when no
+# answer came, or when Azure says that the VM is still busy with a command; any other error ends it at once.
+# `timeout` starts the program az, not the function that names the subscription under the runner, so it is named here.
+ask_agent() {
+  local script="$1" tries="${VM_AGENT_TRIES:-3}" seconds="${VM_AGENT_TRY_SECONDS:-150}" try code answer errors
+  local limit=() pin=()
+  if command -v timeout >/dev/null 2>&1; then
+    limit=(timeout "$seconds")
+    if [[ -n "${AZ_SUBSCRIPTION_PIN:-}" ]]; then pin=(--subscription "$AZ_SUBSCRIPTION_PIN"); fi
+  fi
+  errors="$(mktemp)"
+  for ((try = 1; try <= tries; try++)); do
+    code=0
+    answer="$(${limit[@]+"${limit[@]}"} az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" \
+      --command-id RunShellScript --scripts "$script" --query "value[0].message" --output tsv ${pin[@]+"${pin[@]}"} 2>"$errors")" || code=$?
+    if [[ $code -eq 0 ]]; then
+      rm -f "$errors"
+      printf '%s\n' "$answer"
+      return 0
+    fi
+    if [[ $code -eq 124 ]]; then
+      warn "No answer from Azure within ${seconds} seconds (try ${try} of ${tries})."
+    elif grep -qiE 'timed out|timeout|connection (aborted|reset|refused)|max retries exceeded|execution is in progress' "$errors"; then
+      warn "$(tail -n 1 "$errors" | cut -c1-300) (try ${try} of ${tries})"
+    else
+      cat "$errors" >&2
+      rm -f "$errors"
+      return "$code"
+    fi
+    if [[ $try -lt $tries ]]; then sleep "${VM_AGENT_RETRY_PAUSE:-20}"; fi
+  done
+  rm -f "$errors"
+  die "The VM agent gave no answer in ${tries} tries. That is the connection from this computer to Azure, or a VM that is busy. Run the same command again."
+}
 
 # push_without_ssh: for a subscription whose policy closes port 22 (seen on 20 and on 26 November 2026). Files cannot be
 # copied through the VM agent. What can be done: ask the VM whether its copy of what the edge scripts use is the one in
@@ -195,9 +235,7 @@ push_without_ssh() {
   log "Comparing the VM's copy with this folder through the VM agent (takes at least 20 seconds)"
   here="$(cd "$REPO_ROOT" && eval "$TREE_DIGEST")"
   settings="$(base64 < "$ENV_FILE" | tr -d '\n')"
-  answer="$(az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --command-id RunShellScript \
-    --scripts "sudo -u ${VM_ADMIN} -H bash -lc 'cd ~/${REMOTE_DIR} 2>/dev/null || { echo COPY:none; exit 0; }; there=\$(${TREE_DIGEST}); echo COPY:\$there; if [ \"\$there\" = \"${here}\" ]; then mkdir -p config && echo ${settings} | base64 -d > config/demo.env && echo SETTINGS:written; fi'" \
-    --query "value[0].message" --output tsv)"
+  answer="$(ask_agent "sudo -u ${VM_ADMIN} -H bash -lc 'cd ~/${REMOTE_DIR} 2>/dev/null || { echo COPY:none; exit 0; }; there=\$(${TREE_DIGEST}); echo COPY:\$there; if [ \"\$there\" = \"${here}\" ]; then mkdir -p config && echo ${settings} | base64 -d > config/demo.env && echo SETTINGS:written; fi'")"
   there="$(sed -n 's/^COPY://p' <<< "$answer" | head -n 1)"
   if [[ "$there" == "none" || -z "$there" ]]; then
     die "The VM has no copy of the repository yet, and without SSH none can be sent. bash infra/vm.sh nsg-log shows what closed port 22."

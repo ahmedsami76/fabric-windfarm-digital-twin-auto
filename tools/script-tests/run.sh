@@ -91,6 +91,32 @@ reset; touch "$STUB_DIR"/agent_runs; run bash "$REPO"/infra/vm.sh push
 check "push, port 22 closed by policy, no copy on the VM yet: stops and says so" 1 "has no copy of the repository yet" "!nsg rule create"
 rm -f "$STUB_DIR"/agent_runs
 
+# The question to the VM agent gets no answer (26 November 2026: `az vm run-command invoke` stood for 300 seconds and ended
+# the step). It is asked again; a refusal is not; and under the runner the program az is still told the subscription.
+reset; touch "$STUB_DIR"/port_open; run bash "$REPO"/infra/vm.sh push; H="$STUB_DIR/home/fabric-windfarm-digital-twin"
+rm -f "$STUB_DIR"/port_open "$STUB_DIR"/calls.log; echo stale > "$H/config/demo.env"; touch "$STUB_DIR"/agent_runs; echo 2 > "$STUB_DIR"/agent_silent
+run env VM_AGENT_RETRY_PAUSE=0 AZ_SUBSCRIPTION_PIN=11111111-pin bash "$REPO"/infra/vm.sh push
+OUT="$OUT
+same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes) asked:$(grep -c 'vm run-command invoke' "$STUB_DIR"/calls.log) named:$(grep -c 'vm run-command invoke.*--subscription 11111111-pin$' "$STUB_DIR"/calls.log) twice:$(grep -c 'subscription.*subscription' "$STUB_DIR"/calls.log)"
+check "push without SSH, the VM agent silent twice: asked a third time, the settings written, the subscription named once" 0 \
+  "Read timed out.*try 1 of 3" "try 2 of 3" "Nothing to copy" "same:yes" "asked:3" "named:3" "twice:0"
+rm -f "$STUB_DIR"/calls.log; echo stale > "$H/config/demo.env"; echo 5 > "$STUB_DIR"/agent_silent
+run env VM_AGENT_RETRY_PAUSE=0 bash "$REPO"/infra/vm.sh push
+OUT="$OUT
+same:$(cmp -s "$ENV_FILE" "$H/config/demo.env" && echo yes || echo no) asked:$(grep -c 'vm run-command invoke' "$STUB_DIR"/calls.log)"
+check "push without SSH, the VM agent silent every time: three tries, then stops and says to run it again" 1 \
+  "try 3 of 3" "gave no answer in 3 tries" "same:no" "asked:3" "!Nothing to copy" "!has no copy of the repository"
+rm -f "$STUB_DIR"/calls.log "$STUB_DIR"/agent_silent; touch "$STUB_DIR"/agent_refuses
+run env VM_AGENT_RETRY_PAUSE=0 bash "$REPO"/infra/vm.sh push
+OUT="$OUT
+asked:$(grep -c 'vm run-command invoke' "$STUB_DIR"/calls.log)"
+check "push without SSH, Azure refuses the question: said once, not asked again" 1 "AuthorizationFailed" "asked:1" "!try 1 of 3"
+rm -f "$STUB_DIR"/calls.log; run bash "$REPO"/infra/vm.sh run bash ./edge/scripts/07-sync-reference-data.sh
+OUT="$OUT
+asked:$(grep -c 'vm run-command invoke' "$STUB_DIR"/calls.log)"
+check "run, Azure gives no result: the command is sent once, and the message says its fate is not known" 1 "asked:1" "Whether it ran on the VM is not known"
+rm -f "$STUB_DIR"/agent_runs "$STUB_DIR"/agent_refuses
+
 reset; touch "$STUB_DIR"/port_open
 run bash "$REPO"/infra/vm.sh push-env;                  check "push-env: copies the settings file" 0 "scp .*demo.env azureuser@20.45.58.189:fabric-windfarm-digital-twin/config/demo.env"
 

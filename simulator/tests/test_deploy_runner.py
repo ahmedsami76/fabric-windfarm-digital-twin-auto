@@ -2214,7 +2214,8 @@ def test_the_other_addresses_are_asked_again_the_same_way_and_a_management_comma
     sent, faults = line
     naps = []
     faults[:] = [_handshake(), TimeoutError("The read operation timed out")]
-    assert http("GET", "https://onelake.example/ws/item/Files", "token", sleep=naps.append)[0] == 200 and len(sent) == 3 and len(naps) == 2
+    assert http("GET", "https://onelake.example/ws/item/Files", "token", timeout=180, sleep=naps.append)[0] == 200 and len(naps) == 2
+    assert sent == [("GET", 60), ("GET", 180), ("GET", 180)]          # a hung read is given up after a minute, then given its time
     sent.clear()
     faults[:] = [TimeoutError("The read operation timed out")]
     with pytest.raises(CloudError, match=r"onelake.example did not answer a request it was sent \(PUT\)") as stop:
@@ -2237,7 +2238,9 @@ def test_the_other_addresses_are_asked_again_the_same_way_and_a_management_comma
     kusto._audience["https://cluster.example"] = "https://cluster.example"
     kusto.rows("https://cluster.example", "db", "RawEvents | count")
     kusto.rows("https://cluster.example", "db", ".create table T (a: int)", mgmt=True)
-    assert asked == [("query", True), ("mgmt", False)]
+    kusto.rows("https://cluster.example", "db", ".show table T policy mirroring | project Policy", mgmt=True)   # shows, changes nothing
+    kusto.rows("https://cluster.example", "db", ".alter-merge table T policy mirroring kind=delta", mgmt=True)
+    assert asked == [("query", True), ("mgmt", False), ("mgmt", True), ("mgmt", False)]
 
 
 def test_a_complete_step_that_cannot_be_asked_about_for_a_moment_is_still_counted_as_complete(deployed):
@@ -2278,3 +2281,27 @@ def test_fabric_not_reached_is_called_the_connection_and_not_the_sign_in(bench):
     code, text = bench.run("preflight")
     assert "did not answer the signed-in user" in text and "TokenExpired" in text and "az login   (in a session" in text
     assert "not your sign-in" not in text
+
+
+def test_the_six_mirroring_policies_are_asked_together_and_not_one_after_the_other(deployed):
+    # 26 November 2026: `looking at p1.onelake_availability ... 187 s`, in every plan and twice in every apply. The command
+    # takes one table, and each answer took about half a minute.
+    import threading
+    together = threading.Barrier(6, timeout=10)
+    asked = []
+
+    class Slow(FakeKusto):
+        def rows(self, uri, database, csl, mgmt=False):
+            if "policy mirroring" in csl and csl.lstrip().startswith(".show"):
+                asked.append(csl.split()[2])
+                together.wait()               # goes on only when all six are in flight at once
+            return super().rows(uri, database, csl, mgmt)
+    real = deployed.adapters
+    deployed.adapters = lambda redact: dict(real(redact), kusto=Slow(deployed.world))
+    code, text = deployed.run("plan", ROLES)
+    assert code == 0 and "OneLake availability is on for the six typed tables" in text, text[-600:]
+    assert len(asked) == 6 and len(set(asked)) == 6
+    deployed.world.kql["mirroring"].discard("AlarmEvents")       # and each answer still belongs to its table
+    together.reset()
+    code, text = deployed.run("plan", ROLES)
+    assert "OneLake availability is off for: AlarmEvents" in text

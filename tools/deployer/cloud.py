@@ -68,6 +68,7 @@ class RunnerFabric(Fabric):
 NO_SUBSCRIPTION = ("ad", "extension", "config", "version", "login", "logout")
 TRIES = 3            # how often a read that gets no answer, or a connection that cannot be made, is tried
 SHARES = (1 / 6, 1 / 3, 1 / 2)      # of an `az` read's time, per try
+FIRST_READ_SECONDS = 60
 SPLIT_FROM = 120     # seconds: a read with less time than this is asked once (its first try would have under 20 s)
 READ_WORDS = ("show", "list", "list-usage", "list-skus", "check-name", "exists", "get-access-token")
 
@@ -302,7 +303,8 @@ def http(method: str, url: str, token: str, body=None, headers: dict | None = No
         for name, value in (headers or {}).items():
             request.add_header(name, value)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            # The first try of a read has a minute at most: a connection that hangs is given up sooner and made anew.
+            with urllib.request.urlopen(request, timeout=min(timeout, FIRST_READ_SECONDS) if read and attempt == 1 else timeout) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as error:
             return error.code, error.read()
@@ -339,9 +341,11 @@ class Kusto:
         return self._az.token(self._audience[uri])
 
     def rows(self, uri: str, database: str, csl: str, mgmt: bool = False) -> list[dict]:
-        # A query changes nothing and is asked again when no answer comes; a management command is not.
+        # A query changes nothing and is asked again when no answer comes, and so is a command that only shows. Any other
+        # management command is sent once.
+        read = not mgmt or csl.lstrip().lower().startswith(".show ")
         status, raw = self._request("POST", f"{uri.rstrip('/')}/v1/rest/{'mgmt' if mgmt else 'query'}", self._token(uri),
-                                    {"db": database, "csl": csl}, timeout=180, **({} if mgmt else {"read": True}))
+                                    {"db": database, "csl": csl}, timeout=180, **({"read": True} if read else {}))
         if status in (401, 403):
             raise Blocked(f"The Eventhouse answered {status} to the signed-in user.",
                           "Check that you are the owner of the KQL database or have a role in the workspace, then run apply again.")

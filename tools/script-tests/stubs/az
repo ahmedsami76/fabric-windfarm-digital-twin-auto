@@ -85,7 +85,10 @@ case "$args" in
   "vm show --resource-group"*"--query id"*) echo "/subscriptions/s/resourceGroups/rg-windfarm-edge/providers/Microsoft.Compute/virtualMachines/vm-windfarm-edge" ;;
   "rest --method post"*initiate*)       b="$(echo "$args" | sed -E 's/.*--body (.*) --output none/\1/')"; ip="$(echo "$b" | python3 -c "import json,sys; print(json.load(sys.stdin)['virtualMachines'][0]['ports'][0]['allowedSourceAddressPrefix'])")"; printf '%s\tMicrosoftDefenderForCloud-JITRule-1-ABC\n' "$ip" > "$S/openings"; touch "$S/port_open" ;;
   "network nsg rule list"*)             printf 'Priority  Name\n' ;;
-  "vm run-command invoke"*)             while [[ $# -gt 0 ]]; do [[ "$1" == "--scripts" ]] && { sc="$2"; break; }; shift; done
+  "vm run-command invoke"*)             if [[ -e "$S/agent_refuses" ]]; then echo "ERROR: (AuthorizationFailed) The client does not have authorization to perform action 'Microsoft.Compute/virtualMachines/runCommand/action'" >&2; exit 1; fi
+                                        left="$(cat "$S/agent_silent" 2>/dev/null || echo 0)"   # tries that get no answer, as on 26 November 2026
+                                        if [[ "$left" -gt 0 ]]; then echo $((left - 1)) > "$S/agent_silent"; echo "ERROR: HTTPSConnectionPool(host='management.azure.com', port=443): Read timed out. (read timeout=300)" >&2; exit 1; fi
+                                        while [[ $# -gt 0 ]]; do [[ "$1" == "--scripts" ]] && { sc="$2"; break; }; shift; done
                                         if [[ -e "$STUB_DIR/agent_runs" ]]; then   # run what is inside bash -lc '...' with the pretend home, as the VM agent would
                                           inner="${sc#*bash -lc \'}"; inner="${inner%\'}"
                                           printf 'Enable succeeded: \n[stdout]\n%s\n[stderr]\n' "$(HOME="$STUB_DIR/home" bash -c "$inner" 2>&1)"

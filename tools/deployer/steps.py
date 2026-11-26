@@ -11,6 +11,7 @@ import base64
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from . import names
 from .cloud import UNREACHED, CloudError, operation, run_notebook
@@ -1124,9 +1125,14 @@ def act_lakehouse(ctx) -> None:
 def p1_onelake(ctx) -> Probe:
     if not kql_database(ctx):
         return after("p1.eventhouse")
+    # The command takes one table (Learn, ".show table policy mirroring command"), and on 26 November 2026 the six of
+    # them, asked one after the other, took 187 seconds in every plan and twice in every apply. They are asked together.
+    uri, database = kql_database(ctx)
+    with ThreadPoolExecutor(max_workers=len(LIVE_TABLES)) as together:
+        answers = list(together.map(
+            lambda table: ctx.kusto.rows(uri, database, f".show table {table} policy mirroring | project Policy", mgmt=True), LIVE_TABLES))
     off = []
-    for table in LIVE_TABLES:
-        rows = kql(ctx, f".show table {table} policy mirroring | project Policy")
+    for table, rows in zip(LIVE_TABLES, answers):
         try:
             enabled = bool(rows) and json.loads(rows[0].get("Policy") or "null").get("IsEnabled") is True
         except (AttributeError, ValueError):
