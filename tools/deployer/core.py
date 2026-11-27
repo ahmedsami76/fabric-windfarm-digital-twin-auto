@@ -23,7 +23,8 @@ from typing import Callable
 
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED, EXIT_BLOCKED, EXIT_RUNNING = 0, 1, 2, 3, 4
 
-PHASES = ("preflight", "phase1", "phase2", "phase3", "phase4", "phase5a")
+PHASES = ("preflight", "phase1", "phase2", "phase3", "phase4", "phase5a", "phase5bc")
+PHASE5 = ("phase5a", "phase5bc")     # never part of --up-to: each is asked for by an option of its own
 
 
 class Refused(Exception):
@@ -286,6 +287,7 @@ class Options:
     up_to: str = "phase1"
     granted: set = field(default_factory=set)      # "roles", "preview:ontology", "optin:pip-jobs", ...
     phase5a: bool = False
+    phase5bc: bool = False           # Phases 5b and 5c provisioned as well (asked for on 26 November 2026); implies 5a
     lakehouse_only: bool = False     # Phase 4 without the service principal for the Eventhouse: the twin on its Lakehouse route
     regenerate_history: str = ""     # a label; the history is generated again once for each new label
     limits: dict = field(default_factory=lambda: {"operation": 900, "job": 2700, "poll": 10})
@@ -403,11 +405,13 @@ def decide(ctx: Context, step: Step, probe: Probe) -> Line:
 
 
 def select(steps: list[Step], options: Options) -> list[Step]:
-    """The steps up to the chosen phase. Phase 5a only when it was asked for by its own option."""
+    """The steps up to the chosen phase. The phases of Phase 5 only when they were asked for by their own option."""
     last = PHASES.index(options.up_to)
-    wanted = set(PHASES[:last + 1]) - {"phase5a"}
-    if options.phase5a:
+    wanted = set(PHASES[:last + 1]) - set(PHASE5)
+    if options.phase5a or options.phase5bc:
         wanted.add("phase5a")
+    if options.phase5bc:
+        wanted.add("phase5bc")
     return [step for step in steps if step.phase in wanted]
 
 
@@ -533,7 +537,8 @@ def plan_record(ctx: Context, lines: list[Line], target: dict) -> dict:
         "vm_sizes": cfg.get("VM_SIZE", "").split(),
         "ssh_scope": cfg.get("SSH_SOURCE_CIDR") or PUBLIC_ADDRESS,
         "role_grants": [[line.step.id, line.step.writes] for line in lines if "roles" in line.step.needs],
-        "approvals_and_opt_ins": sorted(ctx.options.granted), "up_to": ctx.options.up_to, "phase5a": ctx.options.phase5a,
+        "approvals_and_opt_ins": sorted(ctx.options.granted), "up_to": ctx.options.up_to, "phase5a": ctx.options.phase5a or ctx.options.phase5bc,
+        "phase5bc": ctx.options.phase5bc,
         "lakehouse_only": ctx.options.lakehouse_only,
         "regenerate_history": ctx.options.regenerate_history,
         "settings": {key: cfg[key] for key in sorted(cfg) if key not in apart},

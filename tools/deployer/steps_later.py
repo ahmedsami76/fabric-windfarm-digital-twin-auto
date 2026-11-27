@@ -17,7 +17,8 @@ import re
 
 from .cloud import SQL_RESOURCE, UNREACHED, CloudError, FabricError, operation, run_notebook
 
-from operations_agent import decode_definition, encode_definition  # noqa: E402  (found through the path .cloud sets)
+from operations_agent import decode_definition, differences, encode_definition, find_action  # noqa: E402  (found through the path .cloud sets)
+import remediation_spec  # noqa: E402
 from .core import Blocked, Options, Probe, Step, blocked, done, todo, unverified
 from .steps import (DATA_AGENT, MODEL, NOTEBOOKS, ONTOLOGY, OPERATIONS_AGENT, REPORT, after, confirmation,
                     data_flow, freshness, gate_lakehouse, import_notebooks, instance, item, items, kql, kql_database, name,
@@ -210,8 +211,15 @@ def agent_state(ctx) -> dict:
         # the look said "a playbook, started" for a playbook of three rules: the entries are not a list there. A map
         # counts by its keys.
         rules = next((playbook[key] for key in ("RuleDefinitions", "ruleDefinitions") if isinstance(playbook.get(key), (list, dict))), None)
-        return {"playbook": bool(playbook), "rules": None if rules is None else len(rules), "running": document.get("shouldRun") is True}
+        return {"playbook": bool(playbook), "rules": None if rules is None else len(rules), "running": document.get("shouldRun") is True,
+                "document": document}
     return ctx.remember("operations agent", read)
+
+
+def phase5b_begun(document: dict) -> bool:
+    """Has somebody given the agent the action of Phase 5b, or instructions that speak of its table?"""
+    instructions = str((document.get("configuration") or {}).get("instructions") or "")
+    return find_action(document)[1] is not None or f"'{remediation_spec.TABLE}'" in instructions
 
 
 def p3_agent_started(ctx) -> Probe:
@@ -224,6 +232,12 @@ def p3_agent_started(ctx) -> Probe:
             raise
         return unverified(f"an item {OPERATIONS_AGENT} exists, and its definition could not be read ({error}). That is not proof "
                           "that the agent has a playbook or is started")
+    if ctx.options.phase5bc and phase5b_begun(state["document"]):
+        # Phase 5b changes this agent in place: it is stopped, given other instructions and an action, and its playbook
+        # is made again. While a person is at that, the look of Phase 3 would call a finished step undone and print the
+        # steps of Phase 3. The step p5b.agent looks at the agent from there on.
+        return done(f"operations agent {OPERATIONS_AGENT}: changed, or being changed, to its Phase 5b setup; the step p5b.agent "
+                    "looks at its playbook and at whether it is started")
     if not state["playbook"] or state["rules"] == 0:
         return todo("the agent has no playbook yet")
     rules = "a playbook" if state["rules"] is None else f"a playbook with {state['rules']} rule{'s' if state['rules'] != 1 else ''}"
@@ -665,11 +679,105 @@ def phase5a(options: Options) -> list[Step]:
     ]
 
 
+# --------------------------------------------------------------------------------------------- Phases 5b and 5c
+# Asked for on 26 November 2026, at 22:42, with Phases 1 to 4 complete under the runner: "yes please change the scope to
+# include 5b and c". Until then they were out of the runner's scope by the rules of 25 November. What the runner does for
+# them is everything that sends nothing: the two database scripts, and the command center notebook, imported. What stays a
+# person's is everything that acts on the edge or on the agent: switching the command path on, the agent's new
+# instructions with its action and playbook, the rehearsal, every command and every fault. The runner still has no way
+# to start notebook 12 or 13 (cloud.NEVER_RUN).
+DECISION_KQL, COMMAND_LOG_KQL = "fabric/kql/06-remediation-readiness.kql", "fabric/kql/07-command-log.kql"
+ACTION_NOTEBOOK = "12_send_edge_command"
+
+AGENT_5B = f"""Phase 5b changes the operations agent {OPERATIONS_AGENT} in place: one rule on the table GearboxDecisionLive in the place of the
+three of Phase 3, a message that begins with what acting and not acting cost, and the action 'Curtail turbine', which runs
+notebook {ACTION_NOTEBOOK}. That is yours to do, in the portal: step 4, the part headed "By hand", and step 5 of
+docs/13-deployment-guide-phase5b.md.
+1. Open {OPERATIONS_AGENT}, select Stop.
+2. Agent setup, Agent instructions: replace the whole text with fabric/operations-agent/phase5b-agent-setup.txt. Knowledge stays the KQL database.
+3. Actions, Add action, Fabric item: the notebook {ACTION_NOTEBOOK}. Action name 'Curtail turbine'; the description, and the description of
+   each of the four parameters (turbine, percent, duration, requested_by), from fabric/operations-agent/phase5b-action.txt.
+4. Save, Generate playbook, read its one rule (GearboxVibration of GearboxDecisionLive, per TurbineId, crosses above 4, action Curtail turbine), Start.
+The runner then reads the agent's definition: the instructions, the action and its notebook, a playbook, started.
+To see what it sees: ENV_FILE=<this deployment's demo.env> bash infra/09-remediation-agent.sh --show
+The script without an option tries the same through Fabric's API. Fabric refused it on 24 November 2026; what I think was the
+cause is corrected and has not run since. It saves the agent's definition first and changes nothing when it is refused."""
+
+SHOW_5 = """Everything of Phase 5 that sends nothing is in place. Showing it is yours, from the guides:
+  bash infra/08-create-command-path.sh        switches the command path on (docs/12-deployment-guide-phase5a.md, from step 3)
+  docs/13-deployment-guide-phase5b.md, steps 3 and 6: the rehearsal, then the fault, the agent's proposal, your approval in Teams
+  docs/14-deployment-guide-phase5c.md, steps 4 and 6: the command center (notebook 13), and the story with the log in the twin
+With several deployments in the folder, name this one's settings in front of a script: ENV_FILE=.deploy/<suffix>/demo.env
+The runner never runs notebook 12 or 13, never publishes to the control topic and never injects a fault."""
+
+
+def p5b_table(ctx) -> Probe:
+    if not kql_database(ctx):
+        return after("p1.eventhouse")
+    return done("table GearboxDecisionLive and its update policy") if "GearboxDecisionLive" in tables(ctx) else todo()
+
+
+def p5c_log(ctx) -> Probe:
+    if not kql_database(ctx):
+        return after("p1.eventhouse")
+    missing = [what for what, there in (("table EdgeCommands", "EdgeCommands" in tables(ctx)),
+                                        ("function CommandLog", "CommandLog" in functions(ctx))) if not there]
+    return todo("missing: " + ", ".join(missing)) if missing else done("table EdgeCommands with its update policy, and the function CommandLog")
+
+
+def p5b_agent(ctx) -> Probe:
+    if not workspace_id(ctx) or not item(ctx, "OperationsAgent", OPERATIONS_AGENT):
+        return after("p3.operations_agent")
+    notebook = item(ctx, "Notebook", ACTION_NOTEBOOK)
+    if not notebook:
+        return after("p5a.notebook")
+    try:
+        state = agent_state(ctx)
+    except (CloudError, FabricError) as error:
+        if getattr(error, "code", "") == UNREACHED:
+            raise
+        return unverified(f"the agent's definition could not be read ({error}). That is not proof that it has its Phase 5b setup")
+    database = item(ctx, "KQLDatabase", name(ctx, "EVENTHOUSE_NAME")) or {}
+    differs = differences(state["document"], notebook["id"], workspace_id(ctx), database.get("id"))
+    if differs:
+        return todo("the agent does not have its Phase 5b setup yet: " + " ".join(differs[:2]))
+    if not state["playbook"] or state["rules"] == 0:
+        return todo("the agent has the Phase 5b instructions and the action, and no playbook yet")
+    rules = "a playbook" if state["rules"] is None else f"a playbook with {state['rules']} rule{'s' if state['rules'] != 1 else ''}"
+    if not state["running"]:
+        return todo(f"the agent has the Phase 5b instructions, the action and {rules}, and is not started")
+    return done(f"operations agent {OPERATIONS_AGENT}: the Phase 5b instructions, the action 'Curtail turbine' on notebook "
+                f"{ACTION_NOTEBOOK}, {rules}, started. Whether it proposes and whether an approval reaches the edge, the runner cannot read")
+
+
+def phase5bc(options: Options) -> list[Step]:
+    return [
+        Step("p5b.decision_table", "phase5bc", "Table the agent decides on, with what a curtailment costs", p5b_table,
+             lambda ctx: run_kql_file(ctx, DECISION_KQL), inputs=(DECISION_KQL,),
+             writes="the table GearboxDecisionLive, its descriptions, and the update policy that fills it from the telemetry",
+             basis="Kusto REST API, .execute database script"),
+        Step("p5c.command_log", "phase5bc", "The edge's record of every command: table and function", p5c_log,
+             lambda ctx: run_kql_file(ctx, COMMAND_LOG_KQL), inputs=(COMMAND_LOG_KQL,),
+             writes="the table EdgeCommands with its update policy, and the function CommandLog",
+             basis="Kusto REST API, .execute database script"),
+        Step("p5c.notebook", "phase5bc", "Notebook 13, the command center, imported, not run",
+             notebooks_probe("phase5bc", "p1.lakehouse"), import_notebooks("phase5bc"),
+             inputs=("fabric/notebooks/13_command_center.ipynb",), wait_seconds=60,
+             writes="imports the notebook. It is never run by the runner", basis="Notebook - Create Notebook (definition, ipynb)"),
+        Step("p5b.agent", "phase5bc", "Operations agent changed to its Phase 5b setup: instructions, action, playbook, started",
+             p5b_agent, manual=AGENT_5B,
+             basis="Operations Agent - Get Operations Agent Definition (preview), for the look; the change itself: portal",
+             proof="none"),
+        Step("p5.show", "phase5bc", "Switch the command path on and show Phase 5 (yours)", lambda ctx: todo("yours"),
+             optional=True, observable=False, manual=SHOW_5, basis="the guides of Phases 5a, 5b and 5c", proof="live"),
+    ]
+
+
 PREREQUISITES = {"p3.capacity", "phase3.tenant_settings", "phase4.tenant_settings", "p4.node", "p5a.isolation"}
 
 
 def catalogue(options: Options) -> list[Step]:
-    steps = phase1() + phase2(options) + phase3(options) + phase4(options) + phase5a(options)
+    steps = phase1() + phase2(options) + phase3(options) + phase4(options) + phase5a(options) + phase5bc(options)
     seen = set()
     for step in steps:
         assert step.id not in seen, f"two steps are named {step.id}"

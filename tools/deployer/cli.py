@@ -68,6 +68,10 @@ def parser() -> argparse.ArgumentParser:
                           "with %%pip switched on by a job parameter that Microsoft documents for pipelines only")
     top.add_argument("--enable-phase5a-isolated-simulator", action="store_true",
                      help="also provision the command path of Phase 5a, switched off. For an edge that is this demo's simulator only")
+    top.add_argument("--enable-phase5-isolated-simulator", action="store_true",
+                     help="also provision Phases 5a, 5b and 5c: the command path, switched off; the tables of the agent's decision "
+                          "and of the command log; notebooks 12 and 13, imported and never run. Switching the path on, the "
+                          "agent's new setup, every command and every fault stay yours")
     top.add_argument("--lakehouse-only", action="store_true",
                      help="Phase 4 without the service principal for the Eventhouse: no app registration is made, and the twin "
                           "shows the Lakehouse's copy, minutes behind. For a tenant that does not let you create one")
@@ -95,7 +99,9 @@ def options_of(args) -> Options:
         granted.add("roles")
     if args.approve_capacity_creation:
         granted.add("capacity")
-    return Options(up_to=args.up_to, granted=granted, phase5a=args.enable_phase5a_isolated_simulator,
+    return Options(up_to=args.up_to, granted=granted,
+                   phase5a=args.enable_phase5a_isolated_simulator or args.enable_phase5_isolated_simulator,
+                   phase5bc=args.enable_phase5_isolated_simulator,
                    lakehouse_only=args.lakehouse_only, regenerate_history=args.regenerate_history)
 
 
@@ -318,7 +324,9 @@ def apply_command(ctx: Context, args, digest: str) -> str:
     words += [f"--allow-preview {need.split(':', 1)[1]}" for need in sorted(granted) if need.startswith("preview:")]
     if "optin:pip-jobs" not in granted:
         words.append("--no-pip-jobs")
-    if ctx.options.phase5a:
+    if ctx.options.phase5bc:
+        words.append("--enable-phase5-isolated-simulator")
+    elif ctx.options.phase5a:
         words.append("--enable-phase5a-isolated-simulator")
     if ctx.options.lakehouse_only:
         words.append("--lakehouse-only")

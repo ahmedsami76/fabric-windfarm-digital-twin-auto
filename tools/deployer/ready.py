@@ -16,7 +16,7 @@ import re
 
 from .core import EXIT_OK, PHASES, Blocked, Context, Refused, StepFailed
 from .steps import freshness, kql_database
-from .steps_later import build_stamp
+from .steps_later import build_stamp, command_flow
 
 TELEMETRY_MAX_AGE = 180                                  # seconds: the limit of the telemetry gate of Phase 1
 APP_MAX_AGE = {"lakehouse": 900, "eventhouse": 120}      # seconds, per route of the twin: what counts as fresh data there
@@ -114,6 +114,24 @@ def report(ctx: Context, steps: list, code: int | None) -> list[str]:
         else:
             said.append(f"the twin's own check: build {check['build']}, {check['route']} route, newest reading {check['age_seconds']} s "
                         f"old, read by {check.get('by')} at {check.get('at')}")
+    if ctx.options.phase5a or ctx.options.phase5bc:
+        # Phase 5 is shown by sending a command, which is a person's. The runner provisions the path switched off, so a
+        # deployment it has just finished cannot show Phase 5 yet; it says so, and reads the switch a person may have set.
+        try:
+            flow = command_flow(ctx)
+        except Exception as error:      # noqa: BLE001  the report never ends on a question it could not ask
+            flow, unread = None, str(error)[:120]
+        else:
+            unread = ""
+        mode = ((flow or {}).get("properties") or {}).get("mode", "Enabled") if flow else None
+        if unread:
+            why.append(f"Phase 5: the command path could not be looked at just now ({unread})")
+        elif mode == "Disabled":
+            why.append("Phase 5: the command path is switched off, as the runner made it, so no command from Fabric reaches the "
+                       "edge. Switching it on is yours: bash infra/08-create-command-path.sh")
+        elif mode:
+            said.append("Phase 5: the command path is switched on, by a person. Whether a command was sent, proposed or approved, "
+                        "the runner does not read")
     rows.append(f"  demo-ready    {'yes' if not why else 'no'}" + (": " + "; ".join(said) if not why else ""))
     for reason in why:
         rows.append(f"                - {reason}")

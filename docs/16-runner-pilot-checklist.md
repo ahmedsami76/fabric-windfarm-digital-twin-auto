@@ -12,7 +12,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 |---|---|---|---|
 | `preflight` | yes | yes: four runs on 25 November, second to third issue | the same with every call pinned to the subscription, and the two directory reads through Microsoft Graph |
 | `plan` | yes | the sixth issue's plan ran to its end on 25 November (plan `f3cdc565c27f`, questions answered in a terminal) | a plan settled from options and a profile with no question; the saved plan file |
-| `apply` | yes: 140 tests | 25 and 26 November, deployment 66i: **Phase 1 to its end, 25 of 25 steps, at 16:50 on 26 November**. Everything made by the runner but Azure IoT Operations, which its script made from Cloud Shell. The telemetry gate passed at 14:03 (60 readings from 12 turbines), the Lakehouse gate at 16:50 (21 tables with rows) | steps 3 to 10 below |
+| `apply` | yes: 142 tests | 25 and 26 November, deployment 66i: **Phase 1 to its end, 25 of 25 steps, at 16:50 on 26 November**. Everything made by the runner but Azure IoT Operations, which its script made from Cloud Shell. The telemetry gate passed at 14:03 (60 readings from 12 turbines), the Lakehouse gate at 16:50 (21 tables with rows) | steps 3 to 10 below |
 | Interrupted notebook run, resumed | yes | no: Phase 1 went past its notebooks without a stop | step 4, at the first notebook of step 7 |
 | Second apply adds nothing | yes | no | step 5 |
 | Scripts under the runner, pinned | yes, against a stand-in `az` | no. The scripts themselves ran by hand, 19 to 25 November | that `az iot ops` and `az connectedk8s` accept `--subscription` (they are extension commands and could not be tried here) |
@@ -28,7 +28,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 cd simulator && python3 -m pytest -q tests/test_deploy_runner.py && cd .. && bash tools/script-tests/run.sh
 ```
 
-  It ends with `140 passed` and with `passed 187, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
+  It ends with `142 passed` and with `passed 187, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
 
 - [ ] `az login` as yourself, and `az extension add --name azure-iot-ops --yes` if preflight ever said it is missing.
 - [ ] The line from this computer to Azure carries a few megabytes in a few seconds. The first pilot, on 26 November, ran from a workstation under WSL that received 5 kB a second, and the Azure IoT Operations script could not finish there. This prints the rate, and shows nothing of the token:
@@ -210,10 +210,29 @@ bash infra/99-cleanup.sh --deployment XXX
 
 Removing the pilot's deployment is your decision and a separate command, with its own confirmation: `bash infra/99-cleanup.sh --deployment XXX --all`. It asks you to type the name of the workspace and of the resource group.
 
+## 11. Phase 5, when you want it
+
+Asked for on 26 November, after step 7 was complete. Nothing of it has run under the runner.
+
+```bash
+python3 tools/deploy.py plan --deployment XXX --up-to phase4 --approve-role-changes --allow-preview data-agent-sdk --allow-preview operations-agent --enable-phase5-isolated-simulator
+```
+
+Then the apply line it prints, with `--confirm p5a.isolation`: your statement that nothing but the demo's simulator listens on the edge's broker.
+
+- [ ] `done     p5a.command_path: command path in place and switched off`. First run of `infra/08` with the mode `Disabled`.
+- [ ] `done     p5a.notebook`, `done     p5b.decision_table`, `done     p5c.command_log`, `done     p5c.notebook`.
+- [ ] `blocked  p5b.agent … The instructions are those of Phase 3`, with the steps by hand. Do them in the portal: Stop, the new instructions, the action `Curtail turbine` with its four parameters, save, Generate playbook (one rule), Start.
+- [ ] Apply again: `done     p5b.agent: … the Phase 5b instructions, the action 'Curtail turbine' on notebook 12_send_edge_command, a playbook with 1 rule, started`, and `done     p3.operations_agent: … changed, or being changed, to its Phase 5b setup`.
+- [ ] `demo-ready    no`, with `Phase 5: the command path is switched off`. Switching it on, the rehearsal and the story are yours, from the three guides.
+- [ ] In Fabric, notebooks 12 and 13 have no run in their history.
+
+Send: every output, and the output of `ENV_FILE=.deploy/XXX/demo.env bash infra/09-remediation-agent.sh --show` after your steps in the portal.
+
 ## What the pilot does not cover
 
 - A capacity made by the runner (`--new-capacity`). It costs money and needs its own approval; try it on a deployment of its own.
-- Phase 5a, and Phases 5b and 5c, which stay with their guides.
+- Phase 5 was not part of the pilot as it was asked for on 25 November. Since the twentieth issue the runner provisions it behind `--enable-phase5-isolated-simulator`: see step 11.
 - Two applies from two computers at once. The lock that prevents two applies is a file on one computer.
 - A Fabric Environment in place of the `%pip` cells: looked into, not built. See [15-deployment-runner.md](15-deployment-runner.md).
 

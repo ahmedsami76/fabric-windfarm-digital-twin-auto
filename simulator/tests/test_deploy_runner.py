@@ -2673,3 +2673,90 @@ def test_the_lakehouse_probe_finds_its_driver_in_the_folder_it_is_given(tmp_path
     if not (ROOT / "app" / "windfarm-twin").exists():             # by hand the app is beside the probe; here there is none
         code, seen = ask()
         assert code == 2 and "app/windfarm-twin" in seen["error"]
+
+
+# ------------------------------------------------------------------------------------------ Phases 5b and 5c
+# 26 November 2026, 22:42, with Phases 1 to 4 complete under the runner: "yes please change the scope to include 5b and c".
+PHASE5 = "--enable-phase5-isolated-simulator"
+
+
+def started_agent(bench, *options):
+    """Phases 1 to 4 with the operations agent of Phase 3 set up as a person leaves it: a playbook of three rules, started."""
+    world = bench.world
+    later(bench, *options, confirm=SETTINGS34)
+    agent = world.find(world.workspaces[0]["id"], "OperationsAgent", "WindFarmGearboxWatch")
+    world.agents[agent["id"]].update(playbook={"RuleDefinitions": {"a": {}, "b": {}, "c": {}}}, shouldRun=True)
+    return world.agents[agent["id"]]
+
+
+def test_phases_5b_and_5c_are_not_there_unless_asked_for_by_their_own_option(deployed):
+    plain = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    only_5a = deployed.run("plan", ROLES, "--up-to", "phase4", PHASE5A)[1]
+    whole = deployed.run("plan", ROLES, "--up-to", "phase4", PHASE5)[1]
+    assert "p5a." not in plain and "p5b." not in plain and "p5c." not in plain
+    assert "p5a.isolation" in only_5a and "p5b." not in only_5a and "p5c." not in only_5a
+    assert all(step in whole for step in ("p5a.isolation", "p5a.command_path", "p5b.decision_table", "p5c.command_log", "p5c.notebook", "p5b.agent", "p5.show"))
+    line = whole.split("To carry this plan out:")[1]
+    assert PHASE5 in line and PHASE5A not in line
+    # the option is part of what was approved: a plan without it is another plan
+    assert re.search(r"^Plan (\w+)$", plain, re.M)[1] != re.search(r"^Plan (\w+)$", whole, re.M)[1]
+
+
+def test_phases_5b_and_5c_are_provisioned_and_nothing_is_sent_and_the_agents_new_setup_stays_a_persons(deployed):
+    import operations_agent
+    import remediation_spec
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    options = ("--allow-preview", "data-agent-sdk", *AGENT, PHASE5)
+    made = started_agent(deployed, *options)
+    code, text = later(deployed, *options)
+    assert code == core.EXIT_BLOCKED and "blocked  p5a.isolation" in text and "GearboxDecisionLive" not in world.kql["tables"]
+    code, text = later(deployed, *options, confirm=["p5a.isolation"])
+    # everything that sends nothing: the path switched off, the two tables and the function, the two notebooks imported
+    assert world.dataflows["fabric-to-windfarm-control"]["properties"]["mode"] == "Disabled"
+    assert {"GearboxDecisionLive", "EdgeCommands"} <= world.kql["tables"] and "CommandLog" in world.kql["functions"]
+    assert all(f"done     {step}" in text for step in ("p5a.command_path", "p5a.notebook", "p5b.decision_table", "p5c.command_log", "p5c.notebook")), text[-2500:]
+    twelve, thirteen = world.find(ws, "Notebook", "12_send_edge_command"), world.find(ws, "Notebook", "13_command_center")
+    assert twelve and thirteen and twelve["id"] not in world.jobs and thirteen["id"] not in world.jobs
+    # and stops at what changes the agent: a person's, with the steps by hand and what the runner read
+    block = text.split("blocked  p5b.agent")[1]
+    assert code == core.EXIT_BLOCKED and "The instructions are those of Phase 3" in block and "There is no action named 'Curtail turbine'" in block
+    assert "phase5b-agent-setup.txt" in block and 'the part headed "By hand"' in block
+    assert made["configuration"]["instructions"] and "Curtail turbine" not in json.dumps(made)        # the runner changed nothing of the agent
+    # the person: instructions and action, then the playbook, then the start
+    made["configuration"]["instructions"] = remediation_spec.setup_text() + "\r\n"
+    made["configuration"]["actions"] = {"act-1": operations_agent.action_object(twelve["id"], ws, "act-1")}
+    made.update(playbook={}, shouldRun=False)
+    text = later(deployed, *options)[1]
+    assert "blocked  p5b.agent" in text and "the Phase 5b instructions and the action, and no playbook yet" in text
+    # the look of Phase 3 does not call its finished step undone while the agent is stopped for its change
+    assert "blocked  p3.operations_agent" not in text and "done     p3.operations_agent: operations agent WindFarmGearboxWatch: changed, or being changed, to its Phase 5b setup" in text
+    made["playbook"] = {"RuleDefinitions": {"one": {}}, "OntologyDefinitions": {}}
+    assert "a playbook with 1 rule, and is not started" in later(deployed, *options)[1]
+    made["shouldRun"] = True
+    writes = list(world.writes)
+    code, text = later(deployed, *options)
+    assert code == 0, text[-1500:]
+    assert "done     p5b.agent: operations agent WindFarmGearboxWatch: the Phase 5b instructions, the action 'Curtail turbine' on notebook 12_send_edge_command, a playbook with 1 rule, started" in text
+    assert "optional p5.show" in text and "provisioned   yes" in text
+    # provisioned is not demo-ready: the path is switched off, and switching it on is a person's
+    assert "demo-ready    no" in text and "Phase 5: the command path is switched off, as the runner made it" in text
+    assert world.writes == writes                              # a finished Phase 5 applied again changes nothing
+    # nothing was sent, switched on or injected on the way, and the agent's script was not started
+    assert world.dataflows["fabric-to-windfarm-control"]["properties"]["mode"] == "Disabled"
+    assert not any(word in call for call in world.shell_calls for word in ("inject", "simctl", "mqtt", "09-remediation-agent", "rehearse"))
+    assert twelve["id"] not in world.jobs and thirteen["id"] not in world.jobs
+    # a person switches the path on: the report says so, and still claims nothing about commands
+    world.dataflows["fabric-to-windfarm-control"]["properties"]["mode"] = "Enabled"
+    text = later(deployed, *options)[1]
+    assert "Phase 5: the command path is switched on, by a person" in text and "the command path is switched off" not in text
+    world.dataflows["fabric-to-windfarm-control"]["properties"]["mode"] = "Disabled"
+    # without the option, the plan of Phases 1 to 4 looks at the same agent as Phase 3 does: a playbook, started
+    assert "p3.operations_agent: operations agent WindFarmGearboxWatch: a playbook with 1 rule, started" in later(deployed, *options[:-1])[1].replace("done     ", "")
+    # a notebook 12 imported again has another ID: the action no longer runs this workspace's notebook, and that is seen
+    made["configuration"]["actions"]["act-1"]["connection"]["jobArtifactId"] = "another-notebook"
+    assert "The action does not run the notebook 12_send_edge_command of this workspace" in deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+    made["configuration"]["actions"]["act-1"]["connection"]["jobArtifactId"] = twelve["id"]
+    # a definition Fabric does not give out is said as all that is known, never as done
+    world.agent_unreadable = True
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+    assert re.search(r"p5b\.agent\s+NOT CHECKED", plan) and "not proof that it has its Phase 5b setup" in plan

@@ -47,6 +47,7 @@ NOTEBOOKS = {
     "phase2": ("05_build_model_tables", "06_build_semantic_model", "07_model_acceptance", "08_build_report"),
     "phase3": ("09_build_data_agent", "10_test_data_agent", "11_build_ontology"),
     "phase5a": ("12_send_edge_command",),
+    "phase5bc": ("13_command_center",),
 }
 MODEL, REPORT, DATA_AGENT, ONTOLOGY, OPERATIONS_AGENT = ("WindFarm Operations", "WindFarm Operations Report", "WindFarmDataAgent",
                                                          "WindFarmOntology", "WindFarmGearboxWatch")
@@ -143,7 +144,8 @@ RUNNABLE = (".execute database script", ".create", ".alter")
 REMOVES = re.compile(r"^\s*\.(drop|clear|delete|purge|set|replace|rename|move)\b", re.M)
 # The only KQL files the runner sends. The repair and reset files of the repository are a person's to run.
 KQL_FILES = ("fabric/kql/01-tables.kql", "fabric/kql/02-update-policies.kql", "fabric/kql/03-onelake-availability.kql",
-             "fabric/kql/04-prepared-views.kql", "fabric/kql/05-agent-readiness.kql")
+             "fabric/kql/04-prepared-views.kql", "fabric/kql/05-agent-readiness.kql",
+             "fabric/kql/06-remediation-readiness.kql", "fabric/kql/07-command-log.kql")
 
 
 def kql_blocks(text: str) -> list[str]:
