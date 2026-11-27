@@ -107,6 +107,8 @@ class World:
         self.fabric_quota = True
         self.capacity_state = "Active"        # the state a capacity is in right after it was made
         self.fabric_calls: list = []
+        self.app_item_count = 2               # how many items a deployed app shows as in the workspace's list
+        self.scaffold_stops = 0               # how many times the app's script ends before its libraries are in
 
     def new_id(self, prefix: str) -> str:
         self.counter += 1
@@ -126,6 +128,9 @@ class World:
     def telemetry_flows(self) -> bool:
         return bool(self.simulator and "windfarm-to-fabric" in self.dataflows and self.ingestion_works
                     and "RawEvents_mapping" in self.kql["mappings"] and (self.vm or {}).get("powerState") == "VM running")
+
+
+APP_KINDS = ("AppBackend", "AppSecondItem")
 
 
 def opt(args, flag):
@@ -670,6 +675,12 @@ class FakeShell:
             w.app_builds.append(str(env["APP_DIR"]))
             (target / "build.ts").write_text((source / "build.ts").read_text())
             (target / "config.ts").write_text(f"export const WORKSPACE_NAME = '{env['FABRIC_WORKSPACE_NAME']}';\n")
+            # the twin's files are there before the libraries are; the script marks the app ready after its own check
+            if w.scaffold_stops:
+                w.scaffold_stops -= 1
+                return 1, "npm error code ETIMEDOUT\nSTOP: npm could not install @types/three@0.187.0."
+            stamp = re.search(r"'([0-9a-f]{12})'", (source / "build.ts").read_text())
+            (Path(env["APP_DIR"]) / ".twin-ready").write_text((stamp.group(1) if stamp else "") + "\n")
         elif command.startswith("npx rayfin up"):
             built_for = (Path(cwd) / "packages" / "functions" / "src" / "config.ts").read_text()
             assert Path(cwd).parent.parent.parent.name == ".deploy" and f"'{named}'" in built_for, \
@@ -677,15 +688,18 @@ class FakeShell:
             if not w.rayfin_signed_in:
                 w.writes.pop()
                 return 1, "Error: You are not signed in. Run `rayfin login`."
-            if not w.find(ws, "FabricApp", "WindFarmTwin"):
-                w.add_item(ws, "FabricApp", "WindFarmTwin")
+            # Seen on 26 November 2026: after one deployment the workspace lists two items of the app's name. Their types
+            # were not in what was sent; "AppBackend" is after the portal's address (/appbackends/), the other is a stand-in.
+            for kind in APP_KINDS[:w.app_item_count]:
+                if not w.find(ws, kind, "WindFarmTwin"):
+                    w.add_item(ws, kind, "WindFarmTwin")
             w.ups.append((str(cwd), w.secrets_in_app.get(str(cwd))))
         elif "create-principal.sh" in command:
             suffix = names.read_env(settings)["DEPLOYMENT_SUFFIX"]
             # a registration of the deployment's own, the app's folder of the deployment, the workspace by name
             assert env.get("PRINCIPAL_NAME") == f"windfarm-twin-eventhouse-reader-{suffix}", f"the registration was named {env.get('PRINCIPAL_NAME')}"
             assert Path(env.get("APP_DIR", "")) == settings.parent / "app" / "windfarm-twin" and env.get("FABRIC_WORKSPACE_NAME") == named
-            assert w.find(ws, "FabricApp", "WindFarmTwin"), "the principal's script was started before the app was deployed"
+            assert w.find(ws, APP_KINDS[0], "WindFarmTwin"), "the principal's script was started before the app was deployed"
             entry = w.registrations.get(env["PRINCIPAL_NAME"])
             if not entry:
                 if w.no_registrations:

@@ -23,6 +23,15 @@ THREE_VERSION="0.187.0"
 MSSQL_VERSION="12.8.1"         # Rayfin's guide asks for 12.6.0 or newer: older ones fail against Fabric endpoints
 MSSQL_TYPES_VERSION="12.3.0"
 MODE="${1:-all}"
+# A line under the app that says its last full run ended with its check passed, and for which build of the overlay.
+# The deployment runner reads it: the twin's files are copied early, so their presence says nothing about the end.
+READY="$APP/.twin-ready"
+# npm waits five minutes for an answer that does not come and tries three times in all (its defaults, read from npm
+# 10.9.9). On a line that drops single connections that is a quarter of an hour of silence for one install, seen on
+# 26 November 2026. One minute and six tries here; both can be set from outside, for a line that is slow and not
+# dropping: npm_config_fetch_timeout=300000 bash app/create-app.sh
+export npm_config_fetch_timeout="${npm_config_fetch_timeout:-60000}"
+export npm_config_fetch_retries="${npm_config_fetch_retries:-5}"
 
 say()  { printf '\n==> %s\n' "$*"; }
 stop() { printf '\nSTOP: %s\n' "$*" >&2; exit 1; }
@@ -67,6 +76,25 @@ copy_overlay() {
 }
 
 has_sql_driver() { grep -q '"mssql"' "$APP/packages/functions/package.json" 2>/dev/null; }
+# Is NAME a dependency in FILE? Each library is looked for by itself: an install that was stopped half way leaves
+# one of a pair behind (seen on 26 November 2026: three.js there, its types not).
+has_dep() { grep -q "\"$2\"[[:space:]]*:" "$1" 2>/dev/null; }
+# Add what is missing of a library and its types to one package of the app. $1 package.json, $2 workspace, $3 what to
+# say, then NAME VERSION KIND (KIND is "" or -D) for each.
+add_libraries() {
+  local file="$1" workspace="$2" title="$3" said=0 name version kind; shift 3
+  while (( $# )); do
+    name="$1"; version="$2"; kind="$3"; shift 3
+    has_dep "$file" "$name" && continue
+    (( said )) || { say "$title"; said=1; }
+    # shellcheck disable=SC2086
+    (cd "$APP" && npm install --no-audit --no-fund $kind -w "$workspace" "$name@$version") \
+      || stop "npm could not install $name@$version. Nothing in Fabric was touched. If its lines name a timeout (ETIMEDOUT, ERR_SOCKET_TIMEOUT), the connection dropped: run this again, it goes on from here."
+  done
+  (( said ))
+}
+
+rm -f "$READY"      # whatever this run does to the app, it is ready again only when the check at the end has passed
 
 if [[ "$MODE" == "--overlay" ]]; then
   say "Copying the files of app/overlay"
@@ -117,26 +145,17 @@ fi
 say "Copying the files of app/overlay"
 copy_overlay
 
-if grep -q '"three"' "$APP/packages/frontend/package.json"; then
-  say "three.js is already a dependency"
-else
-  say "Adding three.js $THREE_VERSION to the frontend"
-  (cd "$APP" && npm install --no-audit --no-fund -w @rayfin-app/frontend "three@$THREE_VERSION")
-  (cd "$APP" && npm install --no-audit --no-fund -D -w @rayfin-app/frontend "@types/three@$THREE_VERSION")
-fi
+add_libraries "$APP/packages/frontend/package.json" @rayfin-app/frontend "Adding three.js $THREE_VERSION to the frontend" \
+  three "$THREE_VERSION" "" "@types/three" "$THREE_VERSION" -D || say "three.js is already a dependency"
 
-if has_sql_driver; then
-  say "The SQL driver is already a dependency of the functions"
-else
-  say "Adding the SQL driver (mssql $MSSQL_VERSION) to the functions: they read the Lakehouse with it"
-  (cd "$APP" && npm install --no-audit --no-fund -w @rayfin-app/functions "mssql@$MSSQL_VERSION")
-  (cd "$APP" && npm install --no-audit --no-fund -D -w @rayfin-app/functions "@types/mssql@$MSSQL_TYPES_VERSION")
-fi
+add_libraries "$APP/packages/functions/package.json" @rayfin-app/functions "Adding the SQL driver (mssql $MSSQL_VERSION) to the functions: they read the Lakehouse with it" \
+  mssql "$MSSQL_VERSION" "" "@types/mssql" "$MSSQL_TYPES_VERSION" -D || say "The SQL driver is already a dependency of the functions"
 
 say "Checking the app: functions against their generated types, then every package with the compiler"
 if ! (cd "$APP" && npm run typecheck); then
   stop "The check failed, so the app is not ready to deploy. The lines above name the file. Send them to me."
 fi
+sed -n "s/.*'\([0-9a-f]\{12\}\)'.*/\1/p" "$APP/packages/functions/src/build.ts" 2>/dev/null | head -n 1 > "$READY"
 
 cat <<EOF
 

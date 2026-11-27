@@ -559,7 +559,7 @@ def test_phases_2_to_4_stop_at_each_thing_only_a_person_can_do_and_go_on_when_it
     assert KEY not in deployed.everything_written() and "KUSTO_CLIENT_SECRET" not in deployed.everything_written()
     config = (deployed.root / ".deploy" / deployed.suffix / "app/windfarm-twin/packages/functions/src/config.ts").read_text()
     assert deployed.cfg["FABRIC_WORKSPACE_NAME"] in config
-    assert world.find(ws, "FabricApp", "WindFarmTwin")
+    assert world.find(ws, "AppBackend", "WindFarmTwin")
     # hourly schedule for notebook 05, made once
     assert [s[0]["configuration"]["type"] for s in world.schedules.values()] == ["Daily", "Cron"]
     # Provisioned is not demo-ready. An item of the operations agent and an app item prove neither Teams nor the twin
@@ -2029,7 +2029,7 @@ def test_two_deployments_never_build_the_app_in_one_folder(deployed):
         assert ctx.cfg["FABRIC_WORKSPACE_NAME"] in config
     one.current = "p4.deploy"
     steps["p4.deploy"].act(one)             # the stand-in fails a deployment from a folder that was built for another workspace
-    assert deployed.world.find(deployed.world.workspaces[0]["id"], "FabricApp", "WindFarmTwin")
+    assert deployed.world.find(deployed.world.workspaces[0]["id"], "AppBackend", "WindFarmTwin")
     assert not (deployed.root / "app" / "windfarm-twin").exists()
 
 
@@ -2540,6 +2540,11 @@ def test_the_operations_agent_is_created_from_its_documented_definition_and_its_
     assert "done     p3.operations_agent: operations agent WindFarmGearboxWatch: a playbook with 3 rules, started" in text
     assert "Whether its message reaches Teams, the runner cannot read" in text
     assert world.writes.count("POST operationsAgents WindFarmGearboxWatch") == 1 and len([e for e in world.items[ws] if e["type"] == "OperationsAgent"]) == 1
+    # 26 November 2026, on a tenant: three rules, and the look said "a playbook, started". The rules are a map there.
+    made["playbook"] = {"RuleDefinitions": {"rule-a": {}, "rule-b": {}, "rule-c": {}}, "OntologyDefinitions": {}}
+    text = later(deployed, *options)[1]
+    assert "a playbook with 3 rules, started" in text
+    assert "its definition shows a playbook and a started agent, which is not proof that it delivers to Teams" in text
     # a playbook of a form the runner has not seen is a playbook, and its rules are not counted
     made["playbook"] = {"rules": "in another form"}
     assert "a playbook, started" in deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
@@ -2563,3 +2568,56 @@ def test_a_definition_fabric_does_not_take_hands_the_agent_back_to_the_person(de
     code, text = later(deployed, "--allow-preview", "data-agent-sdk", *AGENT)
     assert "done     p3.operations_agent_item" in text and "the agent has no playbook yet" in text
     assert "POST operationsAgents WindFarmGearboxWatch" not in world.writes
+
+
+def test_an_app_whose_script_stopped_half_way_is_not_taken_for_a_built_one(deployed):
+    """26 November 2026: the install of one library stood for sixteen minutes. Had it been stopped, the twin's files were
+    there, the runner's look took them for the app, and the next apply would have deployed a half-built folder."""
+    world = deployed.world
+    world.scaffold_stops = 1
+    code, text = later(deployed, "--allow-preview", "data-agent-sdk", *AGENT, confirm=SETTINGS34)
+    while code == core.EXIT_BLOCKED and "p3.operations_agent:" in text:        # the person's part of the agent
+        agent = world.find(world.workspaces[0]["id"], "OperationsAgent", "WindFarmGearboxWatch")
+        world.agents[agent["id"]].update(playbook={"RuleDefinitions": [{}]}, shouldRun=True)
+        code, text = later(deployed, "--allow-preview", "data-agent-sdk", *AGENT)
+    assert code == 1 and "FAILED   p4.scaffold" in text, text[-900:]
+    app = deployed.root / ".deploy" / deployed.suffix / "app" / "windfarm-twin"
+    assert (app / "packages/functions/src/build.ts").exists() and not (app / ".twin-ready").exists()
+    assert not [c for c in world.shell_calls if c.startswith("npx rayfin up")]
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4", "--allow-preview", "data-agent-sdk", *AGENT)[1]
+    assert re.search(r"p4\.scaffold\s+will run", plan) and "has not ended with its check passed" in plan
+    code, text = later(deployed, "--allow-preview", "data-agent-sdk", *AGENT)
+    assert "done     p4.scaffold" in text and len(world.app_builds) == 2 and (app / ".twin-ready").exists()
+    # a mark left by the build of another issue of the overlay is no mark for this one
+    (app / ".twin-ready").write_text("000000000000\n")
+    assert re.search(r"p4\.scaffold\s+DRIFT", deployed.run("plan", ROLES, "--up-to", "phase4", "--allow-preview", "data-agent-sdk", *AGENT)[1])
+
+
+def test_a_deployed_app_is_found_whether_the_workspace_lists_it_as_one_item_or_as_two(deployed):
+    """26 November 2026: `npx rayfin up` deployed the app, the workspace listed two items named WindFarmTwin, and the look,
+    which wanted exactly one, called the step failed."""
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    options = ("--allow-preview", "data-agent-sdk", *AGENT)
+    code, text = later(deployed, *options, confirm=SETTINGS34)
+    agent = world.find(ws, "OperationsAgent", "WindFarmGearboxWatch")
+    world.agents[agent["id"]].update(playbook={"RuleDefinitions": [{}]}, shouldRun=True)
+    code, text = later(deployed, *options)
+    assert "done     p4.deploy: app WindFarmTwin is in the workspace: 2 items of that name (AppBackend, AppSecondItem)" in text, text[-1500:]
+    assert "FAILED   p4.deploy" not in text and "done     p4.eventhouse_principal" in text
+    ups = [c for c in world.shell_calls if c.startswith("npx rayfin up")]
+    assert len(ups) == 2                 # the first deployment, and the one after the secrets: none because of a failed look
+    assert "app WindFarmTwin is in the workspace: 2 items" in deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+
+
+def test_a_deployed_app_listed_as_one_item_is_found_too(deployed):
+    world = deployed.world
+    world.app_item_count = 1
+    options = ("--allow-preview", "data-agent-sdk", *AGENT)
+    # a report somebody gave the app's name is not the app
+    stray = world.add_item(world.workspaces[0]["id"], "Report", "WindFarmTwin")
+    assert "app WindFarmTwin is in the workspace" not in deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+    world.items[world.workspaces[0]["id"]].remove(stray)
+    later(deployed, *options, confirm=SETTINGS34)
+    agent = world.find(world.workspaces[0]["id"], "OperationsAgent", "WindFarmGearboxWatch")
+    world.agents[agent["id"]].update(playbook={"RuleDefinitions": [{}]}, shouldRun=True)
+    assert "done     p4.deploy: app WindFarmTwin is in the workspace: one item of that name (AppBackend)" in later(deployed, *options)[1]

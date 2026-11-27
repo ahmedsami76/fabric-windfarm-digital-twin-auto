@@ -206,8 +206,10 @@ def agent_state(ctx) -> dict:
         _path, document = decode_definition(answer)
         playbook = document.get("playbook") or {}
         # The reference calls the playbook reserved. What this tenant returned on 24 November 2026 held its rules under
-        # RuleDefinitions; a playbook without that key is counted as a playbook, and its rules are not.
-        rules = next((playbook[key] for key in ("RuleDefinitions", "ruleDefinitions") if isinstance(playbook.get(key), list)), None)
+        # RuleDefinitions; a playbook without that key is counted as a playbook, and its rules are not. On 26 November
+        # the look said "a playbook, started" for a playbook of three rules: the entries are not a list there. A map
+        # counts by its keys.
+        rules = next((playbook[key] for key in ("RuleDefinitions", "ruleDefinitions") if isinstance(playbook.get(key), (list, dict))), None)
         return {"playbook": bool(playbook), "rules": None if rules is None else len(rules), "running": document.get("shouldRun") is True}
     return ctx.remember("operations agent", read)
 
@@ -330,13 +332,38 @@ def p4_scaffold(ctx) -> Probe:
         return todo(f"the app holds build {theirs}; the repository is at {ours}")
     if f"WORKSPACE_NAME = '{ctx.cfg['FABRIC_WORKSPACE_NAME']}'" not in config.read_text(encoding="utf-8"):
         return todo("the app names another workspace")
+    # The twin's files are copied before the libraries are installed and the app is checked, so they say nothing about
+    # the end of the script (seen on 26 November 2026: an install that stood for sixteen minutes, with the files there).
+    # The script writes this line last, after its check has passed, with the build it checked.
+    ready = app_dir(ctx) / ".twin-ready"
+    if not ready.exists() or ready.read_text(encoding="utf-8").strip() != ours:
+        return todo("the app's folder is there, and the script that builds it has not ended with its check passed")
     return done(f"app scaffolded in {app_label(ctx)}, build {ours}, looking for workspace {ctx.cfg['FABRIC_WORKSPACE_NAME']}")
 
 
-def app_item(ctx) -> dict | None:
+def app_items(ctx) -> list:
+    """What the workspace lists under the app's name, the data items left out. On 26 November 2026 `npx rayfin up` reported
+    one item with its ID, and the workspace's list then held two items named WindFarmTwin; the look of that day wanted
+    exactly one and called a deployed app missing. Their types were not in what was sent, so none is asked for by name:
+    the workspace is the deployment's own, and the done line says which types it found."""
     data_kinds = {"Notebook", "Lakehouse", "Eventhouse", "KQLDatabase", "Eventstream", "SemanticModel", "Report", "SQLEndpoint"}
-    found = [entry for entry in items(ctx) if entry.get("displayName") == name(ctx, "APP_NAME") and entry.get("type") not in data_kinds]
-    return found[0] if len(found) == 1 else None
+    return [entry for entry in items(ctx) if entry.get("displayName") == name(ctx, "APP_NAME") and entry.get("type") not in data_kinds]
+
+
+def app_item(ctx) -> dict | None:
+    found = app_items(ctx)
+    return found[0] if found else None
+
+
+def p4_deployed(ctx) -> Probe:
+    if not workspace_id(ctx):
+        return after("p1.workspace")
+    found = app_items(ctx)
+    if not found:
+        return todo()
+    kinds = ", ".join(sorted({str(entry.get("type")) for entry in found}))
+    listed = "one item" if len(found) == 1 else f"{len(found)} items"
+    return done(f"app {name(ctx, 'APP_NAME')} is in the workspace: {listed} of that name ({kinds})")
 
 
 SIGN_IN = ("cd {app} && export RAYFIN_ENCRYPTION_FALLBACK_ENABLED=true && npx rayfin login\n"
@@ -569,8 +596,7 @@ def phase4(options: Options) -> list[Step]:
              writes="the app's folder of this deployment on this computer, .deploy/<suffix>/app/windfarm-twin; nothing in Fabric",
              basis="app/create-app.sh", proof="live"),
         Step("p4.deploy", "phase4", "App deployed to the workspace",
-             lambda ctx: (done(f"app item {name(ctx, 'APP_NAME')} is in the workspace") if app_item(ctx) else todo())
-             if workspace_id(ctx) else after("p1.workspace"), act_deploy_app, wait_seconds=120, inputs=("app/overlay",),
+             p4_deployed, act_deploy_app, wait_seconds=120, inputs=("app/overlay",),
              writes="the Fabric app item WindFarmTwin, its page and its seven functions",
              basis="npx rayfin up --workspace NAME --item-name NAME (Rayfin 2.0.1)", proof="live"),
         *([] if options.lakehouse_only else live),

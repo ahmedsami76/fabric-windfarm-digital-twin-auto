@@ -84,8 +84,11 @@ def report(ctx: Context, steps: list, code: int | None) -> list[str]:
         if agent:
             said.append(f"operations agent: a Teams message seen, confirmed by {agent.get('by')} at {agent.get('at')}")
         elif _complete(ctx, "p3.operations_agent"):
-            why.append("the operations agent: an item exists, which is not proof that it is configured, running or delivering "
-                       "to Teams. When you have seen its message in Teams: --confirm p3.agent_message")
+            seen = "preview:operations-agent" in ctx.options.granted        # then the step read the agent's definition
+            why.append(("the operations agent: its definition shows a playbook and a started agent, which is not proof that it "
+                        "delivers to Teams." if seen else
+                        "the operations agent: an item exists, which is not proof that it is configured, running or delivering "
+                        "to Teams.") + " When you have seen its message in Teams: --confirm p3.agent_message")
     if PHASES.index(up_to) >= PHASES.index("phase4"):
         expected, check = build_stamp(ctx, APP_BUILD), ctx.state.data.get("app_check") or ctx.offered.get("app_check")
         probe = (ctx.state.step("p4.gate_data_route").get("evidence") or {}).get("passed")

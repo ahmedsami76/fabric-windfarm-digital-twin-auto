@@ -552,6 +552,28 @@ check "create-app --overlay, an update that needs a new library: copies, then sa
 : > "$STUB_DIR/calls.log"; app_run
 check "create-app, run again on an app without the SQL driver: adds it, and nothing else" 0 "Adding the SQL driver" "-w @rayfin-app/functions mssql@12.8.1" "already a dependency" "npm run typecheck (in windfarm-twin)" "!three@" "!create-rayfin"
 
+# 26 November 2026: on a line that drops connections, the install of the types of three.js stood for a quarter of an
+# hour. Stopped there, the app had three.js and not its types, and its twin files, which were copied before.
+app_reset; app_run
+OUT="$OUT
+ready:$(cat "$W/.twin-ready" 2>/dev/null) stamp:$(sed -n "s/.*'\([0-9a-f]\{12\}\)'.*/\1/p" "$APPDIR/overlay/packages/functions/src/build.ts" | head -n 1)"
+check "create-app, fresh: the app is marked ready with the overlay's build, and npm is told to wait a minute and try six times" 0 "ready:\([0-9a-f]\{12\}\) stamp:\1" "with fetch-timeout 60000, fetch-retries 5"
+
+app_reset; touch "$STUB_DIR/types_three_fails"; app_run
+OUT="$OUT
+ready:$([[ -e "$W/.twin-ready" ]] && echo yes || echo no)"
+check "create-app, an install that fails half way: stops, says which, and the app is not marked ready" 1 "npm could not install @types/three@0.187.0" "run this again" "ready:no" "!npm run typecheck (in" "!mssql@"
+rm -f "$STUB_DIR/types_three_fails"; : > "$STUB_DIR/calls.log"; app_run
+OUT="$OUT
+ready:$([[ -s "$W/.twin-ready" ]] && echo yes || echo no) types:$(grep -c '"@types/three"' "$W/packages/frontend/package.json")"
+check "create-app, run again after that: adds the half that is missing and not the half that is there, then checks and marks" 0 "Adding three.js" "-D -w @rayfin-app/frontend @types/three@0.187.0" "!-w @rayfin-app/frontend three@0.187.0" "mssql@12.8.1" "npm run typecheck (in windfarm-twin)" "ready:yes" "types:1"
+: > "$STUB_DIR/calls.log"; app_run --overlay
+OUT="$OUT
+ready:$([[ -e "$W/.twin-ready" ]] && echo yes || echo no)"
+check "create-app --overlay: files copied without the check, so the app is no longer marked ready" 0 "Copied the twin" "ready:no"
+app_reset; npm_config_fetch_timeout=300000 app_run
+check "create-app, a wait for npm set from outside is kept" 0 "with fetch-timeout 300000, fetch-retries 5"
+
 app_reset; echo "v20.19.0" > "$STUB_DIR/node_version"; app_run
 check "create-app, Node.js 20: stops before anything is created" 1 "Node.js 20.19.0 is too old" "Step 2 of docs/11-deployment-guide-phase4.md" "!create-rayfin"
 
@@ -574,7 +596,9 @@ app_reset; touch "$STUB_DIR/pack_fails"; app_run
 check "create-app, the functions pack creates nothing: stops and says so" 1 "did not create packages/functions" "!typecheck"
 
 app_reset; touch "$STUB_DIR/typecheck_fails"; app_run
-check "create-app, the check fails: the app is not called ready" 1 "not ready to deploy" "!The app is ready"
+OUT="$OUT
+ready:$([[ -e "$W/.twin-ready" ]] && echo yes || echo no)"
+check "create-app, the check fails: the app is not called ready, and not marked so" 1 "not ready to deploy" "!The app is ready" "ready:no"
 
 app_reset; mkdir -p "$W"; echo notes > "$W/notes.txt"; app_run
 check "create-app, a folder of that name that is no app: leaves it alone" 1 "not a Rayfin project" "!create-rayfin"
