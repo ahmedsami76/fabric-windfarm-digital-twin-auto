@@ -2452,3 +2452,41 @@ def test_the_secret_never_stays_on_disk_and_a_directory_that_lags_is_waited_for(
     world.registrations[reader]["copies"] = 2
     text = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
     assert "2 app registrations are named" in text and "takes none of them" in text
+
+
+def test_a_confirmation_of_a_result_given_before_the_result_can_exist_does_not_count(deployed):
+    # 26 November 2026, 18:05: the first apply for Phase 2 carried --confirm p2.acceptance beside the two confirmations of
+    # tenant settings, as the plan's last line listed them. The semantic model that notebook 07 tests did not exist, and
+    # the confirmation was kept.
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    assert "Add --confirm phase3.tenant_settings --confirm phase4.tenant_settings when that step of yours is done." in plan
+    assert "--confirm p2.acceptance speaks of a result: it counts once p2.semantic_model is complete" in plan
+    code, text = later(deployed, "--confirm", "p3.agent_message", confirm=["p2.acceptance", "phase3.tenant_settings", "phase4.tenant_settings"])
+    assert code == core.EXIT_BLOCKED and "blocked  p2.semantic_model" in text
+    assert "--confirm p2.acceptance was not kept" in text and "p2.semantic_model is not complete yet" in text
+    assert "--confirm p3.agent_message was not kept" in text and "a Teams message seen" not in text      # nor does it count for this report
+    kept = deployed.state["confirmed"]
+    assert "p2.acceptance" not in kept and "phase3.tenant_settings" in kept and "phase4.tenant_settings" in kept
+    assert "the operations agent: an item exists" not in text            # no such item yet: the sentence would not be true
+    # notebook 06 has been run by hand since. The runner stops for notebook 07, and takes the confirmation given then
+    world.add_item(ws, "SemanticModel", "WindFarm Operations")
+    code, text = later(deployed)
+    assert code == core.EXIT_BLOCKED and "blocked  p2.acceptance" in text and "07_model_acceptance" in text
+    code, text = later(deployed, confirm=["p2.acceptance"])
+    assert "confirmed p2.acceptance" in text and "blocked  p2.report" in text
+    assert deployed.state["confirmed"]["p2.acceptance"]["after"] == "p2.semantic_model"
+    # a confirmation that an earlier issue kept, without knowing whether it came too early, is asked for again
+    checkpoint = deployed.root / ".deploy" / deployed.suffix / "state.json"
+    data = json.loads(checkpoint.read_text())
+    del data["confirmed"]["p2.acceptance"]["after"]
+    checkpoint.write_text(json.dumps(data))
+    code, text = later(deployed)
+    assert code == core.EXIT_BLOCKED and "blocked  p2.acceptance" in text
+    # and a confirmation given in the very apply that first sees the result is taken: the usual way
+    world.add_item(ws, "Report", "WindFarm Operations Report")
+    world.add_item(ws, "DataAgent", "WindFarmDataAgent")
+    world.add_item(ws, "OperationsAgent", "WindFarmGearboxWatch")
+    code, text = later(deployed, "--confirm", "p3.agent_message", confirm=["p2.acceptance"])
+    assert code == 0 and deployed.state["confirmed"]["p3.agent_message"]["after"] == "p3.operations_agent", text[-1500:]
+    assert "a Teams message seen, confirmed by" in text

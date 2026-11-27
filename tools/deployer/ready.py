@@ -83,7 +83,7 @@ def report(ctx: Context, steps: list, code: int | None) -> list[str]:
         agent = ctx.confirmed("p3.agent_message")
         if agent:
             said.append(f"operations agent: a Teams message seen, confirmed by {agent.get('by')} at {agent.get('at')}")
-        else:
+        elif _complete(ctx, "p3.operations_agent"):
             why.append("the operations agent: an item exists, which is not proof that it is configured, running or delivering "
                        "to Teams. When you have seen its message in Teams: --confirm p3.agent_message")
     if PHASES.index(up_to) >= PHASES.index("phase4"):

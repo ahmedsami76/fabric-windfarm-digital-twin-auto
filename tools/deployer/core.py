@@ -230,6 +230,8 @@ class Lock:
 
 
 # ----------------------------------------------------------------------------------------- steps
+# A confirmation of a result, and the step whose result it speaks of: it counts only when given with that step complete.
+RESTS_ON = {"p2.acceptance": "p2.semantic_model", "p3.data_agent_test": "p3.data_agent", "p3.agent_message": "p3.operations_agent"}
 UNSEEN = "unseen"       # in a probe's evidence: the question could not be asked, so this is no finding about the step
 
 
@@ -329,7 +331,31 @@ class Context:
     def confirmed(self, step_id: str) -> dict | None:
         """A confirmation in the checkpoint, or one offered with this apply. An offered one is written to the checkpoint
         only once the plan and its target have been accepted (cli.run_apply)."""
-        return self.state.data["confirmed"].get(step_id) or self.offered["confirmed"].get(step_id)
+        kept, offered, base = self.state.data["confirmed"].get(step_id), self.offered["confirmed"].get(step_id), RESTS_ON.get(step_id)
+        if not base:
+            return kept or offered
+        # A statement about a result counts only when it was given with the thing it speaks of in place. On 26 November
+        # 2026 `--confirm p2.acceptance` ("notebook 07 printed eleven PASS lines") was given, and kept, before the
+        # semantic model that notebook 07 tests existed. One kept that way, by an earlier issue, is asked for again.
+        if kept and kept.get("after") == base:
+            return kept
+        return offered if offered and self.state.step(base).get("status") == "complete" else None
+
+    def keep_offered(self) -> list[str]:
+        """Writes what this apply was given to the checkpoint; the first confirmation of a step stands. Called only once
+        the plan and its target are accepted. Returns the confirmations that came too early and were not kept."""
+        early = []
+        for step_id, said in self.offered["confirmed"].items():
+            base, kept = RESTS_ON.get(step_id), self.state.data["confirmed"].get(step_id)
+            if not base:
+                self.state.data["confirmed"].setdefault(step_id, said)
+            elif kept and kept.get("after") == base:
+                continue
+            elif self.state.step(base).get("status") == "complete":
+                self.state.data["confirmed"][step_id] = dict(said, after=base)
+            else:
+                early.append(step_id)
+        return early
 
     def acknowledged(self, thing_id: str) -> bool:
         return thing_id in self.state.data["acknowledged"] or thing_id in self.offered["acknowledged"]

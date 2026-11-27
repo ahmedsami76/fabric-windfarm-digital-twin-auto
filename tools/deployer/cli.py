@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import choices, deployments, ready, resolve
 from .cloud import Az, CloudError, Kusto, OneLake, Shell, make_fabric
-from .core import (EXIT_BLOCKED, EXIT_FAILED, EXIT_OK, EXIT_REFUSED, PHASES, Blocked, Context, Lock, Options, Redactor, Refused,
+from .core import (EXIT_BLOCKED, EXIT_FAILED, EXIT_OK, EXIT_REFUSED, PHASES, RESTS_ON, Blocked, Context, Lock, Options, Redactor, Refused,
                    State, StepFailed, apply, make_plan, plan_differences, plan_digest, plan_record, print_plan, save_plan, select)
 from .steps import capacity_label, creating, new_capacity, new_capacity_label
 from .steps_later import catalogue
@@ -273,8 +273,12 @@ def main(argv=None, out=None, root: Path = ROOT, adapters=None) -> int:
         ctx.say("Nothing was changed in Azure or Fabric. To carry this plan out:")
         ctx.say("  " + apply_command(ctx, args, digest))
         waiting = [line.step.id for line in lines if line.decision == "operator" and line.step.id in CONFIRMABLE]
-        if waiting:
-            ctx.say("Add " + " ".join(f"--confirm {step}" for step in waiting) + " when that step of yours is done.")
+        later = [step for step in waiting if step in RESTS_ON and ctx.state.step(RESTS_ON[step]).get("status") != "complete"]
+        now = [step for step in waiting if step not in later]
+        if now:
+            ctx.say("Add " + " ".join(f"--confirm {step}" for step in now) + " when that step of yours is done.")
+        for step in later:
+            ctx.say(f"--confirm {step} speaks of a result: it counts once {RESTS_ON[step]} is complete, so give it with an apply after that.")
         if not args.save_profile and not resolve.profile_path(ctx).exists() and ctx.cfg.get("LOCATION"):
             ctx.say("To have the next deployments in this subscription take the same region, capacity and VM sizes without "
                     "being asked: run this plan once more with --save-profile.")
@@ -362,8 +366,7 @@ def run_apply(ctx: Context, steps: list, args, account: dict) -> int:
                              "The target, the sign-in, a setting, an option, a file a step uses, or the state of the cloud has changed since. ")
                           + "Nothing was changed, and nothing of this command was kept. Run plan again and read it.")
         # The plan and its target are the ones that were approved. Only now is anything of this command kept.
-        for step_id, said in ctx.offered["confirmed"].items():      # the first confirmation stands: who said so, and when
-            ctx.state.data["confirmed"].setdefault(step_id, said)
+        ctx.keep_offered()                                          # the first confirmation stands: who said so, and when
         for thing in ctx.offered["acknowledged"]:
             if thing not in ctx.state.data["acknowledged"]:
                 ctx.state.data["acknowledged"].append(thing)
@@ -374,7 +377,12 @@ def run_apply(ctx: Context, steps: list, args, account: dict) -> int:
         ctx.state.save()
         ctx.cache.clear()
         code = apply(ctx, steps, {line.step.id for line in lines if line.decision == "drift"})
+        early = ctx.keep_offered()      # a result that came into place during this apply can be confirmed by this apply
+        ctx.state.save()
         ctx.say("")
+        for step_id in early:
+            ctx.say(f"--confirm {step_id} was not kept: it speaks of a result, and {RESTS_ON[step_id]} is not complete yet. "
+                    "Give it again with the apply after that.")
         for row in ready.report(ctx, steps, code):
             ctx.say(row)
         return code
