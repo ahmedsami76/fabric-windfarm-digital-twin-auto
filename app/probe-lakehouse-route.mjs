@@ -3,7 +3,10 @@
 // the environment. Prints one line of JSON: {"rows", "turbines", "newest_minutes"} or {"error"}. The token is not printed.
 //
 // The connection is the one of app/overlay/packages/functions/src/sql.ts, and the query is SQL_PROBE of live.ts with its
-// window of 60 minutes; a test compares the two texts. The driver is the one bash app/create-app.sh installed for the app.
+// window of 60 minutes; a test compares the two texts. The driver is the one bash app/create-app.sh installed for the app:
+// in the folder APP_DIR names, which is where tools/deploy.py builds the app of a deployment, else in app/windfarm-twin
+// beside this file, where a deployment by hand has it. (Until 26 November 2026 it looked beside this file only, and so
+// found no driver for any deployment of the runner.)
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,11 +23,12 @@ const answer = (value, code = 0) => {
 const { SQL_SERVER: server, SQL_DATABASE: database, SQL_TOKEN: token } = process.env;
 if (!server || !database || !token) answer({ error: 'SQL_SERVER, SQL_DATABASE and SQL_TOKEN are not set. This is started by tools/deploy.py' }, 2);
 
+const app = process.env.APP_DIR || path.join(here, 'windfarm-twin');
 let sql;
 try {
-  sql = createRequire(path.join(here, 'windfarm-twin', 'packages', 'functions', 'package.json'))('mssql');
+  sql = createRequire(path.join(app, 'packages', 'functions', 'package.json'))('mssql');
 } catch {
-  answer({ error: 'the SQL driver is not there: bash app/create-app.sh installs it with the app' }, 2);
+  answer({ error: `the SQL driver (mssql) was not found from ${app}/packages/functions. bash app/create-app.sh installs it with the app; this probe looks where APP_DIR says, else in app/windfarm-twin` }, 2);
 }
 
 const pool = new sql.ConnectionPool({

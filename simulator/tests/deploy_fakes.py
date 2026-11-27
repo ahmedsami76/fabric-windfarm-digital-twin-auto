@@ -108,6 +108,7 @@ class World:
         self.capacity_state = "Active"        # the state a capacity is in right after it was made
         self.fabric_calls: list = []
         self.app_item_count = 2               # how many items a deployed app shows as in the workspace's list
+        self.sql_probe_error = ""             # what the Lakehouse probe answers when it cannot ask
         self.scaffold_stops = 0               # how many times the app's script ends before its libraries are in
 
     def new_id(self, prefix: str) -> str:
@@ -130,7 +131,7 @@ class World:
                     and "RawEvents_mapping" in self.kql["mappings"] and (self.vm or {}).get("powerState") == "VM running")
 
 
-APP_KINDS = ("AppBackend", "AppSecondItem")
+APP_KINDS = ("AppBackend", "UserDataFunction")
 
 
 def opt(args, flag):
@@ -618,6 +619,11 @@ class FakeShell:
             return (0, w.node + "\n") if w.node else (127, "")
         if argv[:2] == ["node", "app/probe-lakehouse-route.mjs"]:
             assert env["SQL_TOKEN"] in w.tokens and env["SQL_DATABASE"] == "WindFarmLH"
+            # the driver is in the app's folder of the deployment: the probe has to be told where that is
+            built = Path(env.get("APP_DIR", "")) / "packages" / "functions" / "src" / "build.ts"
+            assert built.exists() and ".deploy" in Path(env["APP_DIR"]).parts, f"the probe was sent to look for the driver in {env.get('APP_DIR')!r}"
+            if w.sql_probe_error:
+                return 2, json.dumps({"error": w.sql_probe_error}) + "\n"
             w.shell_calls.append("node app/probe-lakehouse-route.mjs")
             return 0, self._redact(json.dumps(w.sql_route) + "\n")
         raise AssertionError(f"the fake shell does not capture {argv}")
@@ -688,8 +694,8 @@ class FakeShell:
             if not w.rayfin_signed_in:
                 w.writes.pop()
                 return 1, "Error: You are not signed in. Run `rayfin login`."
-            # Seen on 26 November 2026: after one deployment the workspace lists two items of the app's name. Their types
-            # were not in what was sent; "AppBackend" is after the portal's address (/appbackends/), the other is a stand-in.
+            # Seen on 26 November 2026: after one deployment the workspace lists two items of the app's name, of the
+            # types AppBackend and UserDataFunction.
             for kind in APP_KINDS[:w.app_item_count]:
                 if not w.find(ws, kind, "WindFarmTwin"):
                     w.add_item(ws, kind, "WindFarmTwin")

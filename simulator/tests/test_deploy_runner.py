@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -2602,10 +2603,11 @@ def test_a_deployed_app_is_found_whether_the_workspace_lists_it_as_one_item_or_a
     agent = world.find(ws, "OperationsAgent", "WindFarmGearboxWatch")
     world.agents[agent["id"]].update(playbook={"RuleDefinitions": [{}]}, shouldRun=True)
     code, text = later(deployed, *options)
-    assert "done     p4.deploy: app WindFarmTwin is in the workspace: 2 items of that name (AppBackend, AppSecondItem)" in text, text[-1500:]
+    assert "done     p4.deploy: app WindFarmTwin is in the workspace: 2 items of that name (AppBackend, UserDataFunction)" in text, text[-1500:]
     assert "FAILED   p4.deploy" not in text and "done     p4.eventhouse_principal" in text
     ups = [c for c in world.shell_calls if c.startswith("npx rayfin up")]
     assert len(ups) == 2                 # the first deployment, and the one after the secrets: none because of a failed look
+    assert "done     p4.gate_data_route" in text       # the probe was told where this deployment's app, and so the driver, is
     assert "app WindFarmTwin is in the workspace: 2 items" in deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
 
 
@@ -2621,3 +2623,53 @@ def test_a_deployed_app_listed_as_one_item_is_found_too(deployed):
     agent = world.find(world.workspaces[0]["id"], "OperationsAgent", "WindFarmGearboxWatch")
     world.agents[agent["id"]].update(playbook={"RuleDefinitions": [{}]}, shouldRun=True)
     assert "done     p4.deploy: app WindFarmTwin is in the workspace: one item of that name (AppBackend)" in later(deployed, *options)[1]
+
+
+def test_a_probe_that_cannot_ask_is_not_called_an_endpoint_that_is_behind(deployed):
+    """26 November 2026: the probe found no SQL driver, because it looked beside itself and not in the deployment's app,
+    and the block advised to wait a few minutes for the SQL endpoint to catch up."""
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    options = ("--allow-preview", "data-agent-sdk", *AGENT)
+    later(deployed, *options, confirm=SETTINGS34)
+    agent = world.find(ws, "OperationsAgent", "WindFarmGearboxWatch")
+    world.agents[agent["id"]].update(playbook={"RuleDefinitions": [{}]}, shouldRun=True)
+    world.sql_probe_error = "the SQL driver (mssql) was not found from /somewhere/packages/functions"
+    code, text = later(deployed, *options)
+    block = text.split("blocked  p4.gate_data_route")[1]
+    assert code == core.EXIT_BLOCKED and "the SQL driver (mssql) was not found" in block
+    assert "the runner's own probe failing" in block and "only behind" not in block and "run apply again in a few minutes" not in block
+    world.sql_probe_error, world.sql_route = "", {"rows": 0, "turbines": 0, "newest_minutes": None}
+    block = later(deployed, *options)[1].split("blocked  p4.gate_data_route")[1]
+    assert "found no telemetry in the last 60 minutes" in block and "only behind" in block
+
+
+def test_the_lakehouse_probe_finds_its_driver_in_the_folder_it_is_given(tmp_path):
+    """The probe itself, run by Node.js against a stand-in for the driver. Until 26 November 2026 only its hand-over was
+    tested, with a canned answer, and it looked for the driver beside itself, where no deployment of the runner has one."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not on this computer")
+    app = tmp_path / ".deploy" / "x1y" / "app" / "windfarm-twin"
+    driver = app / "node_modules" / "mssql"                       # where npm puts it for a workspace: at the app's root
+    driver.mkdir(parents=True)
+    (app / "packages" / "functions").mkdir(parents=True)
+    (driver / "package.json").write_text('{"name": "mssql", "version": "0.0.0", "main": "index.js"}')
+    (driver / "index.js").write_text(
+        "class ConnectionPool { constructor(c) { this.c = c; } async connect() {} async close() {}\n"
+        "  request() { return { query: async () => ({ recordset: [{ Rows: 7548, Turbines: 12, Newest: new Date(Date.now() - 120000) }] }) }; } }\n"
+        "module.exports = { ConnectionPool };\n")
+    probe = str(ROOT / "app" / "probe-lakehouse-route.mjs")
+    base = {"PATH": os.environ["PATH"], "SQL_SERVER": "x.datawarehouse.fabric.microsoft.com", "SQL_DATABASE": "WindFarmLH", "SQL_TOKEN": "tok-secret-123"}
+
+    def ask(**more):
+        run = subprocess.run([node, probe], env={**base, **more}, capture_output=True, text=True, timeout=60)
+        assert "tok-secret-123" not in run.stdout + run.stderr
+        return run.returncode, json.loads(run.stdout.strip().splitlines()[-1])
+
+    code, seen = ask(APP_DIR=str(app))
+    assert code == 0 and seen["rows"] == 7548 and seen["turbines"] == 12 and 1.5 <= seen["newest_minutes"] <= 2.5, seen
+    code, seen = ask(APP_DIR=str(tmp_path / "nowhere"))
+    assert code == 2 and "mssql" in seen["error"] and str(tmp_path / "nowhere") in seen["error"]
+    if not (ROOT / "app" / "windfarm-twin").exists():             # by hand the app is beside the probe; here there is none
+        code, seen = ask()
+        assert code == 2 and "app/windfarm-twin" in seen["error"]

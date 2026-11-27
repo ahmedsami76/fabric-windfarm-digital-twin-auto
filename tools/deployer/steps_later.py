@@ -344,8 +344,9 @@ def p4_scaffold(ctx) -> Probe:
 def app_items(ctx) -> list:
     """What the workspace lists under the app's name, the data items left out. On 26 November 2026 `npx rayfin up` reported
     one item with its ID, and the workspace's list then held two items named WindFarmTwin; the look of that day wanted
-    exactly one and called a deployed app missing. Their types were not in what was sent, so none is asked for by name:
-    the workspace is the deployment's own, and the done line says which types it found."""
+    exactly one and called a deployed app missing. Seen an hour later: their types are AppBackend and UserDataFunction.
+    One observation, so no type is asked for by name: the workspace is the deployment's own, and the done line says
+    which types it found."""
     data_kinds = {"Notebook", "Lakehouse", "Eventhouse", "KQLDatabase", "Eventstream", "SemanticModel", "Report", "SQLEndpoint"}
     return [entry for entry in items(ctx) if entry.get("displayName") == name(ctx, "APP_NAME") and entry.get("type") not in data_kinds]
 
@@ -518,7 +519,9 @@ def lakehouse_route(ctx) -> dict:
     if not server:
         raise Blocked("The Lakehouse has no SQL endpoint yet.", "It is made a few minutes after the Lakehouse. Run apply again.")
     code, text = ctx.shell.capture(["node", "app/probe-lakehouse-route.mjs"], env={
-        "SQL_SERVER": server, "SQL_DATABASE": lakehouse["displayName"], "SQL_TOKEN": ctx.az.token(SQL_RESOURCE)})
+        "SQL_SERVER": server, "SQL_DATABASE": lakehouse["displayName"], "SQL_TOKEN": ctx.az.token(SQL_RESOURCE),
+        # the driver is in the app's folder of this deployment; the probe looked beside itself until 26 November 2026
+        "APP_DIR": str(app_dir(ctx))})
     try:
         return json.loads(text.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -527,8 +530,15 @@ def lakehouse_route(ctx) -> dict:
 
 def gate_route_act(ctx) -> None:
     seen = lakehouse_route(ctx)
-    if seen.get("error") or not seen.get("rows"):
-        raise Blocked(f"Lakehouse route: {seen.get('error') or 'the query ran and found no telemetry in the last 60 minutes'}.",
+    if seen.get("error"):
+        # The probe did not get to ask, or the endpoint refused: not the case of an endpoint that is behind.
+        raise Blocked(f"Lakehouse route: {seen['error']}.",
+                      "This is the runner's own probe failing, not a finding about the data or about the deployed app: the twin's "
+                      "connection check in the app is what tells whether the app reads. If the line names the SQL driver, the app's "
+                      "folder of this deployment is not built: the step p4.scaffold of the next apply builds it. If it names a "
+                      "sign-in or a permission, send me the line.")
+    if not seen.get("rows"):
+        raise Blocked("Lakehouse route: the query ran and found no telemetry in the last 60 minutes.",
                       "If the Eventhouse has fresh telemetry (python3 tools/deploy.py status), the SQL endpoint is only behind, which "
                       "it is after a time without use: run apply again in a few minutes. Seen on 25 November 2026: no rows, and "
                       "7,548 rows three and a half minutes later.")
