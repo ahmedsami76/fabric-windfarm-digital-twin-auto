@@ -77,6 +77,8 @@ Above it, the script has printed what the edge reads from: a host ending in `.se
 
 **If it stops with "Fabric did not create the eventstream from its definition".** This is the first unproven thing: the form of a custom endpoint in an eventstream definition is not in Microsoft's reference, and I wrote it by analogy with the other node types. The script prints what Fabric said, and four portal steps to make the eventstream by hand. Do those, then run the script again: it uses an eventstream it finds. Send me what Fabric said, so that the definition can be corrected.
 
+**If it says "Its two custom endpoints are not in its topology yet".** That is not a failure. Fabric lists a new eventstream before it has built its nodes from the definition, so after creating one the script asks for the topology again, for two minutes at most. On 26 November 2026 the script still read it once, in the same second, found no endpoint, and stopped with the four steps by hand for an eventstream that was only not ready. If it stops with "has no custom endpoint as a destination" after the wait, run it once more before you do anything by hand: it uses the eventstream it finds.
+
 `bash infra/08-create-command-path.sh --show` prints what exists at any time and changes nothing. The script can be run again: it keeps the eventstream and writes the endpoint and the data flow anew.
 
 ## Step 2: Import the notebook
@@ -210,6 +212,7 @@ Follow the command along its way. Each row is one hop.
 |---|---|---|
 | Step 1: `No workspace named WindFarmDigitalTwin is visible to this sign-in` | Before anything | `az login` as the account that owns the workspace; or correct `FABRIC_WORKSPACE_NAME` in `config/demo.env` |
 | Step 1: `Fabric did not create the eventstream from its definition` | Fabric, creating the eventstream | Make it by hand with the four steps the script prints, run the script again. Send me Fabric's words |
+| Step 1: `The eventstream has no custom endpoint as a destination`, right after `Created:` | The eventstream is listed and its nodes are not built yet. The script waits for them for two minutes (since 26 November 2026) | Run the script again. Only if the same lines come back a few minutes later, add the two endpoints by hand as the script says |
 | Step 1: `Fabric did not give the connection of the destination` | Fabric, the eventstream is not running | Open the eventstream in the portal. If it is in edit mode, **Publish**. Then the script again |
 | Step 1: `'consumerGroupId' is required in kafka source dataflow endpoint configuration` | The Azure CLI, before it sends the data flow | The endpoint was created without the consumer group. Send me the line of the script's output that starts with `consumer group:` |
 | Step 1: an error from `az iot ops dataflow apply` that names the source or the endpoint type | Azure IoT Operations refuses a Kafka source from the CLI | The second unproven thing. Send me the error. The same data flow can be created from a Kubernetes manifest, which Microsoft's page names as supported |

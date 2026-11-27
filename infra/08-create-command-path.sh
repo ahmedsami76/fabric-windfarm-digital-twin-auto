@@ -162,13 +162,29 @@ if [[ -z "$EVENTSTREAM_ID" ]]; then
   done
   [[ -n "$EVENTSTREAM_ID" ]] || die "Fabric accepted the eventstream and does not list it after two minutes. Look in the workspace, then run this script again."
   info "Created: $EVENTSTREAM_ID"
+  CREATED_NOW=1
 else
   info "It exists: $EVENTSTREAM_ID"
+  CREATED_NOW=""
 fi
 
-TOPOLOGY="$(fabric_get "workspaces/$WORKSPACE_ID/eventstreams/$EVENTSTREAM_ID/topology")" || die "Could not read the topology of the eventstream: $(said)"
-SOURCE_ID="$(node_id sources)"
-DESTINATION_ID="$(node_id destinations)"
+# An eventstream that was created a moment ago is listed before Fabric has built its nodes from the definition: seen on
+# 26 November 2026, when the topology read in the same second held neither endpoint. So after a creation the topology is
+# asked for until both custom endpoints are in it, for two minutes at most. One that existed before is read once.
+read_topology() {
+  TOPOLOGY="$(fabric_get "workspaces/$WORKSPACE_ID/eventstreams/$EVENTSTREAM_ID/topology")" || die "Could not read the topology of the eventstream: $(said)"
+  SOURCE_ID="$(node_id sources)"
+  DESTINATION_ID="$(node_id destinations)"
+}
+read_topology
+if [[ -n "$CREATED_NOW" && ( -z "$SOURCE_ID" || -z "$DESTINATION_ID" ) ]]; then
+  info "Its two custom endpoints are not in its topology yet. Asking again, for up to $(( ${TOPOLOGY_TRIES:-12} * ${TOPOLOGY_WAIT_SECONDS:-10} )) seconds."
+  for _ in $(seq 1 "${TOPOLOGY_TRIES:-12}"); do
+    sleep "${TOPOLOGY_WAIT_SECONDS:-10}"
+    read_topology
+    [[ -n "$SOURCE_ID" && -n "$DESTINATION_ID" ]] && break
+  done
+fi
 [[ -n "$SOURCE_ID" ]] || warn "The eventstream has no custom endpoint as a source. Notebook 12 needs one to write commands to. Add it in the portal (Add source, Custom endpoint, Publish)."
 if [[ -z "$DESTINATION_ID" ]]; then
   warn "The eventstream has no custom endpoint as a destination, so the edge has nothing to read from."

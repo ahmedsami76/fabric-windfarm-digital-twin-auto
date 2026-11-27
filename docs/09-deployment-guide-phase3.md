@@ -197,6 +197,8 @@ If section 3 fails, send me the message: it names the part Fabric did not accept
 
 **After the data changes.** The ontology keeps a copy of the data in a graph. After notebooks 01, 02 or 05 run again, open the ontology and refresh the graph model. The live signals come straight from the KQL database and need no refresh.
 
+**What appears beside it.** With the ontology Fabric makes a Lakehouse of the ontology's own and its SQL endpoint, both named `WindFarmOntology_lh_` and 32 hexadecimal digits. Seen on 26 November 2026, when notebook 11 ran as a job for the first time. They belong to the ontology: leave them. (Until the twenty-first issue the deployment runner took the two for items that are not the demo's and stopped at its workspace step.)
+
 ## Step 7: Give the agent the ontology
 
 **Measured result: leave the ontology off this agent.** Skip this step unless you want to repeat the measurement.

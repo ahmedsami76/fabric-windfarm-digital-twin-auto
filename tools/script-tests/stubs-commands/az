@@ -35,6 +35,9 @@ case "$args" in
       */eventstreams/$ES/topology)
         destinations='[{"id": "kql", "name": "ToEventhouse", "type": "Eventhouse"}, {"id": "'$DST'", "name": "CommandOut", "type": "CustomEndpoint", "inputNodes": [{"name": "WindFarmCommands-stream"}]}]'
         [[ -f "$S/no_destination" ]] && destinations='[]'
+        # an eventstream that was just created: listed, and its nodes not built yet
+        late="$(cat "$S/topology_late" 2>/dev/null || echo 0)"
+        if [[ "$late" -gt 0 ]]; then echo $((late - 1)) > "$S/topology_late"; echo '{"sources": [], "destinations": [], "streams": [], "operators": []}'; exit 0; fi
         echo '{"sources": [{"id": "'$SRC'", "name": "CommandIn", "type": "CustomEndpoint"}], "destinations": '"$destinations"', "streams": [{"name": "WindFarmCommands-stream", "type": "DefaultStream"}], "operators": []}' ;;
       */destinations/$DST/connection)
         left="$(cat "$S/connection_not_ready" 2>/dev/null || echo 0)"

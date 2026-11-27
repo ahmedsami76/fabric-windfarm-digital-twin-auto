@@ -774,6 +774,20 @@ check "command path, Fabric refuses the definition: says what Fabric said and ho
 cp_reset; touch "$STUB_DIR/eventstream" "$STUB_DIR/no_destination"; cp_run
 check "command path, the eventstream has no custom endpoint to read from: stops before the edge" 3 "no custom endpoint as a destination" "Add destination, Custom endpoint" "!iot ops dataflow"
 
+# 26 November 2026: the eventstream was created, and its topology, read in the same second, held no endpoint yet.
+cp_reset; echo 2 > "$STUB_DIR/topology_late"; OUT="$(PATH="$HERE/stubs-commands:$PATH" TOPOLOGY_WAIT_SECONDS=0 bash "$REPO"/infra/08-create-command-path.sh 2>&1)"; RC=$?
+OUT="$OUT
+asked:$(grep -c '/topology' "$STUB_DIR/calls.log")"
+check "command path, a new eventstream whose endpoints are not in its topology at once: asks again, no longer than needed, and goes on" 0 "Created: eeeeeeee" "not in its topology yet" "asked:3" "The edge reads from: esehns-abc123.servicebus.windows.net:9093" "iot ops dataflow apply" "!no custom endpoint as a destination"
+
+cp_reset; echo 99 > "$STUB_DIR/topology_late"; OUT="$(PATH="$HERE/stubs-commands:$PATH" TOPOLOGY_WAIT_SECONDS=0 TOPOLOGY_TRIES=3 bash "$REPO"/infra/08-create-command-path.sh 2>&1)"; RC=$?
+OUT="$OUT
+asked:$(grep -c '/topology' "$STUB_DIR/calls.log")"
+check "command path, a new eventstream whose endpoints never come: stops before the edge, after asking four times" 3 "no custom endpoint as a destination" "Add destination, Custom endpoint" "!iot ops dataflow" "asked:4"
+
+cp_reset; touch "$STUB_DIR/eventstream"; echo 1 > "$STUB_DIR/topology_late"; OUT="$(PATH="$HERE/stubs-commands:$PATH" TOPOLOGY_WAIT_SECONDS=0 bash "$REPO"/infra/08-create-command-path.sh 2>&1)"; RC=$?
+check "command path, an eventstream that existed and has no endpoints: read once, not waited for" 3 "It exists: eeeeeeee" "no custom endpoint as a destination" "!not in its topology yet"
+
 cp_reset; echo 2 > "$STUB_DIR/connection_not_ready"; cp_run
 check "command path, the connection of a new destination is not ready at once: asks again and goes on" 0 "The edge reads from: esehns-abc123.servicebus.windows.net:9093" "iot ops dataflow apply"
 

@@ -691,17 +691,20 @@ ACTION_NOTEBOOK = "12_send_edge_command"
 
 AGENT_5B = f"""Phase 5b changes the operations agent {OPERATIONS_AGENT} in place: one rule on the table GearboxDecisionLive in the place of the
 three of Phase 3, a message that begins with what acting and not acting cost, and the action 'Curtail turbine', which runs
-notebook {ACTION_NOTEBOOK}. That is yours to do, in the portal: step 4, the part headed "By hand", and step 5 of
-docs/13-deployment-guide-phase5b.md.
-1. Open {OPERATIONS_AGENT}, select Stop.
-2. Agent setup, Agent instructions: replace the whole text with fabric/operations-agent/phase5b-agent-setup.txt. Knowledge stays the KQL database.
-3. Actions, Add action, Fabric item: the notebook {ACTION_NOTEBOOK}. Action name 'Curtail turbine'; the description, and the description of
-   each of the four parameters (turbine, percent, duration, requested_by), from fabric/operations-agent/phase5b-action.txt.
-4. Save, Generate playbook, read its one rule (GearboxVibration of GearboxDecisionLive, per TurbineId, crosses above 4, action Curtail turbine), Start.
+notebook {ACTION_NOTEBOOK}. The change is yours. In this order:
+A. The instructions and the action. Either let the script try them through Fabric's API:
+       ENV_FILE=<this deployment's demo.env> bash infra/09-remediation-agent.sh
+   It saves the agent's definition first and changes nothing when Fabric refuses, which Fabric did on 24 November 2026;
+   what I take for the cause is corrected and has not run since. "Wrote the Phase 5b instructions and the action": go to B.
+   Or by hand, also when the script was refused (step 4, the part headed "By hand", of docs/13-deployment-guide-phase5b.md):
+   1. Open {OPERATIONS_AGENT}, select Stop.
+   2. Agent setup, Agent instructions: replace the whole text with fabric/operations-agent/phase5b-agent-setup.txt. Knowledge stays the KQL database.
+   3. Actions, Add action, Fabric item: the notebook {ACTION_NOTEBOOK}. Action name 'Curtail turbine'; the description, and the description of
+      each of the four parameters (turbine, percent, duration, requested_by), from fabric/operations-agent/phase5b-action.txt. Save.
+B. In the portal, always: Generate playbook, read its one rule (GearboxVibration of GearboxDecisionLive, per TurbineId, crosses above 4,
+   action Curtail turbine), then Start. Nothing but the portal generates a playbook.
 The runner then reads the agent's definition: the instructions, the action and its notebook, a playbook, started.
-To see what it sees: ENV_FILE=<this deployment's demo.env> bash infra/09-remediation-agent.sh --show
-The script without an option tries the same through Fabric's API. Fabric refused it on 24 November 2026; what I think was the
-cause is corrected and has not run since. It saves the agent's definition first and changes nothing when it is refused."""
+To see what it sees: ENV_FILE=<this deployment's demo.env> bash infra/09-remediation-agent.sh --show"""
 
 SHOW_5 = """Everything of Phase 5 that sends nothing is in place. Showing it is yours, from the guides:
   bash infra/08-create-command-path.sh        switches the command path on (docs/12-deployment-guide-phase5a.md, from step 3)

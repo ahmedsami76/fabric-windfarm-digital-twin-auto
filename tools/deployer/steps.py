@@ -1039,6 +1039,10 @@ def expected_item(ctx, entry: dict) -> bool:
     exact = {"Eventhouse": {eventhouse}, "KQLDatabase": {eventhouse}, "Lakehouse": {lakehouse}, "SQLEndpoint": {lakehouse},
              "Eventstream": {name(ctx, "EVENTSTREAM_NAME"), name(ctx, "COMMAND_EVENTSTREAM_NAME")},
              "SemanticModel": {lakehouse, MODEL}, "Report": {REPORT}, "DataAgent": {DATA_AGENT}, "OperationsAgent": {OPERATIONS_AGENT}}
+    # An ontology keeps a Lakehouse of its own, which Fabric makes with it and names after it: seen on 26 November 2026 as
+    # WindFarmOntology_lh_ and 32 hexadecimal digits, with its SQL endpoint. The runner made neither and both are the demo's.
+    if kind in ("Lakehouse", "SQLEndpoint", "SemanticModel") and re.fullmatch(rf"{re.escape(ONTOLOGY)}_lh_[0-9a-f]{{32}}", display):
+        return True
     if kind in exact:
         return display in exact[kind]
     if kind == "KQLQueryset":

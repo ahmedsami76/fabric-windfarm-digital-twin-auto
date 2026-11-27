@@ -561,6 +561,12 @@ class FakeFabric:
                 "09_build_data_agent": ("DataAgent", "WindFarmDataAgent"), "11_build_ontology": ("Ontology", "WindFarmOntology")}
         if name in made and not w.find(ws, *made[name]):
             w.add_item(ws, *made[name])
+            if name == "11_build_ontology":
+                # Seen on 26 November 2026: with the ontology Fabric makes a Lakehouse of the ontology's own and its SQL
+                # endpoint, named after it. The stand-in used to make the ontology alone, and the runner then took the
+                # two for items that are not the demo's.
+                for kind in ("Lakehouse", "SQLEndpoint"):
+                    w.add_item(ws, kind, "WindFarmOntology_lh_568e9ff2aae74ec1af7e8c1e7c7ff87e")
 
 
 class FakeKusto:

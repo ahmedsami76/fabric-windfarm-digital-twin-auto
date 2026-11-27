@@ -2721,6 +2721,8 @@ def test_phases_5b_and_5c_are_provisioned_and_nothing_is_sent_and_the_agents_new
     block = text.split("blocked  p5b.agent")[1]
     assert code == core.EXIT_BLOCKED and "The instructions are those of Phase 3" in block and "There is no action named 'Curtail turbine'" in block
     assert "phase5b-agent-setup.txt" in block and 'the part headed "By hand"' in block
+    # the block says what comes first, and which part only the portal does
+    assert block.index("A. The instructions and the action") < block.index("B. In the portal, always: Generate playbook")
     assert made["configuration"]["instructions"] and "Curtail turbine" not in json.dumps(made)        # the runner changed nothing of the agent
     # the person: instructions and action, then the playbook, then the start
     made["configuration"]["instructions"] = remediation_spec.setup_text() + "\r\n"
@@ -2760,3 +2762,22 @@ def test_phases_5b_and_5c_are_provisioned_and_nothing_is_sent_and_the_agents_new
     world.agent_unreadable = True
     plan = deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
     assert re.search(r"p5b\.agent\s+NOT CHECKED", plan) and "not proof that it has its Phase 5b setup" in plan
+
+
+def test_the_lakehouse_an_ontology_brings_with_it_is_the_demos_and_another_one_is_not(deployed):
+    """26 November 2026: notebook 11 built the ontology, Fabric made a Lakehouse for it, and the next apply stopped at the
+    workspace: 'holds items this demo does not create'."""
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    options = ("--allow-preview", "data-agent-sdk", "--allow-preview", "ontology", *AGENT)
+    started_agent(deployed, *options)
+    code, text = later(deployed, *options)
+    assert world.find(ws, "Ontology", "WindFarmOntology") and world.find(ws, "Lakehouse", "WindFarmOntology_lh_568e9ff2aae74ec1af7e8c1e7c7ff87e")
+    assert "done     p3.ontology" in text
+    code, text = later(deployed, *options)          # the apply after it: nothing in the workspace is a stranger
+    assert "holds items this demo does not create" not in text and "done     p1.workspace" in text, text[-1200:]
+    # a Lakehouse somebody named a little like it is still not the demo's
+    stray = world.add_item(ws, "Lakehouse", "WindFarmOntology_lh_notes")
+    code, text = later(deployed, *options)
+    assert code == core.EXIT_BLOCKED and "holds items this demo does not create" in text and "WindFarmOntology_lh_notes" in text
+    assert "WindFarmOntology_lh_568e9ff2aae74ec1af7e8c1e7c7ff87e" not in text.split("holds items this demo does not create")[1].split("What to do")[0]
+    world.items[ws].remove(stray)
