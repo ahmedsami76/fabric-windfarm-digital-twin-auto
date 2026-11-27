@@ -199,6 +199,16 @@ If section 3 fails, send me the message: it names the part Fabric did not accept
 
 **What appears beside it.** With the ontology Fabric makes a Lakehouse of the ontology's own and its SQL endpoint, both named `WindFarmOntology_lh_` and 32 hexadecimal digits. Seen on 26 November 2026, when notebook 11 ran as a job for the first time. They belong to the ontology: leave them. (Until the twenty-first issue the deployment runner took the two for items that are not the demo's and stopped at its workspace step.)
 
+**The new ontology experience.** Notebook 11 creates the ontology in the old experience, which Microsoft retires on 31 January 2027; the portal creates new ontologies in the new one, whose definition is another format (TMDL). Until the notebook writes that format, a new-experience ontology comes from the old one: open **WindFarmOntology**, and in its banner about the new experience select the button that creates a copy. The copy is a separate item; the original stays. A deployment made by the runner does not know the copy, so its next apply stops once at the workspace and prints the option that names it (`--acknowledge`).
+
+The new format is not written from Microsoft's reference alone. On 27 November 2026 that reference showed tables bound to a lakehouse only, with no example for an Eventhouse, and a public report said that an ontology created from it could not be used until annotations were added that the reference does not name. So the definition is read from a tenant. **[Workstation]**
+
+```bash
+bash infra/10-read-ontology.sh
+```
+
+It reads the definition of every ontology item of the workspace, prints what each holds (which experience, how many tables and entities, the sources and annotations of the tables), and saves the parts under `fabric/ontology/saved/` with one archive to send. It changes nothing in Fabric. With several deployments in the folder, name the settings in front of it: `ENV_FILE=.deploy/<suffix>/demo.env`. **Not run on a tenant yet.**
+
 ## Step 7: Give the agent the ontology
 
 **Measured result: leave the ontology off this agent.** Skip this step unless you want to repeat the measurement.

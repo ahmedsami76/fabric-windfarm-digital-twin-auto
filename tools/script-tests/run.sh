@@ -900,6 +900,18 @@ check "agent, unknown option: refuses" 1 "Unknown option --delete. Use no option
 ra_reset; ra_run --save
 check "agent --save, the Fabric API cannot be reached: says so, writes no file" 3 "its definition to a file" "Could not reach the Fabric API" "!Saved" "!S3cret"
 
+# ---- infra/10-read-ontology.sh: reads the definitions of the workspace's ontology items. Here: that it takes no
+# option, and that the token stays out of sight. What it does with the answers is tested against a stand-in for
+# the client in simulator/tests/test_ontology_definitions.py.
+ra_reset; run env PATH="$HERE/stubs-agent:$PATH" FABRIC_API="http://127.0.0.1:9/v1" ONTOLOGY_SAVE_DIR="$SCRATCH/ontology" bash "$REPO"/infra/10-read-ontology.sh
+check "ontology, the Fabric API cannot be reached: says so, saves nothing, shows no token" 3 \
+  "their definitions, read and saved" "ERROR: Could not reach the Fabric API at http://127.0.0.1:9/v1" "Not every definition was read" \
+  "account get-access-token --resource https://api.fabric.microsoft.com --query accessToken --output tsv" "!S3cret" "!One file to send"
+[[ ! -e "$SCRATCH/ontology" ]] || { fail=$((fail+1)); echo "FAIL ontology, the Fabric API cannot be reached: something was written to $SCRATCH/ontology"; }
+
+ra_reset; run env PATH="$HERE/stubs-agent:$PATH" bash "$REPO"/infra/10-read-ontology.sh --delete
+check "ontology, any option: refused before a token is asked for" 1 "Unknown option --delete. This script takes none: bash infra/10-read-ontology.sh" "!get-access-token"
+
 ra_reset; : > "$STUB_DIR/signed_in_as"; ra_run
 check "agent, the Azure CLI is not signed in: says how to sign in" 1 "The Azure CLI is not signed in. Run: az login" "!get-access-token"
 

@@ -107,7 +107,7 @@ What has not run on a tenant, besides the runner: step 6 of Phase 5c (the story 
 | `data/samples/` | 45 minutes of sample messages with one gearbox fault, and its ground truth |
 | `fabric/kql/` | Eventhouse tables, update policies, OneLake availability, validation queries, live questions; for Phase 5 the table the agent decides on and the command log |
 | `fabric/notebooks/` | Eleven notebooks. 01 to 04, Phase 1: load the reference tables, generate the history, refresh the forecast, answer the question bank. 05 to 08, Phase 2: model tables, semantic model, its test, report. 09 to 11, Phase 3: build the data agent, test it, build the ontology |
-| `fabric/data-agent/`, `fabric/ontology/`, `fabric/operations-agent/` | Phase 3: the data agent's instructions and example queries, the ontology's definition, the operations agent's goals and instructions. Generated from `tools/agent_spec.py` |
+| `fabric/data-agent/`, `fabric/ontology/`, `fabric/operations-agent/` | Phase 3: the data agent's instructions and example queries, the ontology's definition, the operations agent's goals and instructions. Generated from `tools/agent_spec.py`. `bash infra/10-read-ontology.sh` reads the definition of the workspace's ontology items as Fabric gives it and saves it under `fabric/ontology/saved/`, for the move to the new ontology experience (the old one, which notebook 11 writes, retires on 31 January 2027); it changes nothing in Fabric and has not run on a tenant |
 | `app/` | Phase 4: the twin. `overlay/` holds the page (React, Three.js) and the seven functions; `create-app.sh` puts them on Microsoft's Rayfin template; `create-principal.sh` sets up the service principal for real-time values; `preview/` is the twin on sample data in one file; `test/` the tests of its code |
 | `tools/` | Builds the notebooks from their sources; the question bank; the semantic model's definition (`model_spec.py`) and the builder of the Phase 2 notebooks; the definition of the agents and the ontology (`agent_spec.py`), the builder of the Phase 3 files and the check of the T-SQL example queries; local Spark runs of the notebooks; offline KQL checks, one for the grammar and one against the tables' columns and types; guards and scenario tests for the shell scripts |
 
@@ -127,7 +127,7 @@ In Fabric, the validation queries show WT-07's gearbox vibration and oil tempera
 ```bash
 cd simulator
 pip install -r requirements-dev.txt
-python -m pytest                                                              # 361 tests
+python -m pytest                                                              # 376 tests
 SITE_FILE=../data/reference/site.json SINK=stdout python -m windfarm_sim | head -n 20   # live messages
 python -m windfarm_sim.history --site ../data/reference/site.json --out /tmp/history    # two years of history as CSV
 cd .. && bash tools/script-tests/run.sh                                       # the shell scripts against stand-in commands

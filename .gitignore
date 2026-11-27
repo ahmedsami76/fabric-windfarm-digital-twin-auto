@@ -11,6 +11,8 @@ build/
 edge/dataflows/rendered/
 # definitions of the operations agent saved before a change (infra/09-remediation-agent.sh)
 fabric/operations-agent/saved/
+# definitions of the ontology items read from a workspace (infra/10-read-ontology.sh)
+fabric/ontology/saved/
 *.pem
 ca.crt
 .DS_Store
