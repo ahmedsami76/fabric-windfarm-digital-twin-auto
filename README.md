@@ -127,7 +127,7 @@ In Fabric, the validation queries show WT-07's gearbox vibration and oil tempera
 ```bash
 cd simulator
 pip install -r requirements-dev.txt
-python -m pytest                                                              # 376 tests
+python -m pytest                                                              # 386 tests
 SITE_FILE=../data/reference/site.json SINK=stdout python -m windfarm_sim | head -n 20   # live messages
 python -m windfarm_sim.history --site ../data/reference/site.json --out /tmp/history    # two years of history as CSV
 cd .. && bash tools/script-tests/run.sh                                       # the shell scripts against stand-in commands

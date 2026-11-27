@@ -18,7 +18,9 @@ What this rests on (Microsoft Learn, read on 27 November 2026):
   Items - List Items: GET workspaces/{id}/items, each with its type.
   Items - Get Ontology Definition: POST workspaces/{id}/ontologies/{id}/getDefinition, long running, for
       a person and for a service principal; a preview. Its optional parameter `format` has no values
-      written down, so none is sent. The answer holds parts with a path and a payload in base64.
+      written down, so none is sent. The answer holds parts with a path and a payload in base64, and may
+      name a format, which is kept: the article on the new definition says only that it "supports the TMDL
+      format", and a request that creates an ontology has to name what Fabric names.
 """
 from __future__ import annotations
 
@@ -59,11 +61,37 @@ def place(folder: Path, part_path: str) -> Path:
     return target
 
 
-def decode_parts(response: dict, redact) -> tuple[dict, int, list[str]]:
+def definition_of(response) -> dict:
+    """The definition in an answer of Get Ontology Definition. An answer of another shape is said as that, not read around."""
+    definition = response.get("definition") if isinstance(response, dict) else None
+    if isinstance(definition, dict):
+        return definition
+    if isinstance(response, dict):
+        sent = "an object with " + (", ".join(sorted(str(key) for key in response))[:200] or "no member")
+    else:
+        sent = "nothing" if response is None else f"a {type(response).__name__}"
+    raise FabricError(f"Fabric answered without a definition; it sent {sent}.")
+
+
+def clean(value, redact):
+    """What Fabric lists about an item, with anything that looks like a key or a token taken out, whatever its shape."""
+    text = redact(json.dumps(value, sort_keys=True, default=str))
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def decode_parts(definition: dict, redact) -> tuple[dict, int, list[str]]:
     """({path: bytes}, how many values that looked like a secret were taken out, parts that are no text)."""
     out, removed, binary = {}, 0, []
-    for part in ((response or {}).get("definition") or {}).get("parts") or []:
+    listed = definition.get("parts") or []
+    if not isinstance(listed, list) or not all(isinstance(part, dict) for part in listed):
+        raise FabricError("The parts of the definition are not a list of objects.")
+    for part in listed:
         path = str(part.get("path") or "")
+        if path in out:
+            raise FabricError(f"Two parts of the definition are named {path!r}.")       # the second would replace the first
         if part.get("payloadType", "InlineBase64") != "InlineBase64":
             raise FabricError(f"Part {path} has the payload type {part.get('payloadType')}, which this tool cannot read.")
         try:
@@ -125,6 +153,30 @@ def notes(parts: dict) -> list[str]:
     return rows
 
 
+def references(parts: dict, items: list) -> list[dict]:
+    """The items of the workspace whose ID stands in a part. It says what an ID in a definition points at (the Lakehouse or
+    its SQL endpoint, say) from the list this tool has read anyway, so no further call is made for it."""
+    text = "\n".join(data.decode("utf-8", "replace") for data in parts.values()).lower()
+    found = [{"type": str(i.get("type")), "displayName": str(i.get("displayName")), "id": str(i.get("id"))}
+             for i in items if isinstance(i, dict) and i.get("id") and str(i["id"]).lower() in text]
+    return sorted(found, key=lambda r: (r["type"], r["displayName"], r["id"]))
+
+
+def census(items: list) -> dict:
+    """How many items of each type the workspace holds: types only, to see an ontology that is listed under another one."""
+    count: dict = {}
+    for item in items:
+        kind = str(item.get("type")) if isinstance(item, dict) else "?"
+        count[kind] = count.get(kind, 0) + 1
+    return dict(sorted(count.items()))
+
+
+def related(items: list) -> list[str]:
+    """Items whose type speaks of an ontology and is not the one this tool reads."""
+    return sorted(f"{i.get('displayName')} of type {i.get('type')}" for i in items
+                  if isinstance(i, dict) and "ontolog" in str(i.get("type")).lower() and i.get("type") != "Ontology")
+
+
 def _folder_name(name: str, item_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") + "-" + item_id[:8]
 
@@ -134,22 +186,36 @@ def read_all(fabric: Fabric, env: dict, out, redact=None, now=None) -> int:
     workspace_name = env.get("FABRIC_WORKSPACE_NAME") or "WindFarmDigitalTwin"
     save_dir = Path(env.get("ONTOLOGY_SAVE_DIR") or ROOT / "fabric" / "ontology" / "saved")
     workspace_id = find_by_name(fabric.listing("workspaces"), workspace_name, "workspace")
-    found = [i for i in fabric.listing(f"workspaces/{workspace_id}/items") if i.get("type") == "Ontology"]
+    items = fabric.listing(f"workspaces/{workspace_id}/items")
+    found = [i for i in items if i.get("type") == "Ontology"]
+    others = related(items)
     if not found:
         print(f"Workspace {workspace_name} holds no ontology item. Nothing was read.", file=out)
+        for row in others:
+            print(f"It holds {redact(row)}, which this tool does not read: say so, and it can be looked at.", file=out)
+        print("Item types there: " + (", ".join(f"{kind} {n}" for kind, n in census(items).items()) or "none"), file=out)
         return 1
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
     folder = save_dir / stamp
-    index = {"workspace": {"name": workspace_name, "id": workspace_id}, "readAt": stamp, "ontologies": []}
+    index = {"workspace": {"name": workspace_name, "id": workspace_id}, "readAt": stamp, "itemTypes": census(items),
+             "notRead": [redact(row) for row in others], "ontologies": []}
     failed = 0
     for entry in sorted(found, key=lambda e: str(e.get("displayName"))):
         name, item_id = str(entry.get("displayName")), str(entry.get("id"))
-        record = {"displayName": name, "id": item_id, "description": entry.get("description") or ""}
+        # `listing` is everything the list of items says about this one: if Fabric tells the two experiences apart there, it shows.
+        record = {"displayName": name, "id": item_id, "description": redact(str(entry.get("description") or "")),
+                  "listing": clean(entry, redact)}
         index["ontologies"].append(record)
         print(f"\nOntology {name} ({item_id})", file=out)
         try:
             response = fabric.long_running("POST", f"workspaces/{workspace_id}/ontologies/{item_id}/getDefinition")
-            parts, removed, binary = decode_parts(response, redact)
+            # The reference gives a definition a `format` and names no value for it, and its sample answer has none.
+            # Whatever Fabric names here is what a request that creates such an ontology has to name too.
+            definition = definition_of(response)
+            named = definition.get("format")
+            record["format"] = redact(str(named)) if named else None
+            record["definitionKeys"] = sorted(str(key) for key in definition)
+            parts, removed, binary = decode_parts(definition, redact)
             if not parts:
                 raise FabricError("Fabric gave a definition without parts.")
             target = folder / _folder_name(name, item_id)
@@ -162,11 +228,15 @@ def read_all(fabric: Fabric, env: dict, out, redact=None, now=None) -> int:
             record["error"] = redact(str(error))
             print(f"  Its definition could not be read: {record['error']}", file=out)
             continue
-        record.update(experience=experience(parts), folder=target.name,
+        record.update(experience=experience(parts), folder=target.name, references=references(parts, items),
+                      workspaceIdInParts=workspace_id.lower() in b"\n".join(parts.values()).decode("utf-8", "replace").lower(),
                       parts=[{"path": path, "bytes": len(parts[path])} for path in sorted(parts)])
         print(f"  {record['experience']}: {len(parts)} parts, {sum(len(d) for d in parts.values())} bytes", file=out)
+        print(f"  format, as Fabric names it: {record['format']}" if record["format"] else "  Fabric named no format with this definition", file=out)
         for row in notes(parts):
             print(f"  {row}", file=out)
+        named_items = ", ".join(f"{r['displayName']} ({r['type']})" for r in record["references"])
+        print("  items of this workspace whose ID is in the parts: " + (named_items or "none"), file=out)
         if removed:
             print(f"  {removed} part(s) held text that looked like a key or a token; it was taken out before saving.", file=out)
         if binary:
@@ -181,6 +251,8 @@ def read_all(fabric: Fabric, env: dict, out, redact=None, now=None) -> int:
         for file in sorted(p for p in folder.rglob("*") if p.is_file()):
             bundle.write(file, Path(stamp) / file.relative_to(folder))
     kinds = {r.get("experience") for r in index["ontologies"]}
+    for row in others:
+        print(f"\nAlso in the workspace, and not read by this tool: {redact(row)}", file=out)
     print(f"\nSaved: {_shown(folder)}/", file=out)
     print(f"One file to send: {_shown(archive)}", file=out)
     print("It holds the names, the IDs and the SQL endpoint's address of this workspace, and no token or key.", file=out)

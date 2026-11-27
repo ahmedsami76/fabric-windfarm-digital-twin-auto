@@ -207,7 +207,7 @@ The new format is not written from Microsoft's reference alone. On 27 November 2
 bash infra/10-read-ontology.sh
 ```
 
-It reads the definition of every ontology item of the workspace, prints what each holds (which experience, how many tables and entities, the sources and annotations of the tables), and saves the parts under `fabric/ontology/saved/` with one archive to send. It changes nothing in Fabric. With several deployments in the folder, name the settings in front of it: `ENV_FILE=.deploy/<suffix>/demo.env`. **Not run on a tenant yet.**
+It reads the definition of every ontology item of the workspace, prints what each holds (which experience, the format Fabric names for it, how many tables and entities, the sources and annotations of the tables, and which items of the workspace the IDs in it belong to), and saves the parts under `fabric/ontology/saved/` with one archive to send. The IDs themselves are in the files, not on the screen. If Fabric lists the copy under a type of its own, the output names it and reads the original only: send the output in that case too. It changes nothing in Fabric; its only calls are two lists (the workspaces, the items of the workspace) and Get Ontology Definition for each ontology. With several deployments in the folder, name the settings in front of it: `ENV_FILE=.deploy/<suffix>/demo.env`. **Not run on a tenant yet.**
 
 ## Step 7: Give the agent the ontology
 

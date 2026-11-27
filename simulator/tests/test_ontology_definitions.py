@@ -77,9 +77,12 @@ NEW_PARTS = {".platform": '{"metadata": {"type": "Ontology"}}', "database.tmdl":
              "entities/mynamespace#Site.tmdl": "entity Site\n", "rules/GearboxWatch.tmdl": "rule GearboxWatch\n"}
 
 
-def definition(parts: dict) -> dict:
-    return {"definition": {"parts": [{"path": path, "payload": base64.b64encode(text.encode()).decode(), "payloadType": "InlineBase64"}
-                                     for path, text in parts.items()]}}
+def definition(parts: dict, named: str | None = None) -> dict:
+    out = {"definition": {"parts": [{"path": path, "payload": base64.b64encode(text.encode()).decode(), "payloadType": "InlineBase64"}
+                                    for path, text in parts.items()]}}
+    if named:
+        out["definition"]["format"] = named
+    return out
 
 
 class Pretend:
@@ -90,7 +93,8 @@ class Pretend:
             {"id": OLD_ID, "displayName": "WindFarmOntology", "type": "Ontology"},
             {"id": NEW_ID, "displayName": "WindFarmOntology (new)", "type": "Ontology"},
             {"id": "c" * 36, "displayName": "WindFarmLH", "type": "Lakehouse"}]
-        self.definitions = definitions or {OLD_ID: definition(OLD_PARTS), NEW_ID: definition(NEW_PARTS)}
+        # The new one names a format and the old one does not: both are possible by the reference, and neither is known.
+        self.definitions = definitions or {OLD_ID: definition(OLD_PARTS), NEW_ID: definition(NEW_PARTS, "TMDL")}
         self.refuse, self.calls = set(refuse), []
 
     def listing(self, path: str) -> list:
@@ -131,6 +135,11 @@ def test_both_experiences_are_read_saved_as_they_came_and_packed_into_one_archiv
     index = json.loads((folder / "index.json").read_text())
     assert index["workspace"] == {"name": "WindFarmDigitalTwin-66i", "id": WS}
     assert [(o["displayName"], o["experience"]) for o in index["ontologies"]] == [("WindFarmOntology", tool.OLD), ("WindFarmOntology (new)", tool.NEW)]
+    # the format Fabric names with a definition is kept, and its absence is kept as that
+    assert [(o["format"], o["definitionKeys"]) for o in index["ontologies"]] == [(None, ["parts"]), ("TMDL", ["format", "parts"])]
+    # what the list of items says about each ontology, and what the workspace holds by type: no further call was made for either
+    assert index["ontologies"][1]["listing"] == {"id": NEW_ID, "displayName": "WindFarmOntology (new)", "type": "Ontology"}
+    assert index["itemTypes"] == {"Lakehouse": 1, "Ontology": 2} and index["notRead"] == []
     archive = tmp_path / "ontology-definitions-20261127T070000Z.zip"
     with zipfile.ZipFile(archive) as bundle:
         names = bundle.namelist()
@@ -143,7 +152,8 @@ def test_both_experiences_are_read_saved_as_they_came_and_packed_into_one_archiv
 def test_the_output_alone_says_what_each_definition_holds(tmp_path):
     text = run(tmp_path)[1]
     old, new = text.split("Ontology WindFarmOntology (new)")
-    assert "old experience (JSON): 7 parts" in old
+    assert "old experience (JSON): 7 parts" in old and "Fabric named no format with this definition" in old
+    assert "format, as Fabric names it: TMDL" in new and "named no format" not in new
     assert "entity types 2, relationship types 1, data bindings 1, contextualizations 1" in old
     assert "new experience (TMDL): 7 parts" in new
     assert "tables 1, entities 2, rules 1, metrics 0; time series properties 1, additional backing tables 1" in new
@@ -160,6 +170,92 @@ def test_an_eventhouse_source_is_pointed_out(tmp_path):
     text = run(tmp_path, pretend)[1]
     assert "an Eventhouse or KQL source is named in: tables/TurbineTelemetry.tmdl" in text
     assert "ONT_ItemKind: KustoDatabase, Lakehouse" in text
+
+
+LAKEHOUSE, ENDPOINT, NOTEBOOK = ("cccccccc-3333-4333-8333-333333333333", "dddddddd-4444-4444-8444-444444444444",
+                                 "eeeeeeee-5555-4555-8555-555555555555")
+
+
+def test_an_id_in_a_definition_is_named_as_the_item_of_the_workspace_it_points_at(tmp_path):
+    """Whether the portal writes the Lakehouse's ID or its SQL endpoint's into a table's source is what has to be read."""
+    parts = dict(NEW_PARTS, **{
+        "tables/ref_turbines.tmdl": TABLE + f"\t\tannotation ONT_ItemId = {LAKEHOUSE}\n",
+        "expressions.tmdl": f'expression DatabaseQuery = Sql.Database("x.datawarehouse.fabric.microsoft.com", "{ENDPOINT.upper()}")\n'})
+    items = [{"id": OLD_ID, "displayName": "WindFarmOntology", "type": "Ontology"},
+             {"id": NEW_ID, "displayName": "WindFarmOntology (new)", "type": "Ontology"},
+             {"id": LAKEHOUSE, "displayName": "WindFarmLH", "type": "Lakehouse"},
+             {"id": ENDPOINT, "displayName": "WindFarmLH", "type": "SQLEndpoint"},
+             {"id": NOTEBOOK, "displayName": "11_build_ontology", "type": "Notebook"}]
+    pretend = Pretend(items=items, definitions={OLD_ID: definition(OLD_PARTS), NEW_ID: definition(parts)})
+    code, text, pretend = run(tmp_path, pretend)
+    assert code == 0, text
+    assert [path for method, path in pretend.calls if method == "GET"] == ["workspaces", f"workspaces/{WS}/items"]      # no call more
+    old, new = text.split("Ontology WindFarmOntology (new)")
+    assert "items of this workspace whose ID is in the parts: none" in old
+    assert "items of this workspace whose ID is in the parts: WindFarmLH (Lakehouse), WindFarmLH (SQLEndpoint)" in new
+    assert LAKEHOUSE not in text and ENDPOINT.upper() not in text and ENDPOINT not in text          # the IDs stay in the files
+    index = json.loads((tmp_path / "20261127T070000Z" / "index.json").read_text())
+    assert index["ontologies"][0]["references"] == [] and index["ontologies"][0]["workspaceIdInParts"] is False
+    assert index["ontologies"][1]["references"] == [{"type": "Lakehouse", "displayName": "WindFarmLH", "id": LAKEHOUSE},
+                                                    {"type": "SQLEndpoint", "displayName": "WindFarmLH", "id": ENDPOINT}]
+    assert index["ontologies"][1]["workspaceIdInParts"] is True
+    assert index["itemTypes"] == {"Lakehouse": 1, "Notebook": 1, "Ontology": 2, "SQLEndpoint": 1}
+
+
+def test_an_ontology_listed_under_another_type_is_named_and_not_read(tmp_path):
+    """Nothing says that the copy of the new experience is listed as `Ontology`. If it is not, the output has to say what is there."""
+    copy = {"id": NEW_ID, "displayName": "WindFarmOntology (new)", "type": "OntologyV2"}
+    code, text, pretend = run(tmp_path, Pretend(items=[{"id": OLD_ID, "displayName": "WindFarmOntology", "type": "Ontology"}, copy]))
+    assert code == 0 and [path for method, path in pretend.calls if method == "POST"] == [f"workspaces/{WS}/ontologies/{OLD_ID}/getDefinition"]
+    assert "Also in the workspace, and not read by this tool: WindFarmOntology (new) of type OntologyV2" in text
+    index = json.loads((tmp_path / "20261127T070000Z" / "index.json").read_text())
+    assert index["notRead"] == ["WindFarmOntology (new) of type OntologyV2"] and index["itemTypes"] == {"Ontology": 1, "OntologyV2": 1}
+    # and with nothing of the type this tool reads: no call, nothing saved, and the output alone says what the workspace lists
+    other = tmp_path / "other"
+    code, text, pretend = run(other, Pretend(items=[copy, {"id": LAKEHOUSE, "displayName": "WindFarmLH", "type": "Lakehouse"}]))
+    assert code == 1 and not any(method == "POST" for method, _ in pretend.calls) and not other.exists()
+    assert "It holds WindFarmOntology (new) of type OntologyV2, which this tool does not read" in text
+    assert "Item types there: Lakehouse 1, OntologyV2 1" in text
+
+
+@pytest.mark.parametrize("answer, said", [
+    (None, "Fabric answered without a definition; it sent nothing."),
+    (["parts"], "Fabric answered without a definition; it sent a list."),
+    ({"message": "<html>"}, "Fabric answered without a definition; it sent an object with message."),
+    ({"definition": {"parts": {"path": "model.tmdl"}}}, "The parts of the definition are not a list of objects."),
+    ({"definition": {"parts": ["model.tmdl"]}}, "The parts of the definition are not a list of objects."),
+    ({"definition": {"format": "TMDL", "parts": []}}, "Fabric gave a definition without parts."),
+])
+def test_an_answer_of_another_shape_is_said_as_that_and_ends_nothing_else(tmp_path, answer, said):
+    pretend = Pretend(definitions={OLD_ID: definition(OLD_PARTS), NEW_ID: answer})
+    code, text, _ = run(tmp_path, pretend)
+    assert code == 3 and f"Its definition could not be read: {said}" in text, text
+    assert (tmp_path / "20261127T070000Z" / "WindFarmOntology-aaaaaaaa" / "definition.json").exists()        # the other one is saved
+    index = json.loads((tmp_path / "20261127T070000Z" / "index.json").read_text())
+    assert index["ontologies"][1]["error"] == said and "parts" not in index["ontologies"][1]
+    # what Fabric did name is kept beside the error
+    assert index["ontologies"][1].get("format") == ("TMDL" if isinstance(answer, dict) and "definition" in answer and "format" in answer["definition"] else None)
+
+
+def test_two_parts_of_one_name_are_refused_since_the_second_would_replace_the_first(tmp_path):
+    twice = definition({"model.tmdl": "model Model\n"})
+    twice["definition"]["parts"] += definition({"model.tmdl": "model Other\n"})["definition"]["parts"]
+    pretend = Pretend(items=[{"id": NEW_ID, "displayName": "WindFarmOntology (new)", "type": "Ontology"}], definitions={NEW_ID: twice})
+    code, text, _ = run(tmp_path / "saved", pretend)
+    assert code == 3 and "Two parts of the definition are named 'model.tmdl'." in text
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_what_the_list_says_about_an_ontology_is_kept_without_anything_that_looks_like_a_token(tmp_path):
+    token = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJodHRwczovL2FwaS5mYWJyaWMifQ.c2lnbmF0dXJlLW9mLXRoZS10ZXN0"
+    entry = {"id": NEW_ID, "displayName": "WindFarmOntology (new)", "type": "Ontology", "description": f"copied with {token}",
+             "folderId": None, "tags": [{"displayName": "demo"}], "experience": "new"}
+    code, text, _ = run(tmp_path, Pretend(items=[entry]))
+    saved = (tmp_path / "20261127T070000Z" / "index.json").read_text()
+    assert code == 0 and token not in saved and token not in text
+    listing = json.loads(saved)["ontologies"][0]["listing"]
+    assert listing["experience"] == "new" and listing["tags"] == [{"displayName": "demo"}] and listing["folderId"] is None
+    assert sorted(listing) == sorted(entry)
 
 
 def test_only_the_old_experience_there_says_how_to_get_the_new_one(tmp_path):
