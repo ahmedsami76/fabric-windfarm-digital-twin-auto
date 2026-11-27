@@ -80,6 +80,9 @@ class World:
         self.fail_script = ""
         self.rayfin_signed_in = True
         self.registrations: dict = {}        # app registrations in the directory, by name: appId, objectId, secrets
+        self.agents: dict = {}               # operations agents by item ID: the document of their definition
+        self.agent_refused = False           # Fabric takes no operations agent from a definition (26 November 2026: not yet tried)
+        self.agent_unreadable = False        # Fabric does not give out an agent's definition
         self.no_registrations = False        # a tenant that lets nobody register an application
         self.secrets_in_app: dict = {}       # app folder -> the start of the secret the app's tool was handed
         self.ups: list = []                  # each deployment of the app: (folder, the secret it had then)
@@ -366,6 +369,18 @@ class FakeFabric:
 
     api = API
 
+    def long_running(self, method, path, body=None):
+        """Get Operations Agent Definition: the one request the runner makes this way."""
+        w = self.w
+        found = re.fullmatch(r"workspaces/([^/]+)/operationsAgents/([^/]+)/getDefinition", path)
+        assert method == "POST" and found, f"a long-running request the fake does not know: {method} {path}"
+        if w.agent_unreadable:
+            raise CloudError("The Fabric API answered 403: InsufficientPrivileges", 403, "InsufficientPrivileges")
+        # an agent made in the portal, which the fake was not told about, comes with what the portal writes
+        document = w.agents.get(found[2], {"configuration": {"instructions": "", "dataSources": {}, "actions": {}}, "playbook": {}, "shouldRun": False})
+        payload = base64.b64encode(json.dumps(document).encode()).decode()
+        return {"definition": {"parts": [{"path": "Configurations.json", "payload": payload, "payloadType": "InlineBase64"}]}}
+
     def call(self, method, path, body=None):
         w = self.w
         assert not path.startswith("http") or path.startswith(API + "/"), f"the token was sent to another address: {path}"
@@ -443,6 +458,22 @@ class FakeFabric:
             w.shortcuts.setdefault(found[1], []).append({"name": body["name"], "path": body["path"], "target": dict(body["target"], type="OneLake")})
             w.wrote(f"POST shortcut {body['name']}")
             return 201, {}, {}
+        if rest == "operationsAgents" and method == "POST":
+            # Create Operations Agent with a definition: the part and the fields of Microsoft's definition article, nothing else
+            part, = body["definition"]["parts"]
+            assert body["definition"].get("format") == "OperationsAgentV1", body["definition"].get("format")
+            document = json.loads(base64.b64decode(part["payload"]))
+            assert part["path"] == "Configurations.json" and part["payloadType"] == "InlineBase64", part["path"]
+            assert set(document) == {"configuration", "playbook", "shouldRun"} and document["playbook"] == {}, f"not the documented form: {sorted(document)}"
+            assert set(document["configuration"]) == {"instructions", "dataSources", "actions"} and document["configuration"]["actions"] == {}
+            (source,) = document["configuration"]["dataSources"].values()
+            assert source == {"id": w.find(ws, "KQLDatabase", "WindFarmEH")["id"], "type": "KustoDatabase", "workspaceId": ws}, source
+            if w.agent_refused:
+                raise CloudError("The Fabric API answered 400: UnknownError. It said: An error occurred while processing the operation", 400, "UnknownError")
+            w.wrote(f"POST operationsAgents {body['displayName']}")
+            agent = w.add_item(ws, "OperationsAgent", body["displayName"])
+            w.agents[agent["id"]] = document
+            return 201, {}, agent
         if rest == "eventstreams" and method == "POST":
             definition = json.loads(base64.b64decode(body["definition"]["parts"][0]["payload"]))
 

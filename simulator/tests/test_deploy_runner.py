@@ -34,7 +34,7 @@ class Bench:
     def __init__(self, folder: Path):
         self.root, self.world, self.now, self.kusto = folder, World(), [0.0], None
         self.wall = [1795600000.0]
-        for part in ("fabric/kql", "fabric/notebooks", "app/overlay/packages/functions/src"):
+        for part in ("fabric/kql", "fabric/notebooks", "fabric/operations-agent", "app/overlay/packages/functions/src"):
             shutil.copytree(ROOT / part, folder / part)
         (folder / "config").mkdir()
         shutil.copy(ROOT / "config" / "demo.env.example", folder / "config" / "demo.env.example")
@@ -523,28 +523,28 @@ def later(bench, *options, confirm=()):
 
 def test_phases_2_to_4_stop_at_each_thing_only_a_person_can_do_and_go_on_when_it_is_there(deployed):
     world, ws = deployed.world, deployed.world.workspaces[0]["id"]
-    code, text = later(deployed)
+    code, text = later(deployed, "--no-pip-jobs")
     assert code == core.EXIT_BLOCKED and "blocked  p2.semantic_model" in text and "06_build_semantic_model" in text and "Run all" in text
-    assert "%pip" in text and "--opt-in pip-jobs" in text
+    assert "made with --no-pip-jobs" in text
     assert not any("06_build" in w for w in world.writes if w.startswith("POST job"))
     world.add_item(ws, "SemanticModel", "WindFarm Operations")
-    code, text = later(deployed)
+    code, text = later(deployed, "--no-pip-jobs")
     assert "blocked  p2.acceptance" in text and "--confirm p2.acceptance" in text
     world.add_item(ws, "Report", "WindFarm Operations Report")
-    code, text = later(deployed, confirm=["p2.acceptance"])
+    code, text = later(deployed, "--no-pip-jobs", confirm=["p2.acceptance"])
     assert code == core.EXIT_BLOCKED and "blocked  phase3.tenant_settings" in text and "Enable Operations Agents" in text
-    code, text = later(deployed, confirm=["phase3.tenant_settings"])
+    code, text = later(deployed, "--no-pip-jobs", confirm=["phase3.tenant_settings"])
     assert "blocked  p3.data_agent" in text
     world.add_item(ws, "DataAgent", "WindFarmDataAgent")
-    code, text = later(deployed)
+    code, text = later(deployed, "--no-pip-jobs")
     assert "optional p3.ontology" in text and "blocked  p3.operations_agent" in text and "Fabric Operations Agent" in text
     assert "GearboxVsFleetLive" in world.kql["tables"]
     world.add_item(ws, "OperationsAgent", "WindFarmGearboxWatch")
     world.rayfin_signed_in = False
-    code, text = later(deployed, confirm=["phase4.tenant_settings"])
+    code, text = later(deployed, "--no-pip-jobs", confirm=["phase4.tenant_settings"])
     assert code == core.EXIT_BLOCKED and "not signed in" in text and "npx rayfin login" in text
     world.rayfin_signed_in = True
-    code, text = later(deployed)
+    code, text = later(deployed, "--no-pip-jobs")
     assert code == 0, text
     assert "SQL probe with the operator's token: 7548 rows from 12 turbines in the last 60 minutes, the newest 2.0 min old" in text
     assert "as you and not as the app" in text
@@ -568,23 +568,23 @@ def test_phases_2_to_4_stop_at_each_thing_only_a_person_can_do_and_go_on_when_it
     assert "the deployed app's own connection check has not been given" in text and "SQL probe with the operator's token passed (not the app's identity)" in text
     build = re.search(r"--app-check ([0-9a-f]{12}),eventhouse,SECONDS", text)[1]
     # what the app's own check shows, read by a person: another build, or data that is too old, is no pass
-    code, text = later(deployed, "--app-check", "000000000000,eventhouse,60", "--confirm", "p3.agent_message")
+    code, text = later(deployed, "--no-pip-jobs", "--app-check", "000000000000,eventhouse,60", "--confirm", "p3.agent_message")
     assert "demo-ready    no" in text and f"named build 000000000000, and the repository is at {build}" in text
-    code, text = later(deployed, "--app-check", f"{build},eventhouse,4000")
+    code, text = later(deployed, "--no-pip-jobs", "--app-check", f"{build},eventhouse,4000")
     assert "demo-ready    no" in text and "the newest reading was 4000 s old, more than 120 s" in text
     # a twin that passes on the Lakehouse route only has fallen back: not what this deployment is to show
-    code, text = later(deployed, "--app-check", f"{build},lakehouse,120")
+    code, text = later(deployed, "--no-pip-jobs", "--app-check", f"{build},lakehouse,120")
     assert "demo-ready    no" in text and "passed on the Lakehouse route" in text and "--lakehouse-only" in text
-    code, text = later(deployed, "--app-check", f"{build},eventhouse,40")
+    code, text = later(deployed, "--no-pip-jobs", "--app-check", f"{build},eventhouse,40")
     assert code == 0 and "demo-ready    yes" in text and f"the twin's own check: build {build}, eventhouse route, newest reading 40 s old" in text
     assert world.made_secrets == [reader] and len(world.ups) == 2                    # and none of those applies made a secret or deployed again
     assert "a Teams message seen, confirmed by sami@contoso.example" in text
-    assert "--app-check takes BUILD,ROUTE,SECONDS" in later(deployed, "--app-check", "looks fine")[1]
+    assert "--app-check takes BUILD,ROUTE,SECONDS" in later(deployed, "--no-pip-jobs", "--app-check", "looks fine")[1]
     # status says the same from the checkpoint, and a stopped edge takes the word back
     world.vm["powerState"] = "VM deallocated"
     text = deployed.run("status", "--up-to", "phase4")[1]
     assert "provisioned   yes" in text and "demo-ready    no" in text and "no fresh telemetry now" in text
-    assert later(deployed)[0] == 0 and sum(len(s) for s in world.schedules.values()) == 2
+    assert later(deployed, "--no-pip-jobs")[0] == 0 and sum(len(s) for s in world.schedules.values()) == 2
 
 
 def test_the_lakehouse_route_that_is_only_behind_blocks_with_what_was_seen_on_the_tenant(deployed):
@@ -2459,10 +2459,11 @@ def test_a_confirmation_of_a_result_given_before_the_result_can_exist_does_not_c
     # tenant settings, as the plan's last line listed them. The semantic model that notebook 07 tests did not exist, and
     # the confirmation was kept.
     world, ws = deployed.world, deployed.world.workspaces[0]["id"]
-    plan = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4", "--no-pip-jobs")[1]
+    assert "--no-pip-jobs" in plan.split("To carry this plan out:")[1]      # the apply line carries what the plan was made with
     assert "Add --confirm phase3.tenant_settings --confirm phase4.tenant_settings when that step of yours is done." in plan
     assert "--confirm p2.acceptance speaks of a result: it counts once p2.semantic_model is complete" in plan
-    code, text = later(deployed, "--confirm", "p3.agent_message", confirm=["p2.acceptance", "phase3.tenant_settings", "phase4.tenant_settings"])
+    code, text = later(deployed, "--no-pip-jobs", "--confirm", "p3.agent_message", confirm=["p2.acceptance", "phase3.tenant_settings", "phase4.tenant_settings"])
     assert code == core.EXIT_BLOCKED and "blocked  p2.semantic_model" in text
     assert "--confirm p2.acceptance was not kept" in text and "p2.semantic_model is not complete yet" in text
     assert "--confirm p3.agent_message was not kept" in text and "a Teams message seen" not in text      # nor does it count for this report
@@ -2471,9 +2472,9 @@ def test_a_confirmation_of_a_result_given_before_the_result_can_exist_does_not_c
     assert "the operations agent: an item exists" not in text            # no such item yet: the sentence would not be true
     # notebook 06 has been run by hand since. The runner stops for notebook 07, and takes the confirmation given then
     world.add_item(ws, "SemanticModel", "WindFarm Operations")
-    code, text = later(deployed)
+    code, text = later(deployed, "--no-pip-jobs")
     assert code == core.EXIT_BLOCKED and "blocked  p2.acceptance" in text and "07_model_acceptance" in text
-    code, text = later(deployed, confirm=["p2.acceptance"])
+    code, text = later(deployed, "--no-pip-jobs", confirm=["p2.acceptance"])
     assert "confirmed p2.acceptance" in text and "blocked  p2.report" in text
     assert deployed.state["confirmed"]["p2.acceptance"]["after"] == "p2.semantic_model"
     # a confirmation that an earlier issue kept, without knowing whether it came too early, is asked for again
@@ -2481,12 +2482,84 @@ def test_a_confirmation_of_a_result_given_before_the_result_can_exist_does_not_c
     data = json.loads(checkpoint.read_text())
     del data["confirmed"]["p2.acceptance"]["after"]
     checkpoint.write_text(json.dumps(data))
-    code, text = later(deployed)
+    code, text = later(deployed, "--no-pip-jobs")
     assert code == core.EXIT_BLOCKED and "blocked  p2.acceptance" in text
     # and a confirmation given in the very apply that first sees the result is taken: the usual way
     world.add_item(ws, "Report", "WindFarm Operations Report")
     world.add_item(ws, "DataAgent", "WindFarmDataAgent")
     world.add_item(ws, "OperationsAgent", "WindFarmGearboxWatch")
-    code, text = later(deployed, "--confirm", "p3.agent_message", confirm=["p2.acceptance"])
+    code, text = later(deployed, "--no-pip-jobs", "--confirm", "p3.agent_message", confirm=["p2.acceptance"])
     assert code == 0 and deployed.state["confirmed"]["p3.agent_message"]["after"] == "p3.operations_agent", text[-1500:]
     assert "a Teams message seen, confirmed by" in text
+
+
+# ------------------------------------------------------------------------------------------ fewer steps for a person
+# 26 November 2026, 20:33: with the opt-in, notebooks 06 to 09 ran as jobs on a tenant at the first try. 20:36: "so there
+# is no way to automate the creation of the two agents?", and the choice of the documented part of the operations agent.
+AGENT = ("--allow-preview", "operations-agent")
+SETTINGS34 = ["phase3.tenant_settings", "phase4.tenant_settings"]
+
+
+def test_the_pip_notebooks_are_run_by_the_runner_without_an_option_and_the_data_agent_once_its_preview_is_allowed(deployed):
+    world = deployed.world
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4")[1]
+    for step in ("p2.semantic_model", "p2.acceptance", "p2.report"):
+        assert re.search(step.replace(".", r"\.") + r"\s+will run", plan), step
+    assert re.search(r"p3\.data_agent\s+YOUR STEP", plan) and "--allow-preview data-agent-sdk" in plan
+    assert "--opt-in" not in plan.split("To carry this plan out:")[1] and "--no-pip-jobs" not in plan.split("To carry this plan out:")[1]
+    code, text = later(deployed, confirm=SETTINGS34)
+    assert code == core.EXIT_BLOCKED and "blocked  p3.data_agent" in text, text[-900:]
+    ran = [job["notebook"] for jobs in world.jobs.values() for job in jobs]
+    assert all(name in ran for name in ("06_build_semantic_model", "07_model_acceptance", "08_build_report")) and "09_build_data_agent" not in ran
+    assert "07_model_acceptance ran to the end" in text and "p2.acceptance" not in deployed.state["confirmed"]     # the run is the proof
+    code, text = later(deployed, "--allow-preview", "data-agent-sdk")
+    assert "done     p3.data_agent" in text and "blocked  p3.operations_agent" in text
+    assert "--allow-preview operations-agent" in text                 # the hand-over names the way to less of it
+
+
+def test_the_operations_agent_is_created_from_its_documented_definition_and_its_playbook_and_start_stay_a_persons(deployed):
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    options = ("--allow-preview", "data-agent-sdk", *AGENT)
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+    assert re.search(r"p3\.operations_agent_item\s+will run", plan) and "no action, no playbook, not started" in plan
+    assert "--allow-preview operations-agent" in plan.split("To carry this plan out:")[1]
+    assert re.search(r"p3\.operations_agent\s+YOUR STEP", plan)
+    code, text = later(deployed, *options, confirm=SETTINGS34)
+    assert code == core.EXIT_BLOCKED and "done     p3.operations_agent_item" in text and "blocked  p3.operations_agent:" in text, text[-1200:]
+    assert "Generate playbook" in text and "the agent has no playbook yet" in text
+    agent = world.find(ws, "OperationsAgent", "WindFarmGearboxWatch")
+    made = world.agents[agent["id"]]                 # the pretend Fabric has already held the request to the documented form
+    assert "crosses above 4 mm/s" in made["configuration"]["instructions"] and made["shouldRun"] is False and made["playbook"] == {}
+    assert world.writes.count("POST operationsAgents WindFarmGearboxWatch") == 1
+    # the person generates the playbook and does not start the agent yet; then starts it
+    made["playbook"] = {"RuleDefinitions": [{}, {}, {}], "OntologyDefinitions": [{}]}
+    code, text = later(deployed, *options)
+    assert code == core.EXIT_BLOCKED and "the agent has a playbook with 3 rules and is not started" in text
+    made["shouldRun"] = True
+    code, text = later(deployed, *options)
+    assert "done     p3.operations_agent: operations agent WindFarmGearboxWatch: a playbook with 3 rules, started" in text
+    assert "Whether its message reaches Teams, the runner cannot read" in text
+    assert world.writes.count("POST operationsAgents WindFarmGearboxWatch") == 1 and len([e for e in world.items[ws] if e["type"] == "OperationsAgent"]) == 1
+    # a playbook of a form the runner has not seen is a playbook, and its rules are not counted
+    made["playbook"] = {"rules": "in another form"}
+    assert "a playbook, started" in deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+    # a definition Fabric does not give out: the item is there, and that is said as all that is known
+    world.agent_unreadable = True
+    plan = deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
+    assert re.search(r"p3\.operations_agent\s+NOT CHECKED", plan) and "its definition could not be read" in plan
+
+
+def test_a_definition_fabric_does_not_take_hands_the_agent_back_to_the_person(deployed):
+    world, ws = deployed.world, deployed.world.workspaces[0]["id"]
+    world.agent_refused = True
+    code, text = later(deployed, "--allow-preview", "data-agent-sdk", *AGENT, confirm=SETTINGS34)
+    assert code == core.EXIT_BLOCKED and "blocked  p3.operations_agent_item" in text
+    assert "Fabric did not create the operations agent from its definition" in text and "400: UnknownError" in text
+    assert "New item, Operations agent" in text and "does not try another form of the request" in text
+    assert not world.find(ws, "OperationsAgent", "WindFarmGearboxWatch")
+    # made by hand since: the runner takes it, and still looks for the playbook and the start
+    world.agent_refused = False
+    world.add_item(ws, "OperationsAgent", "WindFarmGearboxWatch")
+    code, text = later(deployed, "--allow-preview", "data-agent-sdk", *AGENT)
+    assert "done     p3.operations_agent_item" in text and "the agent has no playbook yet" in text
+    assert "POST operationsAgents WindFarmGearboxWatch" not in world.writes

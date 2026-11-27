@@ -58,10 +58,14 @@ def parser() -> argparse.ArgumentParser:
     top.add_argument("--app-check", metavar="BUILD,ROUTE,SECONDS", default="",
                      help="apply: what the twin's own connection check shows: its build, the route (lakehouse or eventhouse), "
                           "and the age of the newest reading in seconds")
-    top.add_argument("--allow-preview", metavar="NAME", action="append", default=[], choices=("data-agent-sdk", "ontology"),
-                     help="let the runner use a preview feature: data-agent-sdk, ontology")
+    top.add_argument("--allow-preview", metavar="NAME", action="append", default=[], choices=("data-agent-sdk", "ontology", "operations-agent"),
+                     help="let the runner use a preview feature: data-agent-sdk, ontology, operations-agent (create the operations "
+                          "agent with its instructions and data source; its playbook and its start stay yours)")
     top.add_argument("--opt-in", metavar="NAME", action="append", default=[], choices=("pip-jobs",),
-                     help="pip-jobs: try the notebooks that use %%pip as jobs (not documented for jobs started through the API)")
+                     help="pip-jobs: no longer needed; the runner runs the notebooks that use %%pip as jobs unless --no-pip-jobs is given")
+    top.add_argument("--no-pip-jobs", action="store_true",
+                     help="leave the notebooks whose first cell is %%pip install (06 to 10) to you. The runner runs them as jobs "
+                          "with %%pip switched on by a job parameter that Microsoft documents for pipelines only")
     top.add_argument("--enable-phase5a-isolated-simulator", action="store_true",
                      help="also provision the command path of Phase 5a, switched off. For an edge that is this demo's simulator only")
     top.add_argument("--lakehouse-only", action="store_true",
@@ -83,6 +87,10 @@ def parser() -> argparse.ArgumentParser:
 
 def options_of(args) -> Options:
     granted = {f"preview:{name}" for name in args.allow_preview} | {f"optin:{name}" for name in args.opt_in}
+    if args.no_pip_jobs:
+        granted.discard("optin:pip-jobs")
+    else:
+        granted.add("optin:pip-jobs")       # the default since the seventeenth issue: seen to work on a tenant on 26 November 2026
     if args.approve_role_changes:
         granted.add("roles")
     if args.approve_capacity_creation:
@@ -308,7 +316,8 @@ def apply_command(ctx: Context, args, digest: str) -> str:
     granted = ctx.options.granted
     words += [flag for need, flag in (("roles", "--approve-role-changes"), ("capacity", "--approve-capacity-creation")) if need in granted]
     words += [f"--allow-preview {need.split(':', 1)[1]}" for need in sorted(granted) if need.startswith("preview:")]
-    words += [f"--opt-in {need.split(':', 1)[1]}" for need in sorted(granted) if need.startswith("optin:")]
+    if "optin:pip-jobs" not in granted:
+        words.append("--no-pip-jobs")
     if ctx.options.phase5a:
         words.append("--enable-phase5a-isolated-simulator")
     if ctx.options.lakehouse_only:

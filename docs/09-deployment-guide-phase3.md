@@ -235,6 +235,8 @@ Block 3 exists because the operations agent reads tables, not functions, so it c
 
 **[Fabric]**
 
+**With the deployment runner.** `tools/deploy.py` with `--allow-preview operations-agent` does parts 1 and 2 below through Fabric's API: it creates the item with the instructions and the KQL database, stopped. You then open the agent and go on from generating the playbook. That way is new on 26 November 2026 and has not run on a tenant; see [The operations agent](15-deployment-runner.md#the-operations-agent). Everything below is the way by hand, which has.
+
 1. On the Fabric home page select **…**, **Create**, section **Real-Time Intelligence**, **Operations agent**. Name it `WindFarmGearboxWatch`, choose the workspace, **Create**. If the item is not offered, see the region in step 1 and the tenant setting in step 2.
 2. On **Agent setup**:
    - **Agent instructions**: paste `fabric/operations-agent/agent-setup.txt`. The page has one box for the business goals and the instructions together; Microsoft Learn still describes two. The file holds both, goals first. If you ran block 3 of step 8 and want the fleet rule, add the line of `optional-rule-4.txt` after rule 3.

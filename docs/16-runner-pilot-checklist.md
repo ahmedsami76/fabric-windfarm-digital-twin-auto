@@ -12,7 +12,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 |---|---|---|---|
 | `preflight` | yes | yes: four runs on 25 November, second to third issue | the same with every call pinned to the subscription, and the two directory reads through Microsoft Graph |
 | `plan` | yes | the sixth issue's plan ran to its end on 25 November (plan `f3cdc565c27f`, questions answered in a terminal) | a plan settled from options and a profile with no question; the saved plan file |
-| `apply` | yes: 132 tests | 25 and 26 November, deployment 66i: **Phase 1 to its end, 25 of 25 steps, at 16:50 on 26 November**. Everything made by the runner but Azure IoT Operations, which its script made from Cloud Shell. The telemetry gate passed at 14:03 (60 readings from 12 turbines), the Lakehouse gate at 16:50 (21 tables with rows) | steps 3 to 10 below |
+| `apply` | yes: 135 tests | 25 and 26 November, deployment 66i: **Phase 1 to its end, 25 of 25 steps, at 16:50 on 26 November**. Everything made by the runner but Azure IoT Operations, which its script made from Cloud Shell. The telemetry gate passed at 14:03 (60 readings from 12 turbines), the Lakehouse gate at 16:50 (21 tables with rows) | steps 3 to 10 below |
 | Interrupted notebook run, resumed | yes | no: Phase 1 went past its notebooks without a stop | step 4, at the first notebook of step 7 |
 | Second apply adds nothing | yes | no | step 5 |
 | Scripts under the runner, pinned | yes, against a stand-in `az` | no. The scripts themselves ran by hand, 19 to 25 November | that `az iot ops` and `az connectedk8s` accept `--subscription` (they are extension commands and could not be tried here) |
@@ -28,7 +28,7 @@ No time is promised for any step. Note the clock at each one: those are the firs
 cd simulator && python3 -m pytest -q tests/test_deploy_runner.py && cd .. && bash tools/script-tests/run.sh
 ```
 
-  It ends with `132 passed` and with `passed 182, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
+  It ends with `135 passed` and with `passed 182, failed 0`, and prints nothing but `PASS` lines in between. Seen on the workstation of the earlier tenant runs on 25 November at 23:09, with the seventh issue: `111 passed in 9.84s`, then `passed 164, failed 1` of the 165 scenarios it had. The one failure was the repository's own check of its scripts under GNU awk, not the runner; the eighth issue corrects it and adds two scenarios (R64 in the [validation log](runner-validation-log.md)).
 
 - [ ] `az login` as yourself, and `az extension add --name azure-iot-ops --yes` if preflight ever said it is missing.
 - [ ] The line from this computer to Azure carries a few megabytes in a few seconds. The first pilot, on 26 November, ran from a workstation under WSL that received 5 kB a second, and the Azure IoT Operations script could not finish there. This prints the rate, and shows nothing of the token:
@@ -151,13 +151,18 @@ ENV_FILE=.deploy/XXX/demo.env bash infra/vm.sh start
 ## 7. Extend the same deployment through Phase 4
 
 ```bash
-python3 tools/deploy.py plan --deployment XXX --up-to phase4 --approve-role-changes
+python3 tools/deploy.py plan --deployment XXX --up-to phase4 --approve-role-changes --allow-preview data-agent-sdk --allow-preview operations-agent
 ```
+
+The two previews are yours to allow or to leave out. Without the first, notebook 09 is yours; without the second, the whole operations agent is, as in the Phase 3 guide.
 
 Then the apply line it prints. It stops at each thing that is a person's, in this order, and names the confirmation to add once it is done:
 
-- [ ] Notebooks 06, 07 and 08: open each, **Run all** (they install libraries with `%pip`, which the runner does not start as jobs). Then `--confirm p2.acceptance`: not before notebook 06 has built the model, or the runner does not keep it. To find out whether the runner can run them itself, make the plan with `--opt-in pip-jobs` once: nobody has tried it on a tenant.
-- [ ] `--confirm phase3.tenant_settings`; notebook 09; the operations agent and Teams, by hand as in the Phase 3 guide.
+- [ ] Notebooks 06, 07 and 08 run as jobs, started by the runner (seen on 26 November at 20:33, deployment 66i, then still with `--opt-in pip-jobs`). When one fails, the block has the steps by hand; for 07 by hand, `--confirm p2.acceptance` afterwards.
+- [ ] `--confirm phase3.tenant_settings`; notebook 09 as a job (seen at 20:33).
+- [ ] `p3.operations_agent_item`: `done`, or `blocked` with a line of Fabric's. **Not seen on a tenant yet.** Either way send the lines.
+- [ ] `blocked  p3.operations_agent … the agent has no playbook yet`, with four things to do. Open `WindFarmGearboxWatch` in the workspace. Note what you see: are the instructions there, is the KQL database under Knowledge, does **Generate playbook** work? Read the rules, install the Teams app, **Start**.
+- [ ] Apply again: `done     p3.operations_agent: … a playbook with 3 rules, started`. A playbook with no number of rules means the definition names its rules in a way the runner does not know: send the line.
 - [ ] `--confirm phase4.tenant_settings`.
 - [ ] The app's tool is not signed in: the block prints the line, which now names the app's own folder, `.deploy/XXX/app/windfarm-twin`.
 - [ ] `p4.eventhouse_principal`: the script's lines name the app registration `windfarm-twin-eventhouse-reader-XXX`, and no line shows a secret. Then `p4.deploy_secrets`: a line about waiting, and the app's tool a second time.

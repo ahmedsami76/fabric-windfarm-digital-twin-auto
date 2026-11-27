@@ -15,7 +15,9 @@ from pathlib import Path
 import json
 import re
 
-from .cloud import SQL_RESOURCE, UNREACHED, CloudError, run_notebook
+from .cloud import SQL_RESOURCE, UNREACHED, CloudError, FabricError, operation, run_notebook
+
+from operations_agent import decode_definition, encode_definition  # noqa: E402  (found through the path .cloud sets)
 from .core import Blocked, Options, Probe, Step, blocked, done, todo, unverified
 from .steps import (DATA_AGENT, MODEL, NOTEBOOKS, ONTOLOGY, OPERATIONS_AGENT, REPORT, after, confirmation,
                     data_flow, freshness, gate_lakehouse, import_notebooks, instance, item, items, kql, kql_database, name,
@@ -44,8 +46,11 @@ def p2_views(ctx) -> Probe:
 
 
 def pip_notebook(step_id: str, phase: str, title: str, notebook: str, prerequisite: str, options: Options, *,
-                 artifact: tuple | None = None, expect: str = "", needs: tuple = (), optional: bool = False) -> Step:
-    """A notebook whose first cell is %pip install. The operator's unless the opt-in was given.
+                 artifact: tuple | None = None, expect: str = "", preview: str = "", optional: bool = False) -> Step:
+    """A notebook whose first cell is %pip install. Run by the runner as a job, with %pip switched on by the parameter
+    Microsoft documents for pipelines: not written for a run started through the API, and seen to work on a tenant on
+    26 November 2026 (notebooks 06 to 09, at the first try). The operator's with --no-pip-jobs, and, for a notebook that
+    uses a preview, until that preview is allowed.
 
     With an artifact (an item the notebook creates), the step is complete when the item is there, whoever ran the
     notebook. Without one, a run by the runner is recorded, and a run by hand is confirmed by the operator.
@@ -66,9 +71,12 @@ def pip_notebook(step_id: str, phase: str, title: str, notebook: str, prerequisi
         text = BY_HAND.format(notebook=notebook, expect=expect, artifact=what)
         if not artifact:
             text += f"\nThen: the apply line the plan ends with, and --confirm {step_id} added to it"
-        return text + ("\nThe runner leaves this notebook to you because its first cell installs a library with %pip, and "
-                       "Microsoft does not say whether that works in a run started through the API. To let the runner try: "
-                       "--opt-in pip-jobs.")
+        if PIP not in options.granted:
+            return text + "\nThe runner leaves this notebook to you because the plan was made with --no-pip-jobs."
+        if preview and preview not in options.granted:
+            return text + (f"\nThe runner runs this notebook itself once the preview it uses is allowed: --allow-preview "
+                           f"{preview.split(':', 1)[1]}.")
+        return text
 
     def act(ctx) -> None:
         try:
@@ -76,13 +84,14 @@ def pip_notebook(step_id: str, phase: str, title: str, notebook: str, prerequisi
         except CloudError as error:
             raise Blocked(f"The run of {notebook} as a job did not work: {error}",
                           BY_HAND.format(notebook=notebook, expect=expect, artifact=what)
-                          + "\nIf the failure names %pip: that is the undocumented part. Leave --opt-in pip-jobs away from now on.") from None
+                          + "\nIf the failure names %pip: that is the part Microsoft has not written down for a run started "
+                          "through the API. Make the plan with --no-pip-jobs from now on, and send me the line.") from None
 
-    tried = PIP in options.granted
-    return Step(step_id, phase, title, probe, act if tried else None, manual=manual, needs=needs, optional=optional,
+    tried = PIP in options.granted and (not preview or preview in options.granted) and not optional
+    return Step(step_id, phase, title, probe, act if tried else None, manual=manual, optional=optional,
                 inputs=(f"fabric/notebooks/{notebook}.ipynb",), observable=bool(artifact),
-                writes="" if optional else f"with --opt-in pip-jobs: runs {notebook} as a job, with %pip switched on by the "
-                "parameter Microsoft documents for pipelines",
+                writes=f"runs {notebook} as a job, with %pip switched on by the parameter Microsoft documents for pipelines"
+                if tried else "",
                 basis="Job Scheduler - Run On Demand Item Job; _inlineInstallationEnabled is documented for pipeline runs only",
                 proof="none" if tried else "live")
 
@@ -148,6 +157,95 @@ Follow step 9 of docs/09-deployment-guide-phase3.md:
 The runner looks for an item of type OperationsAgent with that name. It does not read or change the agent."""
 
 
+# --------------------------------------------------------------------------- the operations agent, as far as an API goes
+# Asked for on 26 November 2026 ("so there is no way to automate the creation of the two agents?", then the choice of the
+# documented part). Microsoft's reference has Create Operations Agent, in preview and for a person only, with a definition
+# that holds the instructions, the data source and the actions. For the playbook, which holds the rules, it says to send an
+# empty object until its schema is published: the rules are generated in the portal, and reading and starting stay a
+# person's. The part is named Configurations.json, as the definition article has it and as this tenant returned it on
+# 24 November 2026.
+AGENT_TEXT = "fabric/operations-agent/agent-setup.txt"
+AGENT_PART = "Configurations.json"
+AGENT_FORMAT = "OperationsAgentV1"
+AGENT_YOURS = f"""The runner created the operations agent {OPERATIONS_AGENT} with its instructions and the KQL database as its data source, and left it stopped. The rules are yours: Fabric publishes no way to write a playbook.
+1. In the workspace open {OPERATIONS_AGENT}. On Agent setup the instructions are filled in, and Knowledge names the KQL database.
+2. Select Generate playbook. Read its rules before you start the agent; step 9 of docs/09-deployment-guide-phase3.md has the table to compare with: gearbox vibration crosses above 4, crosses above 5.5, gearbox oil temperature crosses above 72.
+3. In Teams, install the app Fabric Operations Agent. The agent writes to the person who created it.
+4. Back in Fabric, select Start.
+Then run the same apply again: it reads the agent's definition, and looks for a playbook and for an agent that is started."""
+
+
+def agent_document(ctx) -> dict:
+    """The definition the runner creates the agent with: the documented fields, an empty playbook, stopped."""
+    database = need_item(ctx, "KQLDatabase", name(ctx, "EVENTHOUSE_NAME"))["id"]
+    return {"configuration": {"instructions": (ctx.root / AGENT_TEXT).read_text(encoding="utf-8"),
+                              "dataSources": {database: {"id": database, "type": "KustoDatabase", "workspaceId": workspace_id(ctx)}},
+                              "actions": {}},
+            "playbook": {}, "shouldRun": False}
+
+
+def act_create_agent(ctx) -> None:
+    body = {"displayName": OPERATIONS_AGENT,
+            "description": f"Northwind Ridge wind farm demo, deployment {ctx.cfg['DEPLOYMENT_SUFFIX']}: watches the gearboxes.",
+            **encode_definition(AGENT_PART, agent_document(ctx))}
+    body["definition"]["format"] = AGENT_FORMAT          # as the sample request of Create Operations Agent has it
+    try:
+        operation(ctx, "operations-agent", lambda: ctx.fabric.call("POST", f"workspaces/{workspace_id(ctx)}/operationsAgents", body))
+    except CloudError as error:
+        if error.code == UNREACHED:
+            raise
+        raise Blocked(f"Fabric did not create the operations agent from its definition: {error}",
+                      OPERATIONS_AGENT_STEPS + "\nThat line of Fabric's is what to send me. The runner does not try another form of the request.") from None
+
+
+def agent_state(ctx) -> dict:
+    """What the agent's definition says of it: whether it has a playbook, how many rules, whether it is to run."""
+    def read():
+        found = item(ctx, "OperationsAgent", OPERATIONS_AGENT)
+        answer = ctx.fabric.long_running("POST", f"workspaces/{workspace_id(ctx)}/operationsAgents/{found['id']}/getDefinition")
+        _path, document = decode_definition(answer)
+        playbook = document.get("playbook") or {}
+        # The reference calls the playbook reserved. What this tenant returned on 24 November 2026 held its rules under
+        # RuleDefinitions; a playbook without that key is counted as a playbook, and its rules are not.
+        rules = next((playbook[key] for key in ("RuleDefinitions", "ruleDefinitions") if isinstance(playbook.get(key), list)), None)
+        return {"playbook": bool(playbook), "rules": None if rules is None else len(rules), "running": document.get("shouldRun") is True}
+    return ctx.remember("operations agent", read)
+
+
+def p3_agent_started(ctx) -> Probe:
+    if not workspace_id(ctx) or not item(ctx, "OperationsAgent", OPERATIONS_AGENT):
+        return after("p3.operations_agent_item")
+    try:
+        state = agent_state(ctx)
+    except (CloudError, FabricError) as error:
+        if getattr(error, "code", "") == UNREACHED:
+            raise
+        return unverified(f"an item {OPERATIONS_AGENT} exists, and its definition could not be read ({error}). That is not proof "
+                          "that the agent has a playbook or is started")
+    if not state["playbook"] or state["rules"] == 0:
+        return todo("the agent has no playbook yet")
+    rules = "a playbook" if state["rules"] is None else f"a playbook with {state['rules']} rule{'s' if state['rules'] != 1 else ''}"
+    if not state["running"]:
+        return todo(f"the agent has {rules} and is not started")
+    return done(f"operations agent {OPERATIONS_AGENT}: {rules}, started. Whether its message reaches Teams, the runner cannot read")
+
+
+def agent_steps_with_the_api() -> list[Step]:
+    return [
+        Step("p3.operations_agent_item", "phase3", "Operations agent created, with its instructions and its data source",
+             lambda ctx: (done(f"operations agent {OPERATIONS_AGENT} exists") if item(ctx, "OperationsAgent", OPERATIONS_AGENT) else todo())
+             if workspace_id(ctx) and item(ctx, "KQLDatabase", name(ctx, "EVENTHOUSE_NAME")) else after("p1.eventhouse"),
+             act_create_agent, needs=("preview:operations-agent",), inputs=(AGENT_TEXT,), wait_seconds=60,
+             writes=f"the operations agent {OPERATIONS_AGENT}: the instructions of {AGENT_TEXT}, the KQL database as its data source, "
+                    "no action, no playbook, not started",
+             basis="Operations Agent - Create Operations Agent (preview, a person only); Operations agent definition", proof="none"),
+        Step("p3.operations_agent", "phase3", "Operations agent: playbook generated and read, agent started, Teams app installed",
+             p3_agent_started, manual=AGENT_YOURS,
+             basis="Operations Agent - Get Operations Agent Definition (preview), for the look; the playbook and the start: portal only",
+             proof="none"),
+    ]
+
+
 def phase3(options: Options) -> list[Step]:
     settings_probe, settings_manual = tenant_settings("phase3")
     preview_agent = "preview:data-agent-sdk"
@@ -167,7 +265,7 @@ def phase3(options: Options) -> list[Step]:
              inputs=tuple(f"fabric/notebooks/{n}.ipynb" for n in NOTEBOOKS["phase3"]), wait_seconds=60,
              writes="three notebooks", basis="Notebook - Create Notebook (definition, ipynb)"),
         pip_notebook("p3.data_agent", "phase3", "Data agent built (notebook 09)", "09_build_data_agent", "p3.notebooks", options,
-                     artifact=("DataAgent", DATA_AGENT), needs=(preview_agent,) if PIP in options.granted else (),
+                     artifact=("DataAgent", DATA_AGENT), preview=preview_agent,
                      expect="It creates and publishes the data agent with a pre-release of Microsoft's SDK (0.1.36a0)."),
         pip_notebook("p3.data_agent_test", "phase3", "Data agent tested (notebook 10)", "10_test_data_agent", "p3.notebooks",
                      options, optional=True, expect="About 39 of 52 questions pass; one run is good to about two questions."),
@@ -185,11 +283,14 @@ def phase3(options: Options) -> list[Step]:
              lambda ctx: run_kql_file(ctx, "fabric/kql/05-agent-readiness.kql"), inputs=("fabric/kql/05-agent-readiness.kql",),
              writes="descriptions of the columns, and the table GearboxVsFleetLive with its update policy",
              basis="Kusto REST API, .execute database script"),
-        Step("p3.operations_agent", "phase3", "Operations agent set up and started, Teams app installed",
-             lambda ctx: (done(f"an item {OPERATIONS_AGENT} exists. That is not proof that the agent is configured, running or "
-                               "delivering to Teams: the runner cannot read any of that")
-                          if item(ctx, "OperationsAgent", OPERATIONS_AGENT) else todo()) if workspace_id(ctx) else after("p1.workspace"),
-             manual=OPERATIONS_AGENT_STEPS, basis="none: portal only (preview)", proof="live"),
+        *(agent_steps_with_the_api() if "preview:operations-agent" in options.granted else [
+            Step("p3.operations_agent", "phase3", "Operations agent set up and started, Teams app installed",
+                 lambda ctx: (done(f"an item {OPERATIONS_AGENT} exists. That is not proof that the agent is configured, running or "
+                                   "delivering to Teams: the runner cannot read any of that")
+                              if item(ctx, "OperationsAgent", OPERATIONS_AGENT) else todo()) if workspace_id(ctx) else after("p1.workspace"),
+                 manual=OPERATIONS_AGENT_STEPS + "\nTo have the runner create the agent with its instructions and its data source, so that "
+                 "only the playbook and the start are yours: --allow-preview operations-agent.",
+                 basis="none: portal only (preview)", proof="live")]),
     ]
 
 
