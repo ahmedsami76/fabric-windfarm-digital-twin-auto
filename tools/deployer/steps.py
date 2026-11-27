@@ -1394,7 +1394,7 @@ def notebooks_probe(group: str, prerequisite: str):
         if not item(ctx, "Lakehouse", name(ctx, "FABRIC_LAKEHOUSE_NAME")):
             return after(prerequisite)
         missing = [display for display, found in notebook_ids(ctx, group).items() if not found]
-        return todo(f"{len(missing)} of {len(NOTEBOOKS[group])} to import") if missing else done(f"{len(NOTEBOOKS[group])} notebooks imported")
+        return todo(f"{len(missing)} of {len(NOTEBOOKS[group])} to import") if missing else done(f"{len(NOTEBOOKS[group])} notebook{'s' if len(NOTEBOOKS[group]) != 1 else ''} imported")
     return probe
 
 

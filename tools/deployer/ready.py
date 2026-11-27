@@ -16,7 +16,7 @@ import re
 
 from .core import EXIT_OK, PHASES, Blocked, Context, Refused, StepFailed
 from .steps import freshness, kql_database
-from .steps_later import build_stamp, command_flow
+from .steps_later import agent_state, build_stamp, command_flow
 
 TELEMETRY_MAX_AGE = 180                                  # seconds: the limit of the telemetry gate of Phase 1
 APP_MAX_AGE = {"lakehouse": 900, "eventhouse": 120}      # seconds, per route of the twin: what counts as fresh data there
@@ -49,6 +49,28 @@ def telemetry_now(ctx: Context) -> tuple[bool, str]:
             f"{seen['age_seconds'] if seen['age_seconds'] is not None else '?'} s old")
     fresh = bool(seen["rows"]) and seen["turbines"] >= 12 and (seen["age_seconds"] if seen["age_seconds"] is not None else 9999) <= TELEMETRY_MAX_AGE
     return fresh, text
+
+
+def agent_words(ctx: Context) -> str:
+    """What is known of the operations agent at this moment, short of a message a person saw in Teams.
+
+    On 26 November 2026 this line said "a playbook and a started agent" under a block that said "is not started": it was
+    written from the step being complete, and the step of Phase 3 is complete while the agent is stopped for its change
+    to the Phase 5b setup. It is now written from the agent's definition, read in this run."""
+    if "preview:operations-agent" not in ctx.options.granted:        # then no step read the agent's definition
+        return "the operations agent: an item exists, which is not proof that it is configured, running or delivering to Teams."
+    try:
+        state = agent_state(ctx)
+    except Exception as error:      # noqa: BLE001  the report never ends on a question it could not ask
+        return (f"the operations agent: its definition could not be read just now ({str(error)[:100]}), so nothing is known "
+                "of its playbook or of whether it is started.")
+    playbook = bool(state["playbook"]) and state["rules"] != 0
+    if playbook and state["running"]:
+        return "the operations agent: its definition shows a playbook and a started agent, which is not proof that it delivers to Teams."
+    has = "a playbook" if playbook else "no playbook"
+    step = "p5b.agent" if ctx.options.phase5bc else "p3.operations_agent"
+    return (f"the operations agent: its definition shows {has} and an agent that is not started, so it delivers nothing to "
+            f"Teams now ({step} says what is missing).")
 
 
 def report(ctx: Context, steps: list, code: int | None) -> list[str]:
@@ -84,11 +106,7 @@ def report(ctx: Context, steps: list, code: int | None) -> list[str]:
         if agent:
             said.append(f"operations agent: a Teams message seen, confirmed by {agent.get('by')} at {agent.get('at')}")
         elif _complete(ctx, "p3.operations_agent"):
-            seen = "preview:operations-agent" in ctx.options.granted        # then the step read the agent's definition
-            why.append(("the operations agent: its definition shows a playbook and a started agent, which is not proof that it "
-                        "delivers to Teams." if seen else
-                        "the operations agent: an item exists, which is not proof that it is configured, running or delivering "
-                        "to Teams.") + " When you have seen its message in Teams: --confirm p3.agent_message")
+            why.append(agent_words(ctx) + " When you have seen its message in Teams: --confirm p3.agent_message")
     if PHASES.index(up_to) >= PHASES.index("phase4"):
         expected, check = build_stamp(ctx, APP_BUILD), ctx.state.data.get("app_check") or ctx.offered.get("app_check")
         probe = (ctx.state.step("p4.gate_data_route").get("evidence") or {}).get("passed")

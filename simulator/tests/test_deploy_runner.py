@@ -2715,6 +2715,7 @@ def test_phases_5b_and_5c_are_provisioned_and_nothing_is_sent_and_the_agents_new
     assert world.dataflows["fabric-to-windfarm-control"]["properties"]["mode"] == "Disabled"
     assert {"GearboxDecisionLive", "EdgeCommands"} <= world.kql["tables"] and "CommandLog" in world.kql["functions"]
     assert all(f"done     {step}" in text for step in ("p5a.command_path", "p5a.notebook", "p5b.decision_table", "p5c.command_log", "p5c.notebook")), text[-2500:]
+    assert "done     p5a.notebook: 1 notebook imported" in text and "1 notebooks" not in text
     twelve, thirteen = world.find(ws, "Notebook", "12_send_edge_command"), world.find(ws, "Notebook", "13_command_center")
     assert twelve and thirteen and twelve["id"] not in world.jobs and thirteen["id"] not in world.jobs
     # and stops at what changes the agent: a person's, with the steps by hand and what the runner read
@@ -2732,14 +2733,20 @@ def test_phases_5b_and_5c_are_provisioned_and_nothing_is_sent_and_the_agents_new
     assert "blocked  p5b.agent" in text and "the Phase 5b instructions and the action, and no playbook yet" in text
     # the look of Phase 3 does not call its finished step undone while the agent is stopped for its change
     assert "blocked  p3.operations_agent" not in text and "done     p3.operations_agent: operations agent WindFarmGearboxWatch: changed, or being changed, to its Phase 5b setup" in text
+    # 26 November 2026, on a tenant: under that block the report said "a playbook and a started agent". It is read now
+    assert "its definition shows no playbook and an agent that is not started, so it delivers nothing to Teams now (p5b.agent says what is missing)" in text
+    assert "a started agent" not in text
     made["playbook"] = {"RuleDefinitions": {"one": {}}, "OntologyDefinitions": {}}
-    assert "a playbook with 1 rule, and is not started" in later(deployed, *options)[1]
+    text = later(deployed, *options)[1]
+    assert "a playbook with 1 rule, and is not started" in text
+    assert "its definition shows a playbook and an agent that is not started" in text and "a started agent" not in text
     made["shouldRun"] = True
     writes = list(world.writes)
     code, text = later(deployed, *options)
     assert code == 0, text[-1500:]
     assert "done     p5b.agent: operations agent WindFarmGearboxWatch: the Phase 5b instructions, the action 'Curtail turbine' on notebook 12_send_edge_command, a playbook with 1 rule, started" in text
     assert "optional p5.show" in text and "provisioned   yes" in text
+    assert "its definition shows a playbook and a started agent, which is not proof that it delivers to Teams" in text
     # provisioned is not demo-ready: the path is switched off, and switching it on is a person's
     assert "demo-ready    no" in text and "Phase 5: the command path is switched off, as the runner made it" in text
     assert world.writes == writes                              # a finished Phase 5 applied again changes nothing
@@ -2762,6 +2769,8 @@ def test_phases_5b_and_5c_are_provisioned_and_nothing_is_sent_and_the_agents_new
     world.agent_unreadable = True
     plan = deployed.run("plan", ROLES, "--up-to", "phase4", *options)[1]
     assert re.search(r"p5b\.agent\s+NOT CHECKED", plan) and "not proof that it has its Phase 5b setup" in plan
+    text = later(deployed, *options)[1]             # and the report claims neither a playbook nor a start
+    assert "the operations agent: its definition could not be read just now" in text and "a started agent" not in text
 
 
 def test_the_lakehouse_an_ontology_brings_with_it_is_the_demos_and_another_one_is_not(deployed):
